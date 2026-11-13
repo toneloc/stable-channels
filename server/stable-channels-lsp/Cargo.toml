@@ -62,3 +62,4 @@ thiserror        = "1"
 [dev-dependencies]
 getrandom        = "0.2"
 tempfile         = "3"
+tokio            = { version = "1", features = ["test-util"] }

@@ -4,11 +4,15 @@ on:
   pull_request:
     paths:
       - 'android/**'
+      - 'mobile/force-close/**'
+      - 'Cargo.lock'
       - '.github/workflows/android-tests.yml'
   push:
     branches: [main]
     paths:
       - 'android/**'
+      - 'mobile/force-close/**'
+      - 'Cargo.lock'
       - '.github/workflows/android-tests.yml'
 
 permissions:
@@ -22,7 +26,7 @@ jobs:
   test-android:
     name: Android Unit Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
 
     env:
       GRADLE_OPTS: "-Xmx3g -XX:+UseG1GC"
@@ -47,6 +51,12 @@ jobs:
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build sc-force-close (native library and Kotlin bindings)
+        working-directory: .
+        run: mobile/force-close/build-android.sh
 
       # JVM unit tests (includes PriceOracleTest.kt — the cross-platform oracle parity suite).
       - name: Run unit tests

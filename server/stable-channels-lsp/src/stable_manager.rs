@@ -8,7 +8,8 @@ use ldk_server_client::client::LdkServerClient;
 use ldk_server_client::error::{LdkServerError, LdkServerErrorCode};
 use ldk_server_client::ldk_server_grpc::api::{
     GetBalancesRequest, GetBalancesResponse, GetForwardedPaymentTrackingModeRequest,
-    GetForwardedPaymentTrackingModeResponse, GetPaymentDetailsRequest, GetPaymentDetailsResponse,
+    GetForwardedPaymentTrackingModeResponse, GetNodeInfoRequest, GetNodeInfoResponse,
+    GetPaymentDetailsRequest, GetPaymentDetailsResponse,
     ListChannelsRequest, ListChannelsResponse, ListForwardedPaymentsRequest,
     ListForwardedPaymentsResponse, ListPeersRequest, ListPeersResponse, ListPaymentsRequest,
     ListPaymentsResponse, SignMessageRequest, SignMessageResponse, SpliceInRequest,
@@ -245,6 +246,12 @@ pub trait LdkServerCalls: Send + Sync {
     ) -> Result<GetForwardedPaymentTrackingModeResponse, LdkServerError> {
         Ok(GetForwardedPaymentTrackingModeResponse::default())
     }
+    async fn get_node_info(
+        &self,
+        _req: GetNodeInfoRequest,
+    ) -> Result<GetNodeInfoResponse, LdkServerError> {
+        Ok(GetNodeInfoResponse::default())
+    }
     /// Splice on-chain funds into a channel. The node answers once it has sent `splice_init`; the negotiation itself reports through events.
     async fn splice_in(
         &self,
@@ -279,6 +286,12 @@ impl LdkServerCalls for LdkServerClient {
         req: VerifySignatureRequest,
     ) -> Result<VerifySignatureResponse, LdkServerError> {
         LdkServerClient::verify_signature(self, req).await
+    }
+    async fn get_node_info(
+        &self,
+        req: GetNodeInfoRequest,
+    ) -> Result<GetNodeInfoResponse, LdkServerError> {
+        LdkServerClient::get_node_info(self, req).await
     }
     async fn list_forwarded_payments(
         &self,
@@ -429,6 +442,8 @@ pub struct StableChannelManager {
     pending_splices: std::collections::HashMap<u128, Option<String>>,
     /// Daily counts of records of channels that never became usable, and of connection changes.
     pub(crate) record_limits: crate::record_limits::RecordLimits,
+    /// Listed channels, not ready yet, whose confirmed funding is known to have an opening record.
+    openings_on_record: std::collections::HashSet<String>,
     pending_book_updates: std::collections::HashMap<u128, PendingBookUpdate>,
     /// Per-channel last logged stability outcome + value, so run_tick only audits on state-change.
     stability_throttle: std::collections::HashMap<u128, (String, f64)>,
@@ -1166,6 +1181,7 @@ impl StableChannelManager {
             data_dir,
             pending_splices: std::collections::HashMap::new(),
             record_limits: crate::record_limits::RecordLimits::default(),
+            openings_on_record: std::collections::HashSet::new(),
             pending_book_updates: std::collections::HashMap::new(),
             stability_throttle: std::collections::HashMap::new(),
             spend_debounce: std::collections::HashMap::new(),
@@ -1620,6 +1636,42 @@ impl StableChannelManager {
                 reason.as_ref(),
             ),
         );
+    }
+
+    /// Record the opening of a channel whose funding confirmed before it became ready, if the peers' daily limit held it back: a wallet restored after a close before ready finds it only there, and a confirmed funding costs its opener a transaction.
+    pub(crate) fn record_confirmed_openings(&mut self, channels: &[Channel]) {
+        let not_ready: std::collections::HashSet<&str> = channels.iter().filter(|c| !c.is_channel_ready).map(|c| c.channel_id.as_str()).collect();
+        self.openings_on_record.retain(|id| not_ready.contains(id.as_str()));
+        // LDK also reports a channel that is shutting down as not ready, so only one never shut down counts as an opening.
+        let not_shutting_down = |c: &Channel| c.channel_shutdown_state.map_or(true, |s| s == ldk_server_client::ldk_server_grpc::types::ChannelShutdownState::NotShuttingDown as i32);
+        for c in channels.iter().filter(|c| !c.is_channel_ready && not_shutting_down(c) && c.confirmations.unwrap_or(0) > 0) {
+            let Some(txo) = c.funding_txo.as_ref() else { continue };
+            if self.openings_on_record.contains(&c.channel_id) {
+                continue;
+            }
+            let on_record = match self.db.ledger_channel_rows_by_ref("channel_id", &c.channel_id, &["CHANNEL_PENDING"]) {
+                Ok(rows) => rows.iter().any(|row| row.funding_txo.is_some()),
+                Err(e) => {
+                    tracing::warn!("[stable] reading the opening record of {} failed: {}", c.channel_id, e);
+                    continue;
+                }
+            };
+            if !on_record {
+                let mut data = crate::channel_audit::pending_audit_data(
+                    &c.channel_id,
+                    &c.user_channel_id,
+                    Some(&c.counterparty_node_id),
+                    Some(&format!("{}:{}", txo.txid, txo.vout)),
+                    None,
+                );
+                data["source"] = serde_json::json!("funding_confirmed");
+                if let Err(e) = stable_channels::audit::record_event("CHANNEL_PENDING", data) {
+                    tracing::warn!("[stable] recording the opening of {} failed: {}", c.channel_id, e);
+                    continue;
+                }
+            }
+            self.openings_on_record.insert(c.channel_id.clone());
+        }
     }
 
     /// Counterparties and user_channel_ids of the channels that became usable.
@@ -5201,6 +5253,93 @@ pub(crate) mod tests {
         assert_eq!(closes(OTHER_PEER), 1, "another peer has its own limit");
         assert!(events.iter().any(|(name, data)| name == "CHANNEL_CLOSED" && data["user_channel_id"] == USER_CHANNEL_ID_DECIMAL));
         assert!(mgr.stable_channels.is_empty());
+    }
+
+    const OPENING_TXID: &str = "a2a93969722ff1335da9b6b2c029a1f754cfd4ccfea0740a0bf0a41c641a3e86";
+
+    /// A channel the node lists before it is ready, its funding at `confirmations`.
+    fn opening(confirmations: Option<u32>) -> GrpcChannel {
+        GrpcChannel {
+            is_channel_ready: false,
+            confirmations,
+            funding_txo: Some(ldk_server_client::ldk_server_grpc::types::OutPoint { txid: OPENING_TXID.into(), vout: 1 }),
+            ..make_channel(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 0, false)
+        }
+    }
+
+    fn openings_recorded(events: &[(String, serde_json::Value)]) -> Vec<serde_json::Value> {
+        events.iter().filter(|(name, _)| name == "CHANNEL_PENDING").map(|(_, data)| data.clone()).collect()
+    }
+
+    #[test]
+    fn an_opening_the_daily_limit_held_back_is_recorded_once_its_funding_confirms() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let mut mgr = make_manager();
+        // A ledger whose directory is gone refuses every write.
+        let gone = tempdir().unwrap();
+        let broken = stable_channels::db::Database::open(gone.path()).unwrap();
+        drop(gone);
+        stable_channels::audit::set_audit_ledger(broken);
+        stable_channels::audit::enable_test_capture();
+        // An unconfirmed funding costs its opener nothing, so it stays held back.
+        for unconfirmed in [None, Some(0)] {
+            mgr.record_confirmed_openings(&[opening(unconfirmed)]);
+        }
+        assert!(openings_recorded(&stable_channels::audit::drain_test_capture()).is_empty());
+        // The write fails, so the next tick tries again; once written, it is not written again.
+        mgr.record_confirmed_openings(&[opening(Some(1))]);
+        stable_channels::audit::set_audit_ledger((*mgr.db).clone());
+        for _ in 0..2 {
+            mgr.record_confirmed_openings(&[opening(Some(1))]);
+        }
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+
+        let tried = openings_recorded(&events);
+        assert_eq!(tried.len(), 2, "one failed write, one written: {tried:?}");
+        assert_eq!(tried[1]["funding_txo"], format!("{OPENING_TXID}:1"));
+        assert_eq!(tried[1]["counterparty_node_id"], COUNTERPARTY_HEX);
+        assert_eq!(tried[1]["user_channel_id"], USER_CHANNEL_ID_DECIMAL);
+        assert_eq!(tried[1]["source"], "funding_confirmed");
+        // The row the funding outpoints route reads, by the node it names.
+        let rows = mgr.db.ledger_channel_rows_by_ref("node_id", COUNTERPARTY_HEX, &["CHANNEL_PENDING"]).unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].funding_txo.as_deref(), Some(format!("{OPENING_TXID}:1").as_str()));
+        // Only channels that aren't ready yet are remembered.
+        assert_eq!(mgr.openings_on_record.len(), 1);
+        mgr.record_confirmed_openings(&[GrpcChannel { is_channel_ready: true, ..opening(Some(6)) }]);
+        assert!(mgr.openings_on_record.is_empty());
+    }
+
+    #[test]
+    fn an_opening_already_on_record_or_a_ready_channel_is_not_recorded_again() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let mut mgr = make_manager();
+        // The CHANNEL_PENDING the event wrote while the limit allowed it, read back after a restart.
+        let data = crate::channel_audit::pending_audit_data(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, Some(COUNTERPARTY_HEX), Some(&format!("{OPENING_TXID}:1")), None);
+        mgr.db.append_ledger_event(&stable_channels::ledger::LedgerEventDraft::from_audit_event("CHANNEL_PENDING", data)).unwrap();
+        let ready = GrpcChannel {
+            confirmations: Some(6),
+            funding_txo: opening(None).funding_txo,
+            ..make_channel(&format!("{:064x}", 7), OTHER_USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 0, true)
+        };
+        // LDK reports a channel that is shutting down as not ready; it is not an opening.
+        let closing = GrpcChannel {
+            channel_shutdown_state: Some(ldk_server_client::ldk_server_grpc::types::ChannelShutdownState::ShutdownInitiated as i32),
+            confirmations: Some(400),
+            ..opening(None)
+        };
+        let closing = GrpcChannel { channel_id: format!("{:064x}", 9), user_channel_id: OTHER_USER_CHANNEL_ID_DECIMAL.into(), ..closing };
+        stable_channels::audit::enable_test_capture();
+        mgr.record_confirmed_openings(&[opening(Some(3)), ready, closing.clone()]);
+        let events = stable_channels::audit::drain_test_capture();
+        assert!(openings_recorded(&events).is_empty(), "{events:?}");
+        // The same channel before its shutdown is recorded.
+        let not_shutting_down = ldk_server_client::ldk_server_grpc::types::ChannelShutdownState::NotShuttingDown as i32;
+        mgr.record_confirmed_openings(&[GrpcChannel { channel_shutdown_state: Some(not_shutting_down), ..closing }]);
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        assert_eq!(openings_recorded(&events).len(), 1, "{events:?}");
     }
 
     #[tokio::test]

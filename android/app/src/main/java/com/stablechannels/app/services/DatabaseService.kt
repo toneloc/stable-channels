@@ -2014,6 +2014,26 @@ class DatabaseService(context: Context) :
         ) > 0
     }
 
+    /**
+     * Points a channel close row at the close that confirmed, when another close replaced the one
+     * it recorded (#456). Explorers report any txid they don't know as unconfirmed, so the row
+     * would stay at 0 confirmations. Returns whether it wrote.
+     */
+    fun replaceChannelCloseTxid(paymentId: String, txid: String): Boolean {
+        val cv =
+            ContentValues().apply {
+                put("txid", txid)
+                put("confirmations", 0)
+            }
+        return writableDatabase.update(
+            "payments",
+            cv,
+            "payment_id = ? AND payment_type = 'channel_close' AND (txid IS NULL OR txid != ?) " +
+                "AND NOT EXISTS (SELECT 1 FROM payments p WHERE p.txid = ?)",
+            arrayOf(paymentId, txid, txid),
+        ) > 0
+    }
+
     fun updatePaymentStatus(paymentId: String, status: String, feeMsat: Long = 0) {
         val cv =
             ContentValues().apply {
@@ -2754,6 +2774,19 @@ class DatabaseService(context: Context) :
             )
         return cursor.use { it.moveToFirst() }
     }
+
+    /**
+     * Whether a move of ours that has not failed or expired spends [fundingTxid], the channel's
+     * funding output as LDK reports it. LDK reports the pre-splice output until the splice locks,
+     * which comes after it confirms (#456).
+     */
+    fun moveSpends(userChannelId: String, fundingTxid: String): Boolean =
+        readableDatabase
+            .rawQuery(
+                "SELECT 1 FROM splice_operations s JOIN payments p ON p.id = s.payment_row_id WHERE s.user_channel_id = ? AND s.previous_funding_txid = ? AND p.status IN ('pending', 'completed') LIMIT 1",
+                arrayOf(userChannelId, fundingTxid),
+            )
+            .use { it.moveToFirst() }
 
     // --- Prices ---
 

@@ -112,6 +112,53 @@ class CloseTxidConfirmationDatabaseServiceTest {
         service.close()
     }
 
+    @Test
+    fun replacesACloseThatAnotherCloseReplaced() {
+        // #456: the row recorded our close, then the LSP's close replaced it and confirmed.
+        val service = DatabaseService(context)
+        service.recordPayment(
+            paymentId = "close-1",
+            paymentType = "channel_close",
+            direction = "received",
+            amountMsat = 500_000,
+            status = "pending",
+            txid = "our-close",
+        )
+
+        assertTrue(service.replaceChannelCloseTxid("close-1", "lsp-close"))
+
+        assertEquals("lsp-close", service.getPaymentTxid("close-1"))
+        assertEquals(0, service.getConfirmationsForCloseTxid("lsp-close"))
+        assertEquals(false, service.replaceChannelCloseTxid("close-1", "lsp-close"))
+        service.close()
+    }
+
+    @Test
+    fun replacesOnlyChannelCloseRowsAndNeverDuplicatesATxid() {
+        val service = DatabaseService(context)
+        service.recordPayment(
+            paymentId = "onchain-1",
+            paymentType = "onchain",
+            direction = "received",
+            amountMsat = 500_000,
+            status = "pending",
+            txid = "deposit",
+        )
+        service.recordPayment(
+            paymentId = "close-1",
+            paymentType = "channel_close",
+            direction = "received",
+            amountMsat = 500_000,
+            status = "pending",
+            txid = "our-close",
+        )
+
+        assertEquals(false, service.replaceChannelCloseTxid("onchain-1", "lsp-close"))
+        assertEquals(false, service.replaceChannelCloseTxid("close-1", "deposit"))
+        assertEquals("our-close", service.getPaymentTxid("close-1"))
+        service.close()
+    }
+
     private fun deleteDatabaseFiles() {
         listOf(dbFile, File("${dbFile.path}-wal"), File("${dbFile.path}-shm")).forEach { file ->
             if (file.exists()) assertTrue(file.delete())

@@ -28,7 +28,9 @@ static AUDIT_LOG_PATH: OnceLock<String> = OnceLock::new();
 static AUDIT_LEDGER: Mutex<Option<Database>> = Mutex::new(None);
 
 pub fn set_audit_log_path(path: &str) {
-    let _ = AUDIT_LOG_PATH.set(path.to_owned());
+    if AUDIT_LOG_PATH.set(path.to_owned()).is_ok() {
+        restrict_existing_logs(std::path::Path::new(path));
+    }
 }
 
 pub fn get_audit_log_path() -> Option<&'static str> {
@@ -105,7 +107,7 @@ fn mirror_event_at(
     ledger_id: Option<i64>,
 ) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        create_log_dir_all(parent)?;
     }
 
     let mut log_line = serde_json::json!({
@@ -121,9 +123,83 @@ fn mirror_event_at(
     // so concurrent calls can interleave into corrupt lines.
     let mut line = log_line.to_string();
     line.push('\n');
-    rotate_if_oversize(path);
-    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
-    file.write_all(line.as_bytes())
+    let rotated_permissions = rotate_if_oversize(path);
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    // Best effort: a mode that cannot be changed must not cost the line.
+    #[cfg(unix)]
+    match rotated_permissions {
+        // The new file takes the old one's mode under the log rule in one step, so it is never briefly readable by others.
+        Some(permissions) => {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = (permissions.mode() & 0o777 & !LOG_MODE_REMOVED) | 0o600;
+            let _ = file.set_permissions(std::fs::Permissions::from_mode(mode));
+        },
+        None => {
+            let _ = restrict_log_mode(&file);
+        },
+    }
+    #[cfg(not(unix))]
+    let _ = rotated_permissions;
+    (&file).write_all(line.as_bytes())
+}
+
+/// Create the log's directory and any missing parents; on Unix they are readable by their owner only.
+fn create_log_dir_all(dir: &std::path::Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir)
+}
+
+/// Bits a log file loses: it holds payment details, so no access for other users, and only the daemon writes it, so no group write; group read stays for log readers.
+#[cfg(unix)]
+const LOG_MODE_REMOVED: u32 = 0o027;
+
+/// Narrow the live log and its rotated generation, which an older version created readable by other users.
+fn restrict_existing_logs(path: &std::path::Path) {
+    #[cfg(unix)]
+    for log in [path.to_path_buf(), rotated_path(path)] {
+        let _ = restrict_log_file_at(&log);
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+#[cfg(unix)]
+fn restrict_log_file_at(path: &std::path::Path) -> std::io::Result<()> {
+    // Only a regular file: opening a FIFO would block startup, and a symlinked `.1` points at a file the log does not own.
+    if !std::fs::symlink_metadata(path)?.is_file() {
+        return Ok(());
+    }
+    restrict_log_mode(&std::fs::File::open(path)?)
+}
+
+#[cfg(unix)]
+fn restrict_log_mode(file: &std::fs::File) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = file.metadata()?;
+    let mode = metadata.permissions().mode() & 0o777;
+    if metadata.is_file() && mode & LOG_MODE_REMOVED != 0 {
+        file.set_permissions(std::fs::Permissions::from_mode(mode & !LOG_MODE_REMOVED))?;
+    }
+    Ok(())
+}
+
+fn rotated_path(path: &std::path::Path) -> std::path::PathBuf {
+    let mut rotated = path.as_os_str().to_owned();
+    rotated.push(".1");
+    std::path::PathBuf::from(rotated)
 }
 
 /// Cap on the live audit log before it rotates. The file grows one line per event and events can
@@ -135,16 +211,18 @@ const AUDIT_LOG_MAX_BYTES: u64 = 50 * 1024 * 1024;
 /// Rotate `path` to `<path>.1` when it reaches the size cap, replacing any prior `.1`. Best-effort:
 /// any error leaves the current file in place so logging simply continues appending. The rename is
 /// atomic on a single filesystem; a couple of lines may land in the pre-rotation file if another
-/// thread appends between the size check and the rename, which is harmless.
-fn rotate_if_oversize(path: &std::path::Path) {
-    let over = std::fs::metadata(path)
-        .map(|meta| meta.len() >= AUDIT_LOG_MAX_BYTES)
-        .unwrap_or(false);
-    if over {
-        let mut rotated = path.as_os_str().to_owned();
-        rotated.push(".1");
-        let _ = std::fs::rename(path, std::path::PathBuf::from(rotated));
+/// thread appends between the size check and the rename, which is harmless. Returns the rotated
+/// file's permissions when it rotated, so the new live file can keep them.
+fn rotate_if_oversize(path: &std::path::Path) -> Option<std::fs::Permissions> {
+    let metadata = std::fs::metadata(path).ok()?;
+    if metadata.len() < AUDIT_LOG_MAX_BYTES {
+        return None;
     }
+    let rotated = rotated_path(path);
+    std::fs::rename(path, &rotated).ok()?;
+    #[cfg(unix)]
+    let _ = restrict_log_file_at(&rotated);
+    Some(metadata.permissions())
 }
 
 #[cfg(test)]
@@ -327,5 +405,88 @@ mod tests {
         assert_eq!(types, ["SYNC_RETRY_EXHAUSTED"]);
 
         *AUDIT_LEDGER.lock().unwrap() = None;
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_audit_log_is_created_private_and_never_readable_by_other_users_through_rotation() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode_of = |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let directory = tempfile::tempdir().unwrap();
+        let log_dir = directory.path().join("wallet");
+        let path = log_dir.join("audit_log.txt");
+
+        mirror_event_at(&path, "CHANNEL_READY", serde_json::json!({"n": 1}), Some(1)).unwrap();
+        assert_eq!(mode_of(&log_dir), 0o700);
+        assert_eq!(mode_of(&path), 0o600);
+
+        // A log left open from before loses other users' access and group write on the next write; group read stays.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o664)).unwrap();
+        mirror_event_at(&path, "CHANNEL_READY", serde_json::json!({"n": 2}), Some(2)).unwrap();
+        assert_eq!(mode_of(&path), 0o640);
+
+        // Rotating a file that was opened up again: both the rotated and the new file follow the rule.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_len(AUDIT_LOG_MAX_BYTES).unwrap();
+        mirror_event_at(&path, "CHANNEL_READY", serde_json::json!({"n": 3}), Some(3)).unwrap();
+        let rotated = log_dir.join("audit_log.txt.1");
+        assert!(rotated.exists());
+        assert_eq!(mode_of(&rotated), 0o640);
+        assert_eq!(mode_of(&path), 0o640);
+        let line: Value = serde_json::from_str(std::fs::read_to_string(&path).unwrap().trim()).unwrap();
+        assert_eq!(line["data"]["n"], 3);
+
+        // An operator's chmod 600 survives rotation too.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_len(AUDIT_LOG_MAX_BYTES).unwrap();
+        mirror_event_at(&path, "CHANNEL_READY", serde_json::json!({"n": 4}), Some(4)).unwrap();
+        assert_eq!(mode_of(&rotated), 0o600);
+        assert_eq!(mode_of(&path), 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn logs_an_older_version_left_open_are_narrowed_at_startup_but_a_symlink_is_left_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode_of = |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("audit_log.txt");
+        let rotated = directory.path().join("audit_log.txt.1");
+        for log in [&path, &rotated] {
+            std::fs::write(log, b"{}\n").unwrap();
+            std::fs::set_permissions(log, std::fs::Permissions::from_mode(0o664)).unwrap();
+        }
+
+        restrict_existing_logs(&path);
+
+        assert_eq!(mode_of(&path), 0o640);
+        assert_eq!(mode_of(&rotated), 0o640);
+
+        let elsewhere = directory.path().join("elsewhere");
+        std::fs::write(&elsewhere, b"not the log").unwrap();
+        std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o664)).unwrap();
+        std::fs::remove_file(&rotated).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &rotated).unwrap();
+
+        restrict_existing_logs(&path);
+
+        assert_eq!(mode_of(&elsewhere), 0o664);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_at_the_rotated_log_path_does_not_block_startup() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("audit_log.txt");
+        let rotated = directory.path().join("audit_log.txt.1");
+        assert!(std::process::Command::new("mkfifo").arg(&rotated).status().unwrap().success());
+
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            restrict_existing_logs(&path);
+            let _ = done.send(());
+        });
+
+        assert!(finished.recv_timeout(std::time::Duration::from_secs(5)).is_ok(), "startup blocked on a FIFO");
     }
 }

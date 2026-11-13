@@ -360,6 +360,38 @@ pub struct RevenueLedgerRow {
     pub detail_json: String,
 }
 
+/// The channel fields of a ledger row found through one of its references; a field is None unless the row holds it as a string.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LedgerChannelRow {
+    pub event_type: String,
+    pub occurred_at_ms: i64,
+    pub counterparty_node_id: Option<String>,
+    pub user_channel_id: Option<String>,
+    pub funding_txo: Option<String>,
+    pub channel_id: Option<String>,
+}
+
+/// SQL for the channel fields of ledger rows found through one reference, with `type_count` event-type placeholders; the rest of each row stays in SQLite.
+fn ledger_channel_rows_sql(type_count: usize, order: &str, limit: Option<usize>) -> String {
+    let types = vec!["?"; type_count].join(", ");
+    let limit = limit.map(|n| format!(" LIMIT {n}")).unwrap_or_default();
+    let field = |name: &str| {
+        format!(
+            "CASE WHEN json_valid(e.detail_json) THEN CASE WHEN json_type(e.detail_json, '$.{name}') = 'text' THEN json_extract(e.detail_json, '$.{name}') END END"
+        )
+    };
+    format!(
+        "SELECT e.event_type, e.occurred_at_ms, {}, {}, {}, {}
+         FROM ledger_event_refs r JOIN ledger_events e ON e.id = r.event_id
+         WHERE r.value = ? AND r.role = ? AND e.event_type IN ({types})
+         ORDER BY {order}{limit}",
+        field("counterparty_node_id"),
+        field("user_channel_id"),
+        field("funding_txo"),
+        field("channel_id"),
+    )
+}
+
 fn trade_decision_summary_row(row: &rusqlite::Row<'_>) -> SqliteResult<TradeDecisionSummary> {
     Ok(TradeDecisionSummary {
         inbound_payment_id: row.get(0)?,
@@ -1623,6 +1655,35 @@ impl Database {
         )?;
         let rows = stmt.query_map(params![after_id, up_to_id], |row| {
             Ok(RevenueLedgerRow { id: row.get(0)?, event_type: row.get(1)?, occurred_at_ms: row.get(2)?, detail_json: row.get(3)? })
+        })?;
+        rows.collect()
+    }
+
+    /// Channel fields of the ledger rows of the given event types that reference `value` under `role`, oldest first.
+    pub fn ledger_channel_rows_by_ref(&self, role: &str, value: &str, event_types: &[&str]) -> SqliteResult<Vec<LedgerChannelRow>> {
+        let sql = ledger_channel_rows_sql(event_types.len(), "e.occurred_at_ms, e.id", None);
+        self.query_ledger_channel_rows(&sql, role, value, event_types)
+    }
+
+    /// Channel fields of at most `limit` such rows, most recently recorded first.
+    pub fn newest_ledger_channel_rows_by_ref(&self, role: &str, value: &str, event_types: &[&str], limit: usize) -> SqliteResult<Vec<LedgerChannelRow>> {
+        let sql = ledger_channel_rows_sql(event_types.len(), "r.event_id DESC", Some(limit));
+        self.query_ledger_channel_rows(&sql, role, value, event_types)
+    }
+
+    fn query_ledger_channel_rows(&self, sql: &str, role: &str, value: &str, event_types: &[&str]) -> SqliteResult<Vec<LedgerChannelRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(sql)?;
+        let values = [value, role].into_iter().chain(event_types.iter().copied());
+        let rows = stmt.query_map(rusqlite::params_from_iter(values), |row| {
+            Ok(LedgerChannelRow {
+                event_type: row.get(0)?,
+                occurred_at_ms: row.get(1)?,
+                counterparty_node_id: row.get(2)?,
+                user_channel_id: row.get(3)?,
+                funding_txo: row.get(4)?,
+                channel_id: row.get(5)?,
+            })
         })?;
         rows.collect()
     }
@@ -5776,6 +5837,65 @@ mod tests {
         assert_eq!(all[0].occurred_at_ms, 5_000);
         let middle = db.revenue_ledger_rows_between(all[0].id, all[1].id).unwrap();
         assert_eq!(middle.iter().map(|r| r.event_type.as_str()).collect::<Vec<_>>(), ["CHANNEL_READY_SPLICE"], "the range is (after, up_to]");
+    }
+
+    #[test]
+    fn ledger_channel_rows_by_ref_match_the_role_value_and_type_in_time_order() {
+        use crate::ledger::LedgerEventDraft;
+        let db = Database::open_in_memory().unwrap();
+        let alice = "025a29399255108f82a158c7740053fb19933e3b874c68556deed6dd574da1c0f0";
+        let bob = "0380ba01cf1f8232298198ce1c6da12a7bd159656e79cbc22a5dfbea62ab1aef4b";
+        let uid = "5293213951182344713304712262222632001";
+        let txo = "a2a93969722ff1335da9b6b2c029a1f754cfd4ccfea0740a0bf0a41c641a3e86:1";
+        let channel = "863e1a641ca4f00b0a74a0fecc4dcf54f7a129c0b2b6a95d33f12f726939a9a3";
+        for (event, detail) in [
+            ("CHANNEL_PENDING", serde_json::json!({"channel_id": channel, "counterparty_node_id": alice, "user_channel_id": uid, "funding_txo": txo, "reason_message": "x".repeat(100_000), "occurred_at_ms": 3_000})),
+            ("PAYMENT_FORWARDED", serde_json::json!({"prev_node_id": alice, "next_node_id": bob, "occurred_at_ms": 2_000})),
+            ("SPLICE_NEGOTIATED", serde_json::json!({"channel_id": 7, "counterparty_node_id": alice, "user_channel_id": 7, "funding_txo": 7, "occurred_at_ms": 1_000})),
+            ("CHANNEL_PENDING", serde_json::json!({"counterparty_node_id": bob, "user_channel_id": "281056294790600824049085389430669369069", "occurred_at_ms": 4_000})),
+        ] {
+            db.append_ledger_event(&LedgerEventDraft::from_audit_event(event, detail)).unwrap();
+        }
+        let rows = db.ledger_channel_rows_by_ref("node_id", alice, &["CHANNEL_PENDING", "SPLICE_NEGOTIATED"]).unwrap();
+        // Oldest first, other types and other nodes left out; only the channel fields leave SQLite, and one that isn't a string reads as None.
+        assert_eq!(rows, [
+            LedgerChannelRow { event_type: "SPLICE_NEGOTIATED".into(), occurred_at_ms: 1_000, counterparty_node_id: Some(alice.into()), user_channel_id: None, funding_txo: None, channel_id: None },
+            LedgerChannelRow { event_type: "CHANNEL_PENDING".into(), occurred_at_ms: 3_000, counterparty_node_id: Some(alice.into()), user_channel_id: Some(uid.into()), funding_txo: Some(txo.into()), channel_id: Some(channel.into()) },
+        ]);
+        assert!(db.ledger_channel_rows_by_ref("user_channel_id", alice, &["CHANNEL_PENDING"]).unwrap().is_empty(), "a value under another role does not match");
+    }
+
+    #[test]
+    fn newest_ledger_channel_rows_by_ref_stop_at_the_limit_newest_first() {
+        use crate::ledger::LedgerEventDraft;
+        let db = Database::open_in_memory().unwrap();
+        let alice = "025a29399255108f82a158c7740053fb19933e3b874c68556deed6dd574da1c0f0";
+        let bob = "0380ba01cf1f8232298198ce1c6da12a7bd159656e79cbc22a5dfbea62ab1aef4b";
+        for (event, node) in [
+            ("CHANNEL_PENDING", alice),
+            ("SPLICE_NEGOTIATED", alice),
+            ("PEER_CONNECTED", alice),
+            ("CHANNEL_CLOSED", alice),
+            ("CHANNEL_PENDING", bob),
+        ] {
+            let detail = serde_json::json!({"counterparty_node_id": node, "node_id": node, "user_channel_id": "5293213951182344713304712262222632001", "occurred_at_ms": 1_000});
+            db.append_ledger_event(&LedgerEventDraft::from_audit_event(event, detail)).unwrap();
+        }
+        let types = ["CHANNEL_PENDING", "SPLICE_NEGOTIATED", "CHANNEL_CLOSED"];
+        let rows = db.newest_ledger_channel_rows_by_ref("node_id", alice, &types, 2).unwrap();
+        assert_eq!(rows.iter().map(|r| r.event_type.as_str()).collect::<Vec<_>>(), ["CHANNEL_CLOSED", "SPLICE_NEGOTIATED"], "newest recorded first, other types and nodes skipped");
+        assert_eq!(db.newest_ledger_channel_rows_by_ref("node_id", alice, &types, 10).unwrap().len(), 3);
+        // The index is walked newest first and the walk stops at the limit, without sorting every match.
+        let conn = db.conn.lock().unwrap();
+        let plan = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {}", ledger_channel_rows_sql(types.len(), "r.event_id DESC", Some(2))))
+            .unwrap()
+            .query_map(params![alice, "node_id", types[0], types[1], types[2]], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<SqliteResult<Vec<_>>>()
+            .unwrap()
+            .join(" ");
+        assert!(plan.contains("idx_ledger_refs_exact") && !plan.contains("TEMP B-TREE"), "query plan was {plan}");
     }
 
     #[test]

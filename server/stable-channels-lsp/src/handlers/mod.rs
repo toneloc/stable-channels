@@ -4,6 +4,7 @@ pub mod audit_log;
 pub mod channel_exists;
 pub mod channel_ledger;
 pub mod channels;
+pub mod funding_outpoints;
 pub mod graph;
 pub mod ldk_log;
 pub mod lightning;

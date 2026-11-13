@@ -186,13 +186,17 @@ pub fn random_node_alias(prefix: &str) -> Option<NodeAlias> {
     Some(NodeAlias(bytes))
 }
 
-pub fn random_entropy() -> NodeEntropy {
+pub fn random_seed() -> [u8; 64] {
     let mut rng = rand::rng();
     let mut seed = [0u8; 64];
     for byte in seed.iter_mut() {
         *byte = rng.random();
     }
-    NodeEntropy::from_seed_bytes(seed)
+    seed
+}
+
+pub fn random_entropy() -> NodeEntropy {
+    NodeEntropy::from_seed_bytes(random_seed())
 }
 
 // ================================================================
@@ -269,6 +273,16 @@ pub fn setup_user_node(
     lsp_pubkey: ldk_node::bitcoin::secp256k1::PublicKey,
     lsp_address: SocketAddress,
 ) -> Node {
+    setup_user_node_with_seed(electrsd, lsp_pubkey, lsp_address, random_seed())
+}
+
+/// Build a User node as above, from the given wallet seed
+pub fn setup_user_node_with_seed(
+    electrsd: &ElectrsD,
+    lsp_pubkey: ldk_node::bitcoin::secp256k1::PublicKey,
+    lsp_address: SocketAddress,
+    seed: [u8; 64],
+) -> Node {
     let mut config = Config::default();
     config.network = Network::Regtest;
     config.storage_dir_path = random_storage_path().to_str().unwrap().to_owned();
@@ -290,7 +304,7 @@ pub fn setup_user_node(
     // LSPS2 client
     builder.set_liquidity_source_lsps2(lsp_pubkey, lsp_address, None);
 
-    let node = builder.build(random_entropy()).unwrap();
+    let node = builder.build(NodeEntropy::from_seed_bytes(seed)).unwrap();
     node.start().unwrap();
     println!("[setup] User node started: {}", node.node_id());
     node

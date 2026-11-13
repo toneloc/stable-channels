@@ -144,13 +144,18 @@ network errors.
 - iOS 17.0+ deployment target
 - Apple Developer account with Push Notifications capability
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen) (for regenerating the Xcode project)
+- Rust, for the force close library
 
 ### Open in Xcode
 
 ```bash
+mobile/force-close/build-ios.sh
 cd ios/StableChannels
 open StableChannels.xcodeproj
 ```
+
+`build-ios.sh` builds the library the app uses to send its own force close. Run it again after
+changes in `mobile/force-close`.
 
 Select a device or simulator and build (Cmd+B) / run (Cmd+R).
 

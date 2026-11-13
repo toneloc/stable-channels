@@ -39,12 +39,15 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import org.lightningdevkit.ldknode.*
+import uniffi.sc_force_close.ForceCloseTransactions
 
 enum class Phase {
     LOADING,
@@ -1163,6 +1166,28 @@ class AppState(private val context: Context) : ViewModel() {
             },
         )
     private var toRemoteKeys: Pair<String, ToRemoteKeys>? = null
+
+    // The app's own close of a channel the user force closed (#456).
+    private val ownForceClose =
+        OwnForceClose(
+            http = httpClient,
+            chainUrls = { listOf(Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL) },
+            loadState = {
+                context
+                    .getSharedPreferences("own_force_close", Context.MODE_PRIVATE)
+                    .getString("state", null)
+            },
+            saveState = {
+                context
+                    .getSharedPreferences("own_force_close", Context.MODE_PRIVATE)
+                    .edit()
+                    .putString("state", it)
+                    .apply()
+            },
+        )
+    val ownForceCloseState: StateFlow<OwnForceClose.State?> = ownForceClose.state
+    /** Held while [buildOwnForceClose] has the node stopped, until it has started it again. */
+    private val ownForceCloseBuild = Mutex()
     private val paymentConfirmationPass =
         PaymentConfirmationPass(
             httpClient = httpClient,
@@ -1560,6 +1585,8 @@ class AppState(private val context: Context) : ViewModel() {
                 return@launch
             }
             cancelBackgroundStopAndAwait()
+            // A build of our own close has the node stopped and starts it again (#456).
+            ownForceCloseBuild.withLock {}
             if (nodeService.isRunning) {
                 Log.d("AppState", "Node still running (grace period), reconnecting")
                 loadChannelFromDB()
@@ -1976,6 +2003,142 @@ class AppState(private val context: Context) : ViewModel() {
             ),
         )
     }
+
+    /**
+     * Whether the emergency close waits for a move: from its start until LDK reports the splice's
+     * funding output, when the splice locks, after it confirms. Until then the app's own close
+     * would follow an output the splice spends (#456). Read from LDK and the splice rows each time,
+     * so a move that fails or expires stops counting. A database error leaves the close available.
+     */
+    fun emergencyCloseWaitsForMove(userChannelId: String, fundingTxid: String?): Boolean {
+        if (isSpliceInFlight || pendingSplice != null) return true
+        if (fundingTxid == null) return false
+        return try {
+            databaseService?.moveSpends(userChannelId, fundingTxid) == true
+        } catch (e: Exception) {
+            AuditService.log(
+                "MOVE_CHECK_FAILED",
+                mapOf("error" to (e.message ?: e.javaClass.simpleName)),
+            )
+            false
+        }
+    }
+
+    fun emergencyCloseWaitsForMove(channel: ChannelDetails): Boolean =
+        emergencyCloseWaitsForMove(channel.userChannelId, channel.fundingTxo?.txid)
+
+    /**
+     * The emergency close (#363), as [EmergencyClose] decides. [closeStarted] is a normal close
+     * this session started. The app broadcasts a force close itself (#456): ldk-node leaves the
+     * close of a channel with the trusted LSP to the LSP.
+     */
+    suspend fun emergencyCloseChannel(channel: ChannelDetails, closeStarted: Boolean) {
+        // The screen checks this before it tracks the close; checked again before LDK closes.
+        check(!emergencyCloseWaitsForMove(channel)) { EmergencyClose.MOVE_PENDING }
+        val node = nodeService.node
+        val lspOnline =
+            node?.listPeers()?.any { it.nodeId == channel.counterpartyNodeId && it.isConnected } ==
+                true
+        // LDK knows of a close under way also after a restart, or when the LSP started it.
+        val shutdownState =
+            node
+                ?.listChannels()
+                ?.firstOrNull { it.userChannelId == channel.userChannelId }
+                ?.channelShutdownState
+        val force = EmergencyClose.forcesAtOnce(closeStarted, lspOnline, shutdownState)
+        AuditService.log(
+            "CHANNEL_CLOSE_REQUESTED",
+            mapOf(
+                "user_channel_id" to channel.userChannelId,
+                "force" to force,
+                "lsp_online" to lspOnline,
+                "shutdown_state" to shutdownState?.name,
+            ),
+        )
+        val forced =
+            EmergencyClose.closeChannel(
+                force,
+                close = {
+                    setStatus("Closing channel...")
+                    nodeService.closeChannel(channel.userChannelId, channel.counterpartyNodeId)
+                },
+                forceClose = {
+                    setStatus("Force closing channel...")
+                    nodeService.forceCloseChannel(channel.userChannelId, channel.counterpartyNodeId)
+                },
+                onRefused = { e ->
+                    AuditService.log(
+                        "CHANNEL_CLOSE_REQUEST_FAILED",
+                        mapOf(
+                            "user_channel_id" to channel.userChannelId,
+                            "error" to (e.message ?: e.javaClass.simpleName),
+                        ),
+                    )
+                },
+            )
+        if (!forced) return
+        val funding = channel.fundingTxo
+        if (funding == null) {
+            AuditService.log(
+                "OWN_FORCE_CLOSE_NO_OUTPOINT",
+                mapOf("user_channel_id" to channel.userChannelId),
+            )
+            return
+        }
+        ownForceClose.start(channel.channelId, funding.txid, funding.vout.toInt())
+        runOwnForceClose()
+    }
+
+    private suspend fun runOwnForceClose() {
+        if (isInBackground || !nodeService.isRunning) return
+        ownForceClose.step(::buildOwnForceClose, ::ownCloseConfirmed)?.let { setStatus(it) }
+    }
+
+    /** The close row may hold our close while the LSP's replaced it and confirmed. */
+    private fun ownCloseConfirmed(channelId: String, closeTxid: String) {
+        val db = databaseService ?: return
+        val recorded = db.getPaymentTxid(channelId)
+        if (db.replaceChannelCloseTxid(channelId, closeTxid)) {
+            if (_lastCloseTxid.value == recorded) setLastCloseTxid(closeTxid)
+            notifyPaymentRecorded()
+        }
+    }
+
+    /**
+     * Builds the app's own close from the node's data while the node is stopped, then starts the
+     * node again as after an LSP switch. The heartbeat keeps going, so a stability push meanwhile
+     * leaves the node to the app instead of starting the stability service on it.
+     */
+    private suspend fun buildOwnForceClose(channelId: String): ForceCloseTransactions =
+        ownForceCloseBuild.withLock {
+            stabilityJob?.cancelAndJoin()
+            val seed = nodeService.walletSeed()
+            nodeService.stop()
+            try {
+                if (!LdkNodeOwner.tryAcquire(LdkNodeOwner.MAIN_APP)) {
+                    throw OwnForceClose.NodeBusy(
+                        "node data owned by ${LdkNodeOwner.currentOwner()}"
+                    )
+                }
+                try {
+                    OwnForceClose.build(Constants.userDataDir(context), channelId, seed)
+                } finally {
+                    LdkNodeOwner.release(LdkNodeOwner.MAIN_APP)
+                }
+            } finally {
+                try {
+                    nodeService.start(Network.BITCOIN, chainUrl, null)
+                    refreshBalances()
+                    ensureLSPConnected()
+                    startStabilityTimer()
+                } catch (e: Exception) {
+                    Log.e("AppState", "Node restart after building the close failed", e)
+                    handleNodeStartFailure(e, "Restart failed")
+                }
+                // A background stop that came meanwhile found the node stopped.
+                if (isInBackground && nodeService.isRunning) launchBackgroundStop()
+            }
+        }
 
     private fun handleEvent(event: Event) {
         when (event) {
@@ -4432,13 +4595,17 @@ class AppState(private val context: Context) : ViewModel() {
     fun currentFeeRateSatVb(): Long? = fetchFeeRate()
 
     /**
-     * Restores the wallet from [mnemonic], picking the explorer the way a normal start does. LDK
-     * starts with no channel data, so the LSP's close of the saved funding txid's channel is looked
-     * for on chain instead (#364). That is set up first, so a start that fails still finds it on
-     * the next one. [channelMayExist] is false when the LSP said there is no channel: one check
-     * then covers a close that already happened.
+     * Stops the node and restores the wallet from [mnemonic], picking the explorer the way a normal
+     * start does. The app first stops sending its own close of the old channel (#456), once a step
+     * of it ends, as the step's build restarts the node. LDK starts with no channel data, so the
+     * LSP's close of the saved funding txid's channel is looked for on chain instead (#364). That
+     * is set up first, so a start that fails still finds it on the next one. [channelMayExist] is
+     * false when the LSP said there is no channel: one check then covers a close that already
+     * happened.
      */
     suspend fun startRestoredNode(mnemonic: String, channelMayExist: Boolean) {
+        ownForceClose.clear()
+        nodeService.stop()
         toRemoteRecovery.startAfterRestore(fundingTxid, fundingVout, repeat = channelMayExist)
         chainUrl = resolveChainUrl()
         nodeService.start(Network.BITCOIN, chainUrl, mnemonic)
@@ -4827,6 +4994,7 @@ class AppState(private val context: Context) : ViewModel() {
                 publishClosedChannelFunds()
             }
         }
+        if (ownForceClose.isDue) viewModelScope.launch(Dispatchers.IO) { runOwnForceClose() }
 
         // lastCloseTxid labels the Home card "Channel closing..." until the close's own funds
         // confirm. Check this close's confirmations specifically, not aggregate spendable
