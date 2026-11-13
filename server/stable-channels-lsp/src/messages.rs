@@ -44,6 +44,16 @@ pub struct RegisterPushSigned {
     pub ts: u64,
 }
 
+/// FundingOutpoints signed body; field order is the canonical order, and naming the LSP stops a replay to another LSP.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FundingOutpointsSigned {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub node_id: String,
+    pub lsp_node_id: String,
+    pub ts: u64,
+}
+
 /// Build the SYNC_V1 payload string (the exact bytes the daemon signs and ships).
 pub fn build_sync_payload(
     channel_id: &str,
@@ -152,6 +162,17 @@ pub fn register_push_signed_bytes(node_id: &str, token: &str, ts: u64) -> Vec<u8
     .unwrap_or_default()
 }
 
+/// Canonical FundingOutpoints signed bytes. Must match the wallet's serialization exactly.
+pub fn funding_outpoints_signed_bytes(node_id: &str, lsp_node_id: &str, ts: u64) -> Vec<u8> {
+    serde_json::to_vec(&FundingOutpointsSigned {
+        kind: "FUNDING_OUTPOINTS_V1".to_string(),
+        node_id: node_id.to_string(),
+        lsp_node_id: lsp_node_id.to_string(),
+        ts,
+    })
+    .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,6 +256,19 @@ mod tests {
         assert_eq!(String::from_utf8(a.clone()).unwrap(), expected);
         let b = register_push_signed_bytes("nodehex", "tok:en", 1717000000);
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn funding_outpoints_request_signs_exact_canonical_bytes() {
+        let bytes = funding_outpoints_signed_bytes(
+            "025a29399255108f82a158c7740053fb19933e3b874c68556deed6dd574da1c0f0",
+            "029e0070a45736c1c56c25562c667331472e86e447e64671e591ac1a48b2f6ed1c",
+            1761580800,
+        );
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            r#"{"type":"FUNDING_OUTPOINTS_V1","node_id":"025a29399255108f82a158c7740053fb19933e3b874c68556deed6dd574da1c0f0","lsp_node_id":"029e0070a45736c1c56c25562c667331472e86e447e64671e591ac1a48b2f6ed1c","ts":1761580800}"#
+        );
     }
 
     #[test]

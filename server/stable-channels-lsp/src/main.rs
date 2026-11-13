@@ -157,6 +157,7 @@ async fn main() -> Result<()> {
         geoip_record_ips: cfg.geoip.record_ips.unwrap_or(cfg.geoip.country_db.is_some()),
         geoip_retention_secs: cfg.geoip.retention_days.unwrap_or(90) as i64 * 86_400,
         revenue: Arc::new(revenue::RevenueStore::default()),
+        funding_outpoints: Arc::default(),
         ldk_log_file,
         last_event_before_start_ms,
     };
@@ -297,7 +298,12 @@ async fn main() -> Result<()> {
             "/api/channel-exists",
             post(handlers::channel_exists::channel_exists),
         )
-        // Defense-in-depth body cap covering every route, including the two unsigned endpoints
+        // A restored wallet's funding outpoints, to recover a force close; the node key signs the request.
+        .route(
+            "/api/funding-outpoints",
+            post(handlers::funding_outpoints::funding_outpoints),
+        )
+        // Defense-in-depth body cap covering every route, including the endpoints outside the auth layer
         // that never reach the auth middleware's own capped read.
         .layer(axum::extract::DefaultBodyLimit::max(auth::MAX_AUTH_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
