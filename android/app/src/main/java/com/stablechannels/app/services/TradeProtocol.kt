@@ -290,9 +290,10 @@ object TradeProtocol {
     /**
      * The backing to book when a correlated trade is accepted. Stability payments made while the
      * result was in flight move backing without a sync_version bump, so the trade's change is
-     * applied to the backing as it is now, the way the LSP applies a trade to its live books.
-     * Writing the prepared value instead would undo those payments and the next check would pay
-     * them again.
+     * applied to the backing as it is now, as the LSP applies a trade to its live books. The LSP
+     * values that change at its own price, which it keeps within 0.5% of the quote; here it is the
+     * change computed at the quote. Writing the prepared value instead would undo those payments
+     * and the next check would pay them again.
      *
      * A full exit stays at its prepared 0. A rebase that leaves no backing for a non-zero target
      * keeps the prepared value: zero backing would stop stability checks for the position. Trades

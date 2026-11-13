@@ -40,6 +40,8 @@ class TradeProtocolTest {
         assertEquals(90_000L, TradeProtocol.acceptedTradeBacking(90_000, null, 80_000))
         // In-flight payments used up the whole new position: zero backing would stop stability.
         assertEquals(10_000L, TradeProtocol.acceptedTradeBacking(10_000, 100_000, 85_000))
+        // ...including when the rebase lands exactly on 0.
+        assertEquals(90_000L, TradeProtocol.acceptedTradeBacking(90_000, 100_000, 10_000))
     }
 
     @Test
