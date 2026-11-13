@@ -52,21 +52,9 @@ pub async fn splice_in(State(state): State<AppState>, body: Bytes) -> Response {
         Ok(r) => r,
         Err(resp) => return resp,
     };
-    // A queued splice-in the job is working on, or whose last call may still be pending on the node, owns the channel: a manual one now would splice twice, or be taken for the queued one's lock.
-    match crate::queued_splice::open_row(&state.db, &req.user_channel_id, crate::revenue::now_secs()) {
-        Ok(None) => {}
-        Ok(Some(open)) => {
-            let pending = if open.pending_on_node { ", its last call pending on the node" } else { "" };
-            return error_response(
-                ErrorCode::InvalidRequestError,
-                format!("this channel has a queued splice-in ({}{pending}); cancel it first, with force once you have checked that the node holds no splice for it", open.status),
-            );
-        }
-        Err(error) => return error_response(ErrorCode::InternalServerError, format!("could not check the splice queue: {error}")),
-    }
-    // Noted before the call, so a queued request waits until the channel shows this splice through, locked or gone.
+    // A queued splice-in the job is working on, or whose last call may still be pending on the node, owns the channel: a manual one now would splice twice, or be taken for the queued one's lock. Otherwise the call is noted before it is made, in the same transaction as that check, so a queued request waits until the channel shows this splice through, locked or gone.
     let user_channel_id = req.user_channel_id.clone();
-    if let Err(message) = crate::queued_splice::before_manual_splice(
+    let replaced_a_note = match crate::queued_splice::before_manual_splice(
         &state.db,
         state.ldk_server.as_ref() as &dyn crate::stable_manager::LdkServerCalls,
         &user_channel_id,
@@ -74,13 +62,13 @@ pub async fn splice_in(State(state): State<AppState>, body: Bytes) -> Response {
     )
     .await
     {
-        return error_response(ErrorCode::InvalidRequestError, format!("the splice-in was not made: {message}"));
-    }
+        Ok(replaced_a_note) => replaced_a_note,
+        Err(message) => return error_response(ErrorCode::InvalidRequestError, format!("the splice-in was not made: {message}")),
+    };
     match state.ldk_server.splice_in(req).await {
         Ok(resp) => ok_response(resp),
         Err(e) => {
-            // The node refused it outright, so nothing of it is on the channel.
-            crate::queued_splice::manual_splice_refused(&state.db, &user_channel_id);
+            crate::queued_splice::after_manual_splice_failed(&state.db, &user_channel_id, replaced_a_note, &e);
             map_grpc_error(e)
         }
     }
