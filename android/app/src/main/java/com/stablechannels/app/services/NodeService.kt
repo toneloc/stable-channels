@@ -8,6 +8,7 @@ import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.LspPreferencesManager
 import com.stablechannels.app.util.QRCodeUtils
 import com.stablechannels.app.util.StabilityFreshness
+import fr.acinq.bitcoin.MnemonicCode
 import java.io.File
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -48,6 +49,14 @@ class NodeService(private val context: Context) {
         if (file.exists()) file.readText().trim().ifEmpty { null } else null
     }
         private set
+
+    /**
+     * The 64-byte seed [start] builds the node from: the BIP39 seed of the mnemonic, or a
+     * pre-upgrade wallet's keys_seed.
+     */
+    fun walletSeed(): ByteArray =
+        savedMnemonic?.let { MnemonicCode.toSeed(it.trim().split(Regex("\\s+")), "") }
+            ?: File(Constants.userDataDir(context), "keys_seed").readBytes()
 
     private var eventJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO)
@@ -242,6 +251,15 @@ class NodeService(private val context: Context) {
     fun closeChannel(userChannelId: String, counterpartyNodeId: String) {
         val n = node ?: throw NodeServiceError()
         n.closeChannel(userChannelId, counterpartyNodeId)
+    }
+
+    /**
+     * Unilateral close. With the LSP as a trusted peer, ldk-node does not broadcast our close;
+     * [com.stablechannels.app.AppState.emergencyCloseChannel] follows it (#456).
+     */
+    fun forceCloseChannel(userChannelId: String, counterpartyNodeId: String) {
+        val n = node ?: throw NodeServiceError()
+        n.forceCloseChannel(userChannelId, counterpartyNodeId, "user_emergency_force_close")
     }
 
     fun spliceIn(userChannelId: String, counterpartyNodeId: String, amountSats: Long) {

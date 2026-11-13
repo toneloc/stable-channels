@@ -1510,6 +1510,56 @@ final class DatabaseServiceTests: XCTestCase {
         XCTAssertFalse(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 100_000))
     }
 
+    /// #456: the row recorded our close, then the LSP's close replaced it and confirmed.
+    func testReplacesACloseThatAnotherCloseReplaced() throws {
+        _ = try service.paymentRepo.recordPayment(
+            paymentId: "close-1",
+            paymentType: "channel_close",
+            direction: "received",
+            amountMsat: 500_000,
+            amountUSD: nil,
+            btcPrice: nil,
+            counterparty: nil,
+            status: "completed",
+            txid: "our-close"
+        )
+
+        XCTAssertTrue(try service.paymentRepo.replaceChannelCloseTxid(paymentId: "close-1", txid: "lsp-close"))
+
+        XCTAssertEqual(service.paymentRepo.payment(paymentId: "close-1")?.txid, "lsp-close")
+        XCTAssertEqual(service.paymentRepo.payment(paymentId: "close-1")?.confirmations, 0)
+        XCTAssertFalse(try service.paymentRepo.replaceChannelCloseTxid(paymentId: "close-1", txid: "lsp-close"))
+    }
+
+    func testReplacesOnlyChannelCloseRowsAndNeverDuplicatesATxid() throws {
+        _ = try service.paymentRepo.recordPayment(
+            paymentId: "onchain-1",
+            paymentType: "onchain",
+            direction: "received",
+            amountMsat: 500_000,
+            amountUSD: nil,
+            btcPrice: nil,
+            counterparty: nil,
+            status: "pending",
+            txid: "deposit"
+        )
+        _ = try service.paymentRepo.recordPayment(
+            paymentId: "close-1",
+            paymentType: "channel_close",
+            direction: "received",
+            amountMsat: 500_000,
+            amountUSD: nil,
+            btcPrice: nil,
+            counterparty: nil,
+            status: "completed",
+            txid: "our-close"
+        )
+
+        XCTAssertFalse(try service.paymentRepo.replaceChannelCloseTxid(paymentId: "onchain-1", txid: "lsp-close"))
+        XCTAssertFalse(try service.paymentRepo.replaceChannelCloseTxid(paymentId: "close-1", txid: "deposit"))
+        XCTAssertEqual(service.paymentRepo.payment(paymentId: "close-1")?.txid, "our-close")
+    }
+
     func testHasMatchingChannelClosePaymentIgnoresSentDirection() throws {
         _ = try service.paymentRepo.recordPayment(
             paymentId: "close-payment-sent",
