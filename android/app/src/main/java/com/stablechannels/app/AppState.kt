@@ -7,7 +7,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.google.firebase.messaging.FirebaseMessaging
 import com.stablechannels.app.models.*
+import com.stablechannels.app.push.CpuHold
 import com.stablechannels.app.push.FCMService
+import com.stablechannels.app.push.LspSpliceHoldBridge
 import com.stablechannels.app.push.StabilityProcessingService
 import com.stablechannels.app.services.*
 import com.stablechannels.app.services.CloseTxidResolver
@@ -94,9 +96,9 @@ class AppState(private val context: Context) : ViewModel() {
          */
         @Volatile var suppressNextBackgroundCycle = false
 
-        // Covers ordinary quick app-switches without keeping an unserviced cached Android
-        // process in control of the node for longer than the common return window.
-        private const val QUICK_SWITCH_GRACE_MS = 10_000L
+        // The LSP's job waits up to 60 s for the channel and sends splice_init a few seconds
+        // after its push; the lock follows within seconds.
+        private const val LSP_SPLICE_HOLD_MS = 60_000L
 
         data class ChannelState(
             val hasReady: Boolean,
@@ -625,6 +627,17 @@ class AppState(private val context: Context) : ViewModel() {
     // Set while an in-app system picker (e.g. photo picker) is open, so the transient onPause
     // it triggers doesn't tear down and resync the LDK node.
     @Volatile var isPickingMedia = false
+
+    /**
+     * Until when the node is held for an LSP splice-in the LSP announced by push (#473); 0 when it
+     * is not. The app gets no LDK event before splice_init, so the push is its only warning.
+     */
+    @Volatile private var lspSpliceHoldUntilMs = 0L
+    private val isHoldingForLspSplice: Boolean
+        get() = lspSpliceHoldUntilMs > System.currentTimeMillis()
+
+    /** Keeps the phone from suspending while it holds the node for the LSP's splice. */
+    private val lspSpliceCpuHold by lazy { CpuHold(context, "stablechannels:lsp-splice") }
 
     private val _errorMessage = MutableStateFlow("")
     val errorMessage: StateFlow<String> = _errorMessage
@@ -1439,6 +1452,11 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     fun stop() {
+        LspSpliceHoldBridge.holder = null
+        lspSpliceHoldUntilMs = 0L
+        lspSpliceCpuHold.release()
+        // A push in the seconds after this would otherwise be left to an app with no node.
+        FCMService.clearHeartbeat(context)
         cancelBackgroundStop()
         stabilityJob?.cancel()
         heartbeatJob?.cancel()
@@ -1462,35 +1480,92 @@ class AppState(private val context: Context) : ViewModel() {
 
     fun stopNodeForBackground() {
         isInBackground = true
-        val negotiatingSplice = isNegotiatingSplice
-        if (!isWaitingForPayment && !isPickingMedia && !negotiatingSplice) {
+        val plan =
+            backgroundStopPlan(
+                isWaitingForPayment = isWaitingForPayment,
+                isPickingMedia = isPickingMedia,
+                negotiatingSplice = isNegotiatingSplice,
+                holdingForLspSplice = isHoldingForLspSplice,
+            )
+        val reason = plan.foregroundServiceReason
+        if (reason == null) {
             // Defer the stop so a quick app-switch reconnects instantly instead of forcing a
             // full LDK restart + chain resync on every return. If the user stays away past the
             // window, the deferred stop below runs and the node is torn down as normal.
             Log.d("AppState", "Scheduling node stop after quick-switch grace period")
-            launchBackgroundStop(delayMs = QUICK_SWITCH_GRACE_MS)
+            launchBackgroundStop(delayMs = plan.delayMs)
             return
         }
 
-        // A payment wait, an open in-app picker, or a negotiating splice all route through the
-        // existing bounded 60s grace path rather than skipping the stop outright — so a stuck-true
-        // isPickingMedia
-        // (e.g. launch() threw, or the composition was disposed) degrades to "stop after 60s"
-        // instead of "never stop the node again".
-        Log.d("AppState", "Scheduling node stop after 60s grace period")
+        // A payment wait, an open in-app picker, a negotiating splice, or an LSP splice the push
+        // announced all route through the existing bounded 60s grace path rather than skipping
+        // the stop outright — so a stuck-true isPickingMedia (e.g. launch() threw, or the
+        // composition was disposed) degrades to "stop after 60s" instead of "never stop the node
+        // again".
+        Log.d("AppState", "Scheduling node stop after 60s grace period ($reason)")
         backgroundStopJob?.cancel()
 
         // Start Foreground Service to keep CPU and network active
         try {
-            val reason =
-                if (negotiatingSplice) LdkBackgroundService.REASON_SPLICE
-                else LdkBackgroundService.REASON_PAYMENT
             LdkBackgroundService.start(context, reason)
         } catch (e: Exception) {
             Log.e("AppState", "Failed to start LdkBackgroundService", e)
         }
 
-        launchBackgroundStop(delayMs = 60000L)
+        launchBackgroundStop(delayMs = plan.delayMs)
+    }
+
+    /**
+     * The LSP is about to splice funds into the channel and needs this node online for the whole
+     * negotiation. Keep it for [LSP_SPLICE_HOLD_MS]: in the background, replace the quick-switch
+     * stop with the long grace behind the foreground service; in the foreground, remember the hold
+     * so a background switch inside the window keeps the node too. Runs on the main thread like the
+     * other background hooks, since the push arrives on a Firebase thread.
+     */
+    fun holdNodeForLspSplice() {
+        viewModelScope.launch {
+            // The push may land while a background stop is already letting go of the node.
+            if (LspSpliceHoldBridge.holder == null || !nodeService.isRunning) {
+                FCMService.flagPendingPayment(context)
+                return@launch
+            }
+            lspSpliceHoldUntilMs = System.currentTimeMillis() + LSP_SPLICE_HOLD_MS
+            lspSpliceCpuHold.hold(LSP_SPLICE_HOLD_MS)
+            AuditService.log(
+                "LSP_SPLICE_HOLD",
+                mapOf("in_background" to isInBackground, "hold_ms" to LSP_SPLICE_HOLD_MS),
+            )
+            if (isInBackground) {
+                backgroundStopJob?.cancel()
+                try {
+                    LdkBackgroundService.start(context, LdkBackgroundService.REASON_LSP_SPLICE)
+                } catch (e: Exception) {
+                    Log.e("AppState", "Failed to start LdkBackgroundService", e)
+                }
+                launchBackgroundStop(delayMs = LSP_SPLICE_HOLD_MS)
+            }
+            withContext(Dispatchers.IO) { ensureLSPConnected() }
+        }
+    }
+
+    /**
+     * The splice locked or failed, so the node is no longer needed for it. In the background, the
+     * stop is brought forward to the quick-switch grace unless something else still holds the node
+     * for the long one.
+     */
+    private fun releaseLspSpliceHold(reason: String) {
+        if (lspSpliceHoldUntilMs == 0L) return
+        // Node events arrive on the IO thread; the stop job is only ever replaced on main, like
+        // the hold and the background hooks do, or two writers could leave a stop untracked.
+        viewModelScope.launch {
+            if (lspSpliceHoldUntilMs == 0L) return@launch
+            lspSpliceHoldUntilMs = 0L
+            lspSpliceCpuHold.release()
+            AuditService.log("LSP_SPLICE_HOLD_RELEASED", mapOf("reason" to reason))
+            if (isInBackground && !isWaitingForPayment && !isPickingMedia && !isNegotiatingSplice) {
+                launchBackgroundStop(delayMs = QUICK_SWITCH_GRACE_MS)
+            }
+        }
     }
 
     private fun launchBackgroundStop(delayMs: Long = 0L) {
@@ -1544,13 +1619,23 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     private fun performBackgroundStop() {
+        // A stop job that outlived a return to the foreground must not take the node down.
+        if (!isInBackground) return
+        // Unregister before anything else, so a push landing during the stop is flagged for the
+        // next start instead of asking an app that is letting go of its node to hold it.
+        LspSpliceHoldBridge.holder = null
         try {
             LdkBackgroundService.stop(context)
         } catch (e: Exception) {
             Log.e("AppState", "Failed to stop LdkBackgroundService", e)
         }
+        lspSpliceHoldUntilMs = 0L
+        lspSpliceCpuHold.release()
         heartbeatJob?.cancel()
         heartbeatJob = null
+        // Without this a push in the seconds after the stop would be left to an app that no
+        // longer owns the node.
+        FCMService.clearHeartbeat(context)
         stabilityJob?.cancel()
         stabilityJob = null
         pendingDepositJob?.cancel()
@@ -2180,6 +2265,8 @@ class AppState(private val context: Context) : ViewModel() {
                 // durably attached, never a funding fallback.
                 resumePendingSpliceConfirmation()
                 AuditService.log("CHANNEL_READY", mapOf("channel_id" to event.channelId))
+                // During a hold, a ready channel is the LSP's splice locking on its new funding.
+                releaseLspSpliceHold("locked")
             }
             is Event.PaymentReceived -> {
                 handlePaymentReceived(
@@ -2253,6 +2340,7 @@ class AppState(private val context: Context) : ViewModel() {
                 )
             }
             is Event.SpliceNegotiationFailed -> {
+                releaseLspSpliceHold("negotiation_failed")
                 // Snapshot to local vals: spliceTxid/pendingSplice/spliceGeneration can all be
                 // mutated concurrently by the IO-thread confirmation monitor or by a brand-new
                 // splice starting, so re-reading them after the async check below would be a
@@ -3788,6 +3876,7 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     private fun startStabilityTimer() {
+        LspSpliceHoldBridge.holder = { holdNodeForLspSplice() }
         heartbeatJob?.cancel()
         FCMService.updateHeartbeat(context)
         heartbeatJob =
