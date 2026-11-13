@@ -170,6 +170,7 @@ pub fn disconnect(ctx: AppCtx) {
 		d.balances = None;
 		d.channels = None;
 		d.payments = None;
+		d.queued_splices = None;
 	}
 	ctx.error("Disconnected");
 }
@@ -1042,7 +1043,7 @@ pub fn splice_in(ctx: AppCtx) {
 	);
 }
 
-/// Every channel's queued splice-in. An older daemon without the route leaves the list as it was.
+/// Every channel's queued splice-in. An older daemon without the route leaves the list as it was; any other failure is reported like the other fetches.
 pub fn fetch_queued_splices(ctx: AppCtx) {
 	let Some(client) = client(ctx) else { return };
 	run_with(
@@ -1053,7 +1054,11 @@ pub fn fetch_queued_splices(ctx: AppCtx) {
 			let mut data = ctx.data;
 			data.write().queued_splices = Some(v);
 		},
-		|_ctx, _e| {},
+		|ctx, e| {
+			if !crate::dashboard::needs_newer_daemon(&e) {
+				ctx.error(e);
+			}
+		},
 	);
 }
 

@@ -225,6 +225,9 @@ pub fn Channels() -> Element {
 
 	let Some(rows) = rows else {
 		return rsx! {
+			if !queued.is_empty() {
+				QueuedSplices { rows: queued }
+			}
 			Card {
 				if loading {
 					Empty { icon: "link", title: "Loading channels...", Spinner { large: true } }
@@ -358,9 +361,11 @@ fn queued_splice_tone(status: &str) -> &'static str {
 	}
 }
 
-/// Whether a queued splice still belongs on the Channels tab: open, or finished within the last day.
+/// Whether a queued splice still belongs on the Channels tab: open, pending on the node (its Release button lives here), or finished within the last day.
 fn queued_splice_is_shown(row: &QueuedSpliceInfo, now: u64) -> bool {
-	!matches!(row.status.as_str(), "locked" | "cancelled") || now.saturating_sub(row.updated_at.max(0) as u64) < 86_400
+	row.pending_on_node
+		|| !matches!(row.status.as_str(), "locked" | "cancelled")
+		|| now.saturating_sub(row.updated_at.max(0) as u64) < 86_400
 }
 
 #[component]
@@ -1100,5 +1105,89 @@ mod tests {
 		assert!(above.contains("user&#39;s wallet sends ≈ 400 sats"), "above target the user pays (SSR escapes the apostrophe)");
 		let calm = panel_html(49_900);
 		assert!(calm.contains("No settlement yet · $0.15 more drift before one"));
+	}
+
+	fn queued_row(status: &str, pending_on_node: bool, updated_at: i64) -> QueuedSpliceInfo {
+		QueuedSpliceInfo {
+			user_channel_id: "7".into(),
+			counterparty_node_id: "02aa".into(),
+			amount_sats: 50_000,
+			status: status.into(),
+			pending_on_node,
+			updated_at,
+			..Default::default()
+		}
+	}
+
+	#[test]
+	fn a_finished_row_drops_off_after_a_day_but_a_call_pending_on_the_node_stays() {
+		let now = 10_000_000u64;
+		let ago = |secs: u64| (now - secs) as i64;
+		for status in ["queued", "waking", "splicing", "negotiated", "failed", "stalled"] {
+			assert!(queued_splice_is_shown(&queued_row(status, false, ago(30 * 86_400)), now), "{status} is open");
+		}
+		for status in ["locked", "cancelled"] {
+			assert!(queued_splice_is_shown(&queued_row(status, false, ago(86_399)), now), "{status} within the day");
+			assert!(!queued_splice_is_shown(&queued_row(status, false, ago(86_400)), now), "{status} after the day");
+		}
+		// A plain Cancel on a pending call: nothing touches the row again until the node answers or it is released.
+		assert!(queued_splice_is_shown(&queued_row("cancelled", true, ago(30 * 86_400)), now));
+	}
+
+	#[test]
+	fn queued_splice_pills_read_by_status() {
+		assert_eq!(queued_splice_tone("locked"), "success");
+		assert_eq!(queued_splice_tone("failed"), "danger");
+		assert_eq!(queued_splice_tone("stalled"), "danger");
+		assert_eq!(queued_splice_tone("cancelled"), "muted");
+		for status in ["queued", "waking", "splicing", "negotiated"] {
+			assert_eq!(queued_splice_tone(status), "info", "{status}");
+		}
+	}
+
+	#[component]
+	fn ChannelsHarness(row: QueuedSpliceInfo, channels_loaded: bool) -> Element {
+		use crate::state::{Connection, ConnectionStatus, Forms, Nav, Prefs};
+		use sc_rest_client::ldk_server_grpc::api::ListChannelsResponse;
+		use sc_rest_client::sc_protos::stable::ListQueuedSplicesResponse;
+		let ctx = use_context_provider(|| {
+			let mut conn = Connection::new();
+			conn.status = ConnectionStatus::Connected;
+			AppCtx::new(conn, Forms::default(), Nav::default(), Prefs::default(), false)
+		});
+		use_hook(move || {
+			let mut data = ctx.data;
+			let mut d = data.write();
+			d.queued_splices = Some(ListQueuedSplicesResponse { splices: vec![row.clone()] });
+			if channels_loaded {
+				d.channels = Some(ListChannelsResponse::default());
+			}
+		});
+		rsx! { Channels {} }
+	}
+
+	fn channels_html(row: QueuedSpliceInfo, channels_loaded: bool) -> String {
+		let mut dom = VirtualDom::new_with_props(ChannelsHarness, ChannelsHarnessProps { row, channels_loaded });
+		dom.rebuild_in_place();
+		dioxus_ssr::render(&dom)
+	}
+
+	#[test]
+	fn a_cancelled_call_still_pending_on_the_node_keeps_its_release_button_after_a_day() {
+		let two_days_ago = crate::format::now_secs() as i64 - 2 * 86_400;
+		for channels_loaded in [true, false] {
+			let html = channels_html(queued_row("cancelled", true, two_days_ago), channels_loaded);
+			assert!(html.contains("Queued splice-ins"), "card shown (channels loaded: {channels_loaded})");
+			assert!(html.contains("pending on node") && html.contains(">Release<"), "Release offered (channels loaded: {channels_loaded})");
+		}
+		let released = channels_html(queued_row("cancelled", false, two_days_ago), true);
+		assert!(!released.contains("Queued splice-ins"), "a day-old row with nothing pending is gone");
+	}
+
+	#[test]
+	fn the_queue_card_shows_before_the_channel_list_has_loaded() {
+		let html = channels_html(queued_row("queued", false, crate::format::now_secs() as i64), false);
+		assert!(html.contains("Queued splice-ins") && html.contains(">Cancel<"));
+		assert!(html.contains("Loading channels...") || html.contains("No channel data available"), "the channel card still says why it is empty");
 	}
 }
