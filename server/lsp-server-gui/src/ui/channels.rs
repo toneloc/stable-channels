@@ -7,7 +7,7 @@ use sc_rest_client::sc_protos::stable::{QueuedSpliceInfo, StableChannelInfo};
 use crate::actions;
 use crate::format::{ago, format_sats, format_usd, unit_label};
 use crate::health::{has_stable_position, settle_threshold_usd, settlement, stable_drift, Drift, Settlement};
-use crate::state::{AppCtx, ChannelSortColumn, ChannelStatusFilter, Dialog, Drawer, Op};
+use crate::state::{AppCtx, ChannelSortColumn, ChannelStatusFilter, Dialog, Drawer, Op, QueuedRelease};
 use crate::ui::widgets::{
 	Amount, Bubble, Card, Check, CopyBtn, Empty, Field, Gate, Hover, Icon, IdCopy, Kv, LiquidityBar, Modal, Peer, Pill,
 	RefreshBtn, SidePanel, SortTh, Spinner, Stat, TextInput, Th,
@@ -55,6 +55,7 @@ const HELP_CLOSE_CHANNEL: &str =
 	"Cooperatively close the channel when possible and return funds on-chain after confirmation.";
 const HELP_SPLICE_IN: &str = "Add on-chain funds to an existing channel without closing and reopening it. The daemon queues it, wakes the phone by push, and runs the splice once the channel is usable; the row below shows where it got to.";
 const HELP_QUEUED_SPLICES: &str = "Splice-ins queued for the phone. A call the node has not answered stays pending: no second call and no new request go out until it locks, the node drops it, or you release it after checking the node.";
+const RELEASE_WARNING: &str = "Release clears the call the node has not answered, so a new request can go out. If the node is still working on the earlier splice-in, both can land: the LSP's funds go into the channel twice, with a second on-chain fee. Release only after checking on the node that it holds no splice for this channel.";
 const HELP_SPLICE_OUT: &str = "Move funds from a channel to an on-chain address without fully closing the channel.";
 const HELP_ONCHAIN_ADDRESS: &str =
 	"The Bitcoin address for the current network. Verify it belongs to the intended recipient and network before sending.";
@@ -368,12 +369,22 @@ fn queued_splice_is_shown(row: &QueuedSpliceInfo, now: u64) -> bool {
 		|| now.saturating_sub(row.updated_at.max(0) as u64) < 86_400
 }
 
+/// The row an open Release confirmation belongs to, with its tick; None once that row no longer has a call pending on the node.
+fn armed_release(release: Option<&QueuedRelease>, rows: &[QueuedSpliceInfo]) -> Option<(QueuedSpliceInfo, bool)> {
+	let release = release?;
+	rows.iter()
+		.find(|row| row.user_channel_id == release.user_channel_id && row.pending_on_node)
+		.map(|row| (row.clone(), release.confirmed))
+}
+
 #[component]
 fn QueuedSplices(rows: Vec<QueuedSpliceInfo>) -> Element {
 	let ctx = use_context::<AppCtx>();
 	let now = *ctx.now.read();
 	let busy = ctx.busy(Op::CancelQueuedSplice);
 	let loading = ctx.busy(Op::ListQueuedSplices);
+	let mut view = ctx.view;
+	let armed = armed_release(view.read().queued_release.as_ref(), &rows);
 	rsx! {
 		Card { title: "Queued splice-ins", help: HELP_QUEUED_SPLICES, class: "flush",
 			actions: rsx! { RefreshBtn { busy: loading, onclick: move |_| actions::fetch_queued_splices(ctx), op: Op::ListQueuedSplices } },
@@ -415,8 +426,9 @@ fn QueuedSplices(rows: Vec<QueuedSpliceInfo>) -> Element {
 											}
 											if row.pending_on_node {
 												" "
+												// Opens the confirmation below; nothing is sent from here.
 												button { class: "btn sm danger", disabled: busy, title: "Only after checking that the node holds no splice for this channel",
-													onclick: move |_| actions::cancel_queued_splice(ctx, uid_force.clone(), true), "Release" }
+													onclick: move |_| view.write().queued_release = Some(QueuedRelease { user_channel_id: uid_force.clone(), confirmed: false }), "Release" }
 											}
 										}
 									}
@@ -424,6 +436,41 @@ fn QueuedSplices(rows: Vec<QueuedSpliceInfo>) -> Element {
 							}
 						}
 					}
+				}
+			}
+			if let Some((row, confirmed)) = armed {
+				ReleaseConfirm { row, confirmed }
+			}
+		}
+	}
+}
+
+/// The forced cancel behind a tick, like force close: it drops the queue's guard against a second splice on this channel.
+#[component]
+fn ReleaseConfirm(row: QueuedSpliceInfo, confirmed: bool) -> Element {
+	let ctx = use_context::<AppCtx>();
+	let mut view = ctx.view;
+	let busy = ctx.busy(Op::CancelQueuedSplice);
+	let uid = row.user_channel_id.clone();
+	let tick_uid = row.user_channel_id.clone();
+	rsx! {
+		div { class: "confirm-box", style: "margin: 12px;",
+			div { class: "title", Icon { name: "alert", size: 16 } "Release the splice-in pending on the node" }
+			div { class: "row",
+				Peer { node_id: row.counterparty_node_id.clone() }
+				Amount { msat: row.amount_sats.saturating_mul(1_000) }
+			}
+			span { class: "small muted", "{RELEASE_WARNING}" }
+			Check { checked: confirmed, danger: true, label: "I checked the node: it holds no splice for this channel",
+				onchange: move |v| view.write().queued_release = Some(QueuedRelease { user_channel_id: tick_uid.clone(), confirmed: v }) }
+			div { class: "row",
+				button { class: "btn ghost", onclick: move |_| view.write().queued_release = None, "Keep waiting" }
+				button { class: "btn danger solid", disabled: !confirmed || busy,
+					onclick: move |_| {
+						view.write().queued_release = None;
+						actions::cancel_queued_splice(ctx, uid.clone(), true);
+					},
+					"Release"
 				}
 			}
 		}
@@ -1146,7 +1193,7 @@ mod tests {
 	}
 
 	#[component]
-	fn ChannelsHarness(row: QueuedSpliceInfo, channels_loaded: bool) -> Element {
+	fn ChannelsHarness(row: QueuedSpliceInfo, channels_loaded: bool, release: Option<QueuedRelease>) -> Element {
 		use crate::state::{Connection, ConnectionStatus, Forms, Nav, Prefs};
 		use sc_rest_client::ldk_server_grpc::api::ListChannelsResponse;
 		use sc_rest_client::sc_protos::stable::ListQueuedSplicesResponse;
@@ -1162,12 +1209,18 @@ mod tests {
 			if channels_loaded {
 				d.channels = Some(ListChannelsResponse::default());
 			}
+			let mut view = ctx.view;
+			view.write().queued_release = release.clone();
 		});
 		rsx! { Channels {} }
 	}
 
 	fn channels_html(row: QueuedSpliceInfo, channels_loaded: bool) -> String {
-		let mut dom = VirtualDom::new_with_props(ChannelsHarness, ChannelsHarnessProps { row, channels_loaded });
+		channels_html_with(row, channels_loaded, None)
+	}
+
+	fn channels_html_with(row: QueuedSpliceInfo, channels_loaded: bool, release: Option<QueuedRelease>) -> String {
+		let mut dom = VirtualDom::new_with_props(ChannelsHarness, ChannelsHarnessProps { row, channels_loaded, release });
 		dom.rebuild_in_place();
 		dioxus_ssr::render(&dom)
 	}
@@ -1189,5 +1242,88 @@ mod tests {
 		let html = channels_html(queued_row("queued", false, crate::format::now_secs() as i64), false);
 		assert!(html.contains("Queued splice-ins") && html.contains(">Cancel<"));
 		assert!(html.contains("Loading channels...") || html.contains("No channel data available"), "the channel card still says why it is empty");
+	}
+
+	fn release_for(uid: &str, confirmed: bool) -> Option<QueuedRelease> {
+		Some(QueuedRelease { user_channel_id: uid.into(), confirmed })
+	}
+
+	/// Whether the confirmation's final Release button is disabled; None when there is no confirmation.
+	fn final_release_disabled(html: &str) -> Option<bool> {
+		let at = html.find("btn danger solid")?;
+		let tag_start = html[..at].rfind("<button")?;
+		let tag_end = at + html[at..].find('>')?;
+		Some(html[tag_start..tag_end].contains("disabled"))
+	}
+
+	#[test]
+	fn release_only_sends_from_a_ticked_confirmation_for_that_channel() {
+		let now = crate::format::now_secs() as i64;
+		let pending = queued_row("splicing", true, now);
+		let plain = channels_html_with(pending.clone(), true, None);
+		assert!(plain.contains(">Release<") && !plain.contains("confirm-box"), "the row's Release only opens the confirmation");
+		assert_eq!(final_release_disabled(&plain), None);
+
+		let unticked = channels_html_with(pending.clone(), true, release_for("7", false));
+		assert!(unticked.contains("confirm-box") && unticked.contains("I checked the node"));
+		assert_eq!(final_release_disabled(&unticked), Some(true), "nothing can be sent before the tick");
+
+		let ticked = channels_html_with(pending.clone(), true, release_for("7", true));
+		assert_eq!(final_release_disabled(&ticked), Some(false));
+
+		let other_channel = channels_html_with(pending, true, release_for("8", true));
+		assert!(!other_channel.contains("confirm-box"), "a tick for another channel arms nothing here");
+	}
+
+	#[test]
+	fn a_release_confirmation_belongs_to_a_row_still_pending_on_the_node() {
+		let rows = vec![queued_row("splicing", true, 0), QueuedSpliceInfo { user_channel_id: "9".into(), ..queued_row("queued", false, 0) }];
+		let open = |uid: &str, confirmed: bool| armed_release(Some(&QueuedRelease { user_channel_id: uid.into(), confirmed }), &rows);
+		assert_eq!(open("7", true).map(|(row, confirmed)| (row.user_channel_id, confirmed)), Some(("7".to_owned(), true)));
+		assert_eq!(open("9", true), None, "no call pending on the node, nothing to release");
+		assert_eq!(open("8", true), None, "no such row");
+		assert_eq!(armed_release(None, &rows), None);
+	}
+
+	#[component]
+	fn QueueActionHarness(failure: Option<String>) -> Element {
+		use crate::state::{Connection, ConnectionStatus, Forms, Nav, Prefs};
+		use sc_rest_client::sc_protos::stable::ListQueuedSplicesResponse;
+		let ctx = use_context_provider(|| {
+			let mut conn = Connection::new();
+			conn.status = ConnectionStatus::Connected;
+			AppCtx::new(conn, Forms::default(), Nav::default(), Prefs::default(), false)
+		});
+		use_hook(move || {
+			let mut data = ctx.data;
+			data.write().queued_splices = Some(ListQueuedSplicesResponse { splices: vec![queued_row("splicing", true, 0)] });
+			let mut view = ctx.view;
+			view.write().queued_release = Some(QueuedRelease { user_channel_id: "7".into(), confirmed: true });
+			match failure.clone() {
+				Some(error) => actions::queued_splices_failed(ctx, error),
+				None => actions::disconnect(ctx),
+			}
+		});
+		let status = ctx.status.read().clone().map(|m| m.text).unwrap_or_default();
+		let rows = ctx.data.read().queued_splices.as_ref().map_or(0, |q| q.splices.len());
+		let armed = ctx.view.read().queued_release.is_some();
+		rsx! { "status=[{status}] rows={rows} armed={armed}" }
+	}
+
+	fn queue_action(failure: Option<&str>) -> String {
+		let mut dom = VirtualDom::new_with_props(QueueActionHarness, QueueActionHarnessProps { failure: failure.map(str::to_owned) });
+		dom.rebuild_in_place();
+		dioxus_ssr::render(&dom)
+	}
+
+	#[test]
+	fn a_failed_queue_list_is_reported_unless_the_daemon_is_older_and_keeps_its_rows() {
+		assert_eq!(queue_action(Some("HTTP 404 Not Found")), "status=[] rows=1 armed=true");
+		assert_eq!(queue_action(Some("HTTP request failed: connection refused")), "status=[HTTP request failed: connection refused] rows=1 armed=true");
+	}
+
+	#[test]
+	fn disconnecting_forgets_the_queue_and_closes_an_open_release() {
+		assert_eq!(queue_action(None), "status=[Disconnected] rows=0 armed=false");
 	}
 }

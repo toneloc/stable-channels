@@ -678,6 +678,13 @@ impl Default for LogViewState {
 	}
 }
 
+/// An open Release confirmation on the Queued splice-ins card, tied to one channel so a tick cannot arm another row.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct QueuedRelease {
+	pub user_channel_id: String,
+	pub confirmed: bool,
+}
+
 /// Session-only UI state that must survive tab switches (filters, sorts, confirmations).
 #[derive(Clone, PartialEq)]
 pub struct ViewState {
@@ -697,6 +704,8 @@ pub struct ViewState {
 	pub force_close_confirm: bool,
 	pub splice_out_confirm: bool,
 	pub send_all_confirm: bool,
+	/// The queued splice-in whose Release confirmation is open, if any.
+	pub queued_release: Option<QueuedRelease>,
 	pub config_paste_text: String,
 	/// Payment type filter ("" = all).
 	pub payment_type: String,
@@ -726,6 +735,7 @@ impl Default for ViewState {
 			force_close_confirm: false,
 			splice_out_confirm: false,
 			send_all_confirm: false,
+			queued_release: None,
 			config_paste_text: String::new(),
 			payment_type: String::new(),
 			revenue_window: RevenueWindow::default(),

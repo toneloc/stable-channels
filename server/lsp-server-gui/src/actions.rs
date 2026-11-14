@@ -172,6 +172,8 @@ pub fn disconnect(ctx: AppCtx) {
 		d.payments = None;
 		d.queued_splices = None;
 	}
+	let mut view = ctx.view;
+	view.write().queued_release = None;
 	ctx.error("Disconnected");
 }
 
@@ -1016,7 +1018,7 @@ pub fn splice_in(ctx: AppCtx) {
 		return;
 	};
 	// The daemon queues the splice, wakes the phone by push and runs it once the channel is usable.
-	run(
+	run_with(
 		ctx,
 		Op::SpliceIn,
 		async move {
@@ -1040,6 +1042,7 @@ pub fn splice_in(ctx: AppCtx) {
 			fetch_queued_splices(ctx);
 			fetch_channels(ctx);
 		},
+		|ctx, e| ctx.error(splice_in_error(e)),
 	);
 }
 
@@ -1054,12 +1057,24 @@ pub fn fetch_queued_splices(ctx: AppCtx) {
 			let mut data = ctx.data;
 			data.write().queued_splices = Some(v);
 		},
-		|ctx, e| {
-			if !crate::dashboard::needs_newer_daemon(&e) {
-				ctx.error(e);
-			}
-		},
+		queued_splices_failed,
 	);
+}
+
+/// A failed queue list: reported like the other fetches, except from an older daemon that has no such route.
+pub fn queued_splices_failed(ctx: AppCtx, error: String) {
+	if !crate::dashboard::needs_newer_daemon(&error) {
+		ctx.error(error);
+	}
+}
+
+/// What Splice+ shows when the daemon refused the request outright. An older daemon has no queue route, and an unknown route answers 404 with no body.
+fn splice_in_error(error: String) -> String {
+	if error.contains("HTTP 404") {
+		"Splice+ needs the updated daemon: this one has no splice-in queue, so nothing was spliced".to_owned()
+	} else {
+		error
+	}
 }
 
 /// Cancel a channel's queued splice-in; `force` also releases a call the node never answered.
@@ -1762,6 +1777,12 @@ mod tests {
 			payments: ids.iter().map(|id| Payment { payment_id: id.to_string(), ..Default::default() }).collect(),
 			next_page_token: next.map(|index| format!("t{index}")),
 		}
+	}
+
+	#[test]
+	fn splice_in_against_an_older_daemon_says_to_upgrade_and_other_errors_pass_through() {
+		assert!(splice_in_error("HTTP 404 Not Found".into()).starts_with("Splice+ needs the updated daemon"));
+		assert_eq!(splice_in_error("connection refused".into()), "connection refused");
 	}
 
 	#[test]
