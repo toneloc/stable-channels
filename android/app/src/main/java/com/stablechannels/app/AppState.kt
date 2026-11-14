@@ -2722,7 +2722,9 @@ class AppState(private val context: Context) : ViewModel() {
         when (result.status) {
             TradeControlApplyStatus.RETRY -> {
                 try {
-                    db.markTradeResponseNotCommittable(message)
+                    if (db.markTradeResponseNotCommittable(message)) {
+                        _pendingTradePayments.value = db.unresolvedTradePayments()
+                    }
                 } catch (_: Exception) {}
                 return deferSyncOrGiveUp(paymentHash, "Signed trade result could not be committed")
             }

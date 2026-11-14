@@ -416,7 +416,7 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
                     Spacer(Modifier.height(8.dp))
                     Text(
                         if (isDelayed)
-                            "The provider's result has not arrived. Keep the wallet connected. Do not place this order again while its result is unknown."
+                            "This is taking longer than usual. Keep the app open and online. Your balance will update when the order finishes. Please don't place it again."
                         else
                             "Your order is being processed. Balance will update when the provider confirms the order. Do not place this order again while its result is unknown.",
                         style = MaterialTheme.typography.bodyMedium,
