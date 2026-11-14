@@ -2723,7 +2723,10 @@ class AppState(private val context: Context) : ViewModel() {
             TradeControlApplyStatus.RETRY -> {
                 try {
                     if (db.markTradeResponseNotCommittable(message)) {
-                        _pendingTradePayments.value = db.unresolvedTradePayments()
+                        // Merge, not replace: a trade whose payment id was never stored is
+                        // not in the query, and its fee is recognised by this entry.
+                        val unresolved = db.unresolvedTradePayments()
+                        _pendingTradePayments.update { it + unresolved }
                     }
                 } catch (_: Exception) {}
                 return deferSyncOrGiveUp(paymentHash, "Signed trade result could not be committed")
