@@ -22,16 +22,16 @@ use sc_rest_client::ldk_server_grpc::types::{
 };
 use sc_rest_client::sc_protos::revenue::{GetRevenueRequest, RefundTradeFeeRequest};
 use sc_rest_client::sc_protos::stable::{
-	CancelQueuedSpliceRequest, EditStableChannelRequest, GetPriceRequest,
+	CancelQueuedSpliceRequest, CancelQueuedSpliceResponse, EditStableChannelRequest, GetPriceRequest,
 	ListChannelLedgerEventsRequest, ListChannelLedgerEventsResponse, ListQueuedSplicesRequest,
-	ListSettlementPaymentsRequest, ListStableChannelsRequest, LogRequest, QueueSpliceInRequest,
-	ReleaseStabilityPaymentRequest,
+	ListQueuedSplicesResponse, ListSettlementPaymentsRequest, ListStableChannelsRequest, LogRequest,
+	QueueSpliceInRequest, ReleaseStabilityPaymentRequest,
 };
 
 use crate::ledger::{checked_next_cursor, merge_ledger_events};
 use crate::state::{
 	ActiveTab, AppCtx, ChannelLedgerForm, ChannelLedgerRequestKey, ConnectionStatus, Dialog,
-	Drawer, LogsTab, Op, SendKind, SettlementKind,
+	Drawer, LogsTab, Op, QueuedRelease, SendKind, SettlementKind,
 };
 
 /// Run `fut` for `op` unless it is already running; `on_ok` applies the result and errors toast.
@@ -1053,12 +1053,19 @@ pub fn fetch_queued_splices(ctx: AppCtx) {
 		ctx,
 		Op::ListQueuedSplices,
 		async move { client.list_queued_splices(ListQueuedSplicesRequest {}).await },
-		|ctx, v| {
-			let mut data = ctx.data;
-			data.write().queued_splices = Some(v);
-		},
+		queued_splices_listed,
 		queued_splices_failed,
 	);
+}
+
+/// A new queue list. An open Release confirmation closes once its call is no longer pending on the node, so its tick cannot carry over to a later call.
+pub fn queued_splices_listed(ctx: AppCtx, list: ListQueuedSplicesResponse) {
+	let mut view = ctx.view;
+	if view.peek().release_outlived(&list.splices) {
+		view.write().close_release();
+	}
+	let mut data = ctx.data;
+	data.write().queued_splices = Some(list);
 }
 
 /// A failed queue list: reported like the other fetches, except from an older daemon that has no such route.
@@ -1077,8 +1084,12 @@ fn splice_in_error(error: String) -> String {
 	}
 }
 
-/// Cancel a channel's queued splice-in; `force` also releases a call the node never answered.
-pub fn cancel_queued_splice(ctx: AppCtx, user_channel_id: String, force: bool) {
+/// What Release says when the daemon no longer lists the checked call as pending on the node.
+const RELEASE_CALL_CHANGED: &str =
+	"Not released: the call you checked is no longer the one pending on the node. Check the node again before releasing.";
+
+/// Cancel a channel's queued splice-in. A call the node has not answered stays pending, so no new request goes out until it answers or is released.
+pub fn cancel_queued_splice(ctx: AppCtx, user_channel_id: String) {
 	if busy(ctx, Op::CancelQueuedSplice) {
 		return;
 	}
@@ -1086,16 +1097,49 @@ pub fn cancel_queued_splice(ctx: AppCtx, user_channel_id: String, force: bool) {
 	run(
 		ctx,
 		Op::CancelQueuedSplice,
-		async move { client.cancel_queued_splice(CancelQueuedSpliceRequest { user_channel_id, force }).await },
-		|ctx, v| {
-			if v.ok {
-				ctx.success(v.status);
-			} else {
-				ctx.error(v.status);
-			}
-			fetch_queued_splices(ctx);
-		},
+		async move { client.cancel_queued_splice(CancelQueuedSpliceRequest { user_channel_id, force: false }).await.map(Some) },
+		cancel_answered,
 	);
+}
+
+/// Release the call a ticked confirmation is for: the forced cancel, which drops the queue's guard against a second splice on the channel. Right before sending, the daemon's list is read again, and nothing is sent unless that same call is still pending on the node.
+pub fn release_queued_splice(ctx: AppCtx) {
+	if busy(ctx, Op::CancelQueuedSplice) {
+		return;
+	}
+	let mut view = ctx.view;
+	let Some(release) = view.peek().queued_release.clone().filter(|release| release.confirmed) else { return };
+	view.write().close_release();
+	let Some(client) = client(ctx) else { return };
+	run(
+		ctx,
+		Op::CancelQueuedSplice,
+		async move {
+			let listed = client.list_queued_splices(ListQueuedSplicesRequest {}).await?;
+			let Some(request) = queued_release_request(&release, &listed) else { return Ok(None) };
+			client.cancel_queued_splice(request).await.map(Some)
+		},
+		cancel_answered,
+	);
+}
+
+/// The forced cancel for a ticked confirmation, or None when the daemon's fresh list no longer has that call pending on the node.
+pub fn queued_release_request(release: &QueuedRelease, listed: &ListQueuedSplicesResponse) -> Option<CancelQueuedSpliceRequest> {
+	listed
+		.splices
+		.iter()
+		.any(|row| release.is_for(row))
+		.then(|| CancelQueuedSpliceRequest { user_channel_id: release.user_channel_id.clone(), force: true })
+}
+
+/// The daemon's answer to a Cancel or Release; None when Release found the checked call no longer pending.
+fn cancel_answered(ctx: AppCtx, answer: Option<CancelQueuedSpliceResponse>) {
+	match answer {
+		None => ctx.error(RELEASE_CALL_CHANGED),
+		Some(v) if v.ok => ctx.success(v.status),
+		Some(v) => ctx.error(v.status),
+	}
+	fetch_queued_splices(ctx);
 }
 
 pub fn splice_out(ctx: AppCtx) {
