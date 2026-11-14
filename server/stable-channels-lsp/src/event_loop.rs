@@ -429,6 +429,7 @@ pub(crate) async fn dispatch_event(
                     e.closure_initiator,
                     e.reason.clone(),
                 );
+                crate::queued_splice::on_channel_closed(db, &e.user_channel_id, crate::revenue::now_secs());
             } else if e.state == ChannelState::Pending as i32 {
                 // Whether the channel will become usable isn't known yet, so every opening counts toward the peer's daily limit.
                 if allow_channel_record(mgr, e.counterparty_node_id.as_deref()) {
@@ -665,12 +666,14 @@ pub(crate) async fn dispatch_event(
                 "SPLICE_NEGOTIATED",
                 crate::channel_audit::splice_negotiated_audit_data(&e),
             );
+            crate::queued_splice::on_splice_negotiated(db, &e.user_channel_id, &e.new_funding_txo, crate::revenue::now_secs());
         },
         Some(EventVariant::SpliceNegotiationFailed(e)) => {
             stable_channels::audit::audit_event(
                 "SPLICE_NEGOTIATION_FAILED",
                 crate::channel_audit::splice_failed_audit_data(&e),
             );
+            crate::queued_splice::on_splice_negotiation_failed(db, &e.user_channel_id, crate::revenue::now_secs());
         },
         // prost decodes a oneof variant this pin does not know as None.
         None => warn!("[event_loop] unrecognized event variant; LDK Server is likely newer than this daemon's ldk-server-client pin"),

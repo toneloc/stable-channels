@@ -314,6 +314,93 @@ pub struct ListSettlementPaymentsResponse {
 	pub settlements: ::prost::alloc::vec::Vec<SettlementPayment>,
 }
 
+// QueueSpliceIn: an LSP splice-in the daemon finishes once the phone is online.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct QueueSpliceInRequest {
+	#[prost(string, tag = "1")]
+	pub user_channel_id: ::prost::alloc::string::String,
+	#[prost(string, tag = "2")]
+	pub counterparty_node_id: ::prost::alloc::string::String,
+	#[prost(uint64, tag = "3")]
+	pub amount_sats: u64,
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct QueueSpliceInResponse {
+	#[prost(bool, tag = "1")]
+	pub ok: bool,
+	#[prost(string, tag = "2")]
+	pub status: ::prost::alloc::string::String,
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct QueuedSpliceInfo {
+	#[prost(string, tag = "1")]
+	pub user_channel_id: ::prost::alloc::string::String,
+	#[prost(string, tag = "2")]
+	pub counterparty_node_id: ::prost::alloc::string::String,
+	#[prost(uint64, tag = "3")]
+	pub amount_sats: u64,
+	/// queued, waking, splicing, negotiated, locked, failed, stalled or cancelled.
+	#[prost(string, tag = "4")]
+	pub status: ::prost::alloc::string::String,
+	#[prost(uint32, tag = "5")]
+	pub attempts: u32,
+	#[prost(string, tag = "6")]
+	pub last_error: ::prost::alloc::string::String,
+	#[prost(string, tag = "7")]
+	pub funding_txo: ::prost::alloc::string::String,
+	#[prost(int64, tag = "8")]
+	pub created_at: i64,
+	#[prost(int64, tag = "9")]
+	pub updated_at: i64,
+	/// Unix seconds of the last push for this splice; 0 when none was sent.
+	#[prost(int64, tag = "10")]
+	pub wake_sent_at: i64,
+	/// Unix seconds of the last splice attempt; 0 when none was made.
+	#[prost(int64, tag = "11")]
+	pub last_attempt_at: i64,
+	/// Why the phone is not being pushed right now; empty when it is, or when no push is due.
+	#[prost(string, tag = "12")]
+	pub wake_note: ::prost::alloc::string::String,
+	/// True while the last splice-in call may still be pending on the node; no new call or request goes out until it locks or is dropped.
+	#[prost(bool, tag = "13")]
+	pub pending_on_node: bool,
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListQueuedSplicesRequest {}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListQueuedSplicesResponse {
+	#[prost(message, repeated, tag = "1")]
+	pub splices: ::prost::alloc::vec::Vec<QueuedSpliceInfo>,
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CancelQueuedSpliceRequest {
+	#[prost(string, tag = "1")]
+	pub user_channel_id: ::prost::alloc::string::String,
+	/// True when the operator has checked that the node holds no splice for the channel: the row's last call is no longer treated as pending, so a new request may go out.
+	#[prost(bool, tag = "2")]
+	pub force: bool,
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CancelQueuedSpliceResponse {
+	#[prost(bool, tag = "1")]
+	pub ok: bool,
+	#[prost(string, tag = "2")]
+	pub status: ::prost::alloc::string::String,
+}
+
 // SC-specific REST route paths.
 pub const GET_PRICE_PATH: &str = "GetPrice";
 pub const LIST_STABLE_CHANNELS_PATH: &str = "ListStableChannels";
@@ -324,6 +411,9 @@ pub const AUDIT_LOG_PATH: &str = "AuditLog";
 pub const LDK_LOG_PATH: &str = "LdkLog";
 pub const LIST_SETTLEMENT_PAYMENTS_PATH: &str = "ListSettlementPayments";
 pub const LIST_CHANNEL_LEDGER_EVENTS_PATH: &str = "ListChannelLedgerEvents";
+pub const QUEUE_SPLICE_IN_PATH: &str = "QueueSpliceIn";
+pub const LIST_QUEUED_SPLICES_PATH: &str = "ListQueuedSplices";
+pub const CANCEL_QUEUED_SPLICE_PATH: &str = "CancelQueuedSplice";
 
 #[cfg(test)]
 mod tests {
@@ -350,6 +440,39 @@ mod tests {
 		let decoded = ListSettlementPaymentsResponse::decode(&bytes[..]).unwrap();
 		assert_eq!(decoded, resp);
 		assert_eq!(decoded.settlements[0].kind, "stability");
+	}
+
+	#[test]
+	fn queued_splice_messages_roundtrip() {
+		let request = QueueSpliceInRequest { user_channel_id: "42".into(), counterparty_node_id: "02ab".into(), amount_sats: 50_000 };
+		assert_eq!(QueueSpliceInRequest::decode(request.encode_to_vec().as_slice()).unwrap(), request);
+		let queued = QueueSpliceInResponse { ok: true, status: "queued".into() };
+		assert_eq!(QueueSpliceInResponse::decode(queued.encode_to_vec().as_slice()).unwrap(), queued);
+		let list = ListQueuedSplicesResponse {
+			splices: vec![QueuedSpliceInfo {
+				user_channel_id: "42".into(),
+				counterparty_node_id: "02ab".into(),
+				amount_sats: 50_000,
+				status: "negotiated".into(),
+				attempts: 1,
+				last_error: "the splice negotiation failed".into(),
+				funding_txo: "bb:1".into(),
+				created_at: 1,
+				updated_at: 2,
+				wake_sent_at: 3,
+				last_attempt_at: 4,
+				wake_note: "no usable push token".into(),
+				pending_on_node: true,
+			}],
+		};
+		let decoded = ListQueuedSplicesResponse::decode(list.encode_to_vec().as_slice()).unwrap();
+		assert_eq!(decoded, list);
+		assert!(decoded.splices[0].pending_on_node);
+		assert_eq!(ListQueuedSplicesRequest::decode(ListQueuedSplicesRequest {}.encode_to_vec().as_slice()).unwrap(), ListQueuedSplicesRequest {});
+		let cancel = CancelQueuedSpliceRequest { user_channel_id: "42".into(), force: true };
+		assert_eq!(CancelQueuedSpliceRequest::decode(cancel.encode_to_vec().as_slice()).unwrap(), cancel);
+		let cancelled = CancelQueuedSpliceResponse { ok: false, status: "nothing to cancel".into() };
+		assert_eq!(CancelQueuedSpliceResponse::decode(cancelled.encode_to_vec().as_slice()).unwrap(), cancelled);
 	}
 
 	#[test]

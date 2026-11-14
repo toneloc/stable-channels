@@ -63,6 +63,8 @@ async fn run(state: AppState, wakes: mpsc::UnboundedSender<Vec<WakeNotificationR
                 mgr.channel_peer_ids()
             };
             share_channel_peers(&state.push_registrations, peers);
+            // No plan this tick, so no stability wake is due: the previous tick's set must not keep other pushes waiting.
+            share_wakes_due(&state.push, &[]).await;
             continue;
         }
         let (plan, peers) = {
@@ -79,11 +81,19 @@ async fn run(state: AppState, wakes: mpsc::UnboundedSender<Vec<WakeNotificationR
             (plan, mgr.channel_peer_ids())
         };
         share_channel_peers(&state.push_registrations, peers);
+        share_wakes_due(&state.push, &plan.notifications).await;
         // Pushes go out on the watcher task so a slow provider never delays the next tick.
         if !plan.notifications.is_empty() && wakes.send(plan.notifications).is_err() {
             warn!("[stability_tick] wake watcher stopped; notifications dropped");
         }
     }
+}
+
+/// Tell the push service which nodes this tick wants to wake, before their pushes go out, so a queued splice's push yields to a stability wake instead of taking the node's one push slot.
+pub(crate) async fn share_wakes_due(push: &Arc<Mutex<PushService>>, notifications: &[WakeNotificationRequest]) {
+    push.lock()
+        .await
+        .set_stability_wakes_due(notifications.iter().map(|wake| wake.node_id.clone()));
 }
 
 /// Tell the push registrations which nodes have a channel; what was held for them is stored on its own task, so the tick never waits on a registration (a wake in the tick a channel first appears may miss that token; the next tick's finds it). An unloaded list leaves the last set in place.
@@ -437,6 +447,18 @@ mod tests {
                 ]
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_tick_tells_the_push_service_which_nodes_it_wants_to_wake() {
+        let dir = tempfile::tempdir().unwrap();
+        let push = service(FakeSender::new(true), dir.path(), &[]);
+        share_wakes_due(&push, &[lsp_to_user(1, "peer"), user_to_lsp("wallet")]).await;
+        assert!(push.lock().await.stability_wake_due("peer"));
+        assert!(push.lock().await.stability_wake_due("wallet"));
+        // A tick with nothing to wake clears the previous one.
+        share_wakes_due(&push, &[]).await;
+        assert!(!push.lock().await.stability_wake_due("peer"));
     }
 
     #[tokio::test]
