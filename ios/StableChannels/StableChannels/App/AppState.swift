@@ -1692,8 +1692,11 @@ class AppState {
         }
         nodeFlowInProgress = true
         defer { finishNodeFlow() }
-        reloadStateWrittenWhileSuspended()
+        // Reload only while holding the wallet dir: the NSE writes the books until then, and the
+        // save after start would overwrite those writes with an earlier read.
         if nodeService.isRunning {
+            // A running node still holds the lock, so the NSE could not write since this read.
+            reloadStateWrittenWhileSuspended()
             // Node never stopped, so gossip was never extracted — do NOT touch
             // ldk_node_data.sqlite while LDK has it open (a stale
             // network_graph.bin would otherwise be written into the live DB).
@@ -1715,6 +1718,7 @@ class AppState {
             caller: "restartNodeFromForeground",
             log: AuditService.log
         ).held else { return }
+        reloadStateWrittenWhileSuspended()
         restoreGossipToDB()
         do {
             try await startNodeWithFailover(mnemonic: "")
