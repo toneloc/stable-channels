@@ -164,6 +164,11 @@ object StabilityService {
         )
     }
 
+    /** Our balance in the channel, as stored in `receiver_sats`. */
+    fun receiverBalanceSats(channel: ChannelDetails): Long =
+        (channel.outboundCapacityMsat / 1000u).toLong() +
+            (channel.unspendablePunishmentReserve?.toLong() ?: 0)
+
     fun updateBalances(
         sc: StableChannel,
         channels: List<ChannelDetails>,
@@ -198,9 +203,7 @@ object StabilityService {
         // Skip balance update if channel not ready (outbound=0 during pending)
         if (!channel.isChannelReady) return updated
 
-        val ourBalanceSats =
-            (channel.outboundCapacityMsat / 1000u).toLong() +
-                (channel.unspendablePunishmentReserve?.toLong() ?: 0)
+        val ourBalanceSats = receiverBalanceSats(channel)
         val channelValueSats = channel.channelValueSats.toLong()
         val theirBalanceSats = channelValueSats - ourBalanceSats
 

@@ -77,6 +77,7 @@ class IncomingStabilityPaymentTest {
         paymentId: String = "payment",
         settlementId: String = "settlement",
         userChannelId: String = "7",
+        liveReceiver: Long? = null,
     ): String {
         if (!inBackground) {
             return try {
@@ -118,6 +119,7 @@ class IncomingStabilityPaymentTest {
                 amount,
                 userChannelId,
                 settlementId,
+                liveReceiver,
             )!!
             .toString()
     }
@@ -399,12 +401,29 @@ class IncomingStabilityPaymentTest {
         assertReceiptBeforeOutgoingAccounting(true, true)
 
     @Test
-    fun backgroundCreditRaisesTheReceiverWithTheBacking() {
-        seed()
-        assertTrue(receive(true))
+    fun backgroundCreditStoresTheLiveReceiver() {
+        // The app already saved a live balance of 14,000 that includes this 5,000-sat credit,
+        // but did not record the payment, so the background service records it now.
+        db.saveChannel(
+            "ab".repeat(32),
+            "7",
+            10.0,
+            9_000,
+            null,
+            receiverSats = 14_000,
+            latestPrice = 200_000.0,
+        )
+        assertEquals("INSERTED", persistReceipt(true, liveReceiver = 14_000))
         assertEquals(10_000L, db.loadChannel("7")!!.backingSats)
-        // The whole 5,000 sats arrived, though only 1,000 went to the backing.
         assertEquals(14_000L, db.loadChannel("7")!!.receiverSats)
+    }
+
+    @Test
+    fun backgroundCreditKeepsTheStoredReceiverWhenTheLiveBalanceIsUnknown() {
+        seed()
+        assertEquals("INSERTED", persistReceipt(true, liveReceiver = null))
+        assertEquals(10_000L, db.loadChannel("7")!!.backingSats)
+        assertEquals(9_000L, db.loadChannel("7")!!.receiverSats)
     }
 
     @Test
@@ -438,8 +457,11 @@ class IncomingStabilityPaymentTest {
         assertNotNull(db.adoptUnattachedPreparedTrade(paymentId, prepared.feeMsat))
 
         // Before the result, BTC falls to $80k and the background service books a 25,000-sat
-        // credit: backing 125,000, receiver 175,000.
-        assertEquals("INSERTED", persistReceipt(true, amount = 25_000, price = 80_000.0))
+        // credit: backing 125,000, live receiver 175,000.
+        assertEquals(
+            "INSERTED",
+            persistReceipt(true, amount = 25_000, price = 80_000.0, liveReceiver = 175_000),
+        )
         assertEquals(125_000L, db.loadChannel("7")!!.backingSats)
         assertEquals(175_000L, db.loadChannel("7")!!.receiverSats)
 
