@@ -4,9 +4,11 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::response::Response;
 
+use ldk_server_client::error::LdkServerError;
+use ldk_server_client::ldk_server_grpc::api::VerifySignatureRequest;
 use sc_protos::stable::{RegisterPushRequest, RegisterPushResponse};
 
-use crate::handlers::{decode_body, is_valid_node_id, ok_response, verify_node_signature};
+use crate::handlers::{decode_body, is_valid_node_id, ok_response};
 use crate::push::registrations::RegisterOutcome;
 use crate::stable_manager::LdkServerCalls;
 use crate::state::AppState;
@@ -62,6 +64,22 @@ pub async fn verify_push_registration(
     }
     let message = crate::messages::register_push_signed_bytes(node_id, token, timestamp);
     verify_node_signature(ldk, node_id, message, signature).await.unwrap_or(false)
+}
+
+/// Whether `signature` (zbase32, as a node's signMessage returns it) signs `message` with node_id's key; Err when LDK Server could not be asked.
+async fn verify_node_signature(
+    ldk: &dyn LdkServerCalls,
+    node_id: &str,
+    message: Vec<u8>,
+    signature: &str,
+) -> Result<bool, LdkServerError> {
+    ldk.verify_signature(VerifySignatureRequest {
+        message: message.into(),
+        signature: signature.to_string(),
+        public_key: node_id.to_string(),
+    })
+    .await
+    .map(|r| r.valid)
 }
 
 pub async fn register_push(State(state): State<AppState>, body: Bytes) -> Response {

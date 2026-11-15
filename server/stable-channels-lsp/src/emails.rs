@@ -6,11 +6,54 @@ use std::sync::Arc;
 use rusqlite::{Connection, OptionalExtension};
 use tracing::error;
 
+use crate::fixed_window::FixedWindow;
+
 /// Most nodes kept; past this a node with no channel is refused, while stored nodes can still change or remove theirs.
 const MAX_EMAILS: i64 = 100_000;
 /// Most new nodes with no channel stored per hour, so a flood of fresh keys takes weeks, not minutes, to reach the cap.
-const MAX_NEW_STRANGERS_PER_HOUR: i64 = 200;
-const HOUR_SECS: i64 = 3_600;
+const MAX_NEW_STRANGERS_PER_HOUR: u32 = 200;
+const HOUR_SECS: u64 = 3_600;
+const MAX_EMAIL_LEN: usize = 254;
+const MAX_EMAIL_LOCAL_LEN: usize = 64;
+/// Longest DNS label.
+const MAX_LABEL_LEN: usize = 63;
+
+/// A shareable address, already lowercased by the wallet: a dot-separated local part of plain address characters, '@', and a
+/// dotted ASCII domain with a TLD of two or more characters. Quotes, markup and non-ASCII are refused so a stored address is
+/// safe to show or mail as is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmailAddress(String);
+
+impl EmailAddress {
+    /// The address, or None when `email` breaks the rule above.
+    pub fn parse(email: &str) -> Option<Self> {
+        if email.len() > MAX_EMAIL_LEN {
+            return None;
+        }
+        let (local, domain) = email.split_once('@')?;
+        let local_char = |c: char| {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || "!#$%&'*+/=?^_`{|}~-".contains(c)
+        };
+        let local_ok = local.len() <= MAX_EMAIL_LOCAL_LEN
+            && local
+                .split('.')
+                .all(|part| !part.is_empty() && part.chars().all(local_char));
+        let label_ok = |l: &str| {
+            !l.is_empty()
+                && l.len() <= MAX_LABEL_LEN
+                && !l.starts_with('-')
+                && !l.ends_with('-')
+                && l.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        };
+        let labels: Vec<&str> = domain.split('.').collect();
+        let valid = local_ok
+            && labels.len() >= 2
+            && labels.iter().all(|l| label_ok(l))
+            && labels.last().is_some_and(|tld| tld.len() >= 2);
+        valid.then(|| Self(email.to_owned()))
+    }
+}
 
 /// What became of a signed email change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,15 +72,15 @@ pub enum SaveOutcome {
 struct Store {
     conn: Connection,
     rows: i64,
-    hour_start: i64,
-    new_this_hour: i64,
+    /// New nodes with no channel stored this hour.
+    new_strangers: FixedWindow,
 }
 
 pub struct Emails {
     /// Writes take turns on the one connection from a blocking thread.
     store: Arc<tokio::sync::Mutex<Store>>,
     max_rows: i64,
-    max_new_per_hour: i64,
+    max_new_per_hour: u32,
 }
 
 impl Emails {
@@ -62,7 +105,7 @@ impl Emails {
     pub(crate) fn open_limited(
         data_dir: &Path,
         max_rows: i64,
-        max_new_per_hour: i64,
+        max_new_per_hour: u32,
     ) -> rusqlite::Result<Self> {
         let path = data_dir.join("emails.db");
         create_owner_only(&path).map_err(|e| {
@@ -77,7 +120,7 @@ impl Emails {
     fn with_connection(
         conn: Connection,
         max_rows: i64,
-        max_new_per_hour: i64,
+        max_new_per_hour: u32,
     ) -> rusqlite::Result<Self> {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS emails (
@@ -93,41 +136,42 @@ impl Emails {
             store: Arc::new(tokio::sync::Mutex::new(Store {
                 conn,
                 rows,
-                hour_start: 0,
-                new_this_hour: 0,
+                new_strangers: FixedWindow::default(),
             })),
             max_rows,
             max_new_per_hour,
         })
     }
 
-    /// Store a node's email, or remove it when `email` is empty; the row stays as a tombstone so its timestamp still guards
-    /// against replays. A node with a channel is never held back by the cap or the hourly limit.
+    /// Store a node's email, or remove it when `email` is None; the row stays as a tombstone (an empty email) so its timestamp
+    /// still guards against replays. A node with a channel is never held back by the cap or the hourly limit.
     pub async fn save(
         &self,
         node_id: &str,
-        email: &str,
+        email: Option<EmailAddress>,
         signed_ts: i64,
         has_channel: bool,
     ) -> SaveOutcome {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-        self.save_at_time(node_id, email, signed_ts, has_channel, now)
-            .await
+        self.save_at_time(
+            node_id,
+            email,
+            signed_ts,
+            has_channel,
+            crate::revenue::now_secs(),
+        )
+        .await
     }
 
     pub(crate) async fn save_at_time(
         &self,
         node_id: &str,
-        email: &str,
+        email: Option<EmailAddress>,
         signed_ts: i64,
         has_channel: bool,
         now: i64,
     ) -> SaveOutcome {
         let store = Arc::clone(&self.store).lock_owned().await;
-        let (node_id, email) = (node_id.to_owned(), email.to_owned());
+        let (node_id, email) = (node_id.to_owned(), email.map(|e| e.0).unwrap_or_default());
         let limits = (self.max_rows, self.max_new_per_hour);
         // SQLite can wait on its file lock, so the write runs on a blocking thread, never on a runtime worker.
         tokio::task::spawn_blocking(move || {
@@ -169,12 +213,11 @@ fn save_at(
     signed_ts: i64,
     has_channel: bool,
     now: i64,
-    (max_rows, max_new_per_hour): (i64, i64),
+    (max_rows, max_new_per_hour): (i64, u32),
 ) -> rusqlite::Result<SaveOutcome> {
-    if now - store.hour_start >= HOUR_SECS {
-        store.hour_start = now;
-        store.new_this_hour = 0;
-    }
+    // The clock is never before 1970, so the window's unsigned seconds lose nothing.
+    let window_now = u64::try_from(now).unwrap_or(0);
+    store.new_strangers.roll(window_now, HOUR_SECS);
     let tx = store
         .conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -190,7 +233,12 @@ fn save_at(
         Some(_) => false,
         None if has_channel => true,
         None if store.rows >= max_rows => return Ok(SaveOutcome::Full),
-        None if store.new_this_hour >= max_new_per_hour => return Ok(SaveOutcome::Limited),
+        None if store
+            .new_strangers
+            .spent(window_now, HOUR_SECS, max_new_per_hour) =>
+        {
+            return Ok(SaveOutcome::Limited)
+        }
         None => true,
     };
     tx.execute(
@@ -202,7 +250,10 @@ fn save_at(
     if is_new {
         store.rows += 1;
         if !has_channel {
-            store.new_this_hour += 1;
+            // Room was checked above, so this always counts.
+            store
+                .new_strangers
+                .allow(window_now, HOUR_SECS, max_new_per_hour);
         }
     }
     Ok(SaveOutcome::Saved)
@@ -211,10 +262,10 @@ fn save_at(
 #[cfg(test)]
 impl Emails {
     pub(crate) fn in_memory(max_rows: i64) -> Self {
-        Self::in_memory_limited(max_rows, i64::MAX)
+        Self::in_memory_limited(max_rows, u32::MAX)
     }
 
-    pub(crate) fn in_memory_limited(max_rows: i64, max_new_per_hour: i64) -> Self {
+    pub(crate) fn in_memory_limited(max_rows: i64, max_new_per_hour: u32) -> Self {
         Self::with_connection(
             Connection::open_in_memory().unwrap(),
             max_rows,
@@ -241,23 +292,28 @@ impl Emails {
 mod tests {
     use super::*;
 
+    /// The change a wallet sends: an empty email removes the address.
+    fn email(email: &str) -> Option<EmailAddress> {
+        (!email.is_empty()).then(|| EmailAddress::parse(email).unwrap())
+    }
+
     #[tokio::test]
     async fn an_older_signed_change_never_replaces_a_newer_one() {
         let emails = Emails::in_memory(10);
         assert_eq!(
-            emails.save("n1", "a@example.com", 100, false).await,
+            emails.save("n1", email("a@example.com"), 100, false).await,
             SaveOutcome::Saved
         );
         assert_eq!(
-            emails.save("n1", "b@example.com", 200, false).await,
+            emails.save("n1", email("b@example.com"), 200, false).await,
             SaveOutcome::Saved
         );
         assert_eq!(
-            emails.save("n1", "a@example.com", 100, false).await,
+            emails.save("n1", email("a@example.com"), 100, false).await,
             SaveOutcome::Stale
         );
         assert_eq!(
-            emails.save("n1", "c@example.com", 200, false).await,
+            emails.save("n1", email("c@example.com"), 200, false).await,
             SaveOutcome::Stale,
             "the same timestamp is a replay too"
         );
@@ -271,12 +327,15 @@ mod tests {
     async fn a_removed_email_cannot_be_restored_by_replaying_its_save() {
         let emails = Emails::in_memory(10);
         assert_eq!(
-            emails.save("n1", "a@example.com", 100, false).await,
+            emails.save("n1", email("a@example.com"), 100, false).await,
             SaveOutcome::Saved
         );
-        assert_eq!(emails.save("n1", "", 200, false).await, SaveOutcome::Saved);
         assert_eq!(
-            emails.save("n1", "a@example.com", 100, false).await,
+            emails.save("n1", email(""), 200, false).await,
+            SaveOutcome::Saved
+        );
+        assert_eq!(
+            emails.save("n1", email("a@example.com"), 100, false).await,
             SaveOutcome::Stale
         );
         assert_eq!(
@@ -285,7 +344,9 @@ mod tests {
             "the tombstone stays"
         );
         assert_eq!(
-            emails.save("n1", "new@example.com", 300, false).await,
+            emails
+                .save("n1", email("new@example.com"), 300, false)
+                .await,
             SaveOutcome::Saved
         );
     }
@@ -294,18 +355,24 @@ mod tests {
     async fn a_full_store_refuses_new_nodes_but_not_stored_ones() {
         let emails = Emails::in_memory(2);
         assert_eq!(
-            emails.save("n1", "a@example.com", 100, false).await,
+            emails.save("n1", email("a@example.com"), 100, false).await,
             SaveOutcome::Saved
         );
-        assert_eq!(emails.save("n2", "", 100, false).await, SaveOutcome::Saved);
         assert_eq!(
-            emails.save("n3", "c@example.com", 100, false).await,
+            emails.save("n2", email(""), 100, false).await,
+            SaveOutcome::Saved
+        );
+        assert_eq!(
+            emails.save("n3", email("c@example.com"), 100, false).await,
             SaveOutcome::Full
         );
         assert_eq!(emails.email_of("n3").await, None);
-        assert_eq!(emails.save("n1", "", 200, false).await, SaveOutcome::Saved);
         assert_eq!(
-            emails.save("n2", "b@example.com", 200, false).await,
+            emails.save("n1", email(""), 200, false).await,
+            SaveOutcome::Saved
+        );
+        assert_eq!(
+            emails.save("n2", email("b@example.com"), 200, false).await,
             SaveOutcome::Saved
         );
     }
@@ -318,29 +385,54 @@ mod tests {
         let t = 1_000_000;
         assert_eq!(
             emails
-                .save_at_time("n1", "a@example.com", 1, false, t)
+                .save_at_time("n1", email("a@example.com"), 1, false, t)
                 .await,
             SaveOutcome::Saved
         );
         assert_eq!(
             emails
-                .save_at_time("n2", "a@example.com", 1, false, t + 1)
+                .save_at_time("n2", email("a@example.com"), 1, false, t + 1)
                 .await,
             SaveOutcome::Saved
         );
         assert_eq!(
             emails
-                .save_at_time("n3", "a@example.com", 1, false, t + 2)
+                .save_at_time("n3", email("a@example.com"), 1, false, t + 2)
                 .await,
             SaveOutcome::Limited
         );
         assert_eq!(emails.email_of("n3").await, None);
         assert_eq!(
             emails
-                .save_at_time("n3", "a@example.com", 1, false, t + HOUR)
+                .save_at_time("n3", email("a@example.com"), 1, false, t + HOUR)
                 .await,
             SaveOutcome::Saved,
             "a new hour opens new room"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_clock_stepped_back_restarts_the_hourly_window() {
+        let emails = Emails::in_memory_limited(100, 1);
+        let t = 1_000_000;
+        assert_eq!(
+            emails
+                .save_at_time("n1", email("a@example.com"), 1, false, t)
+                .await,
+            SaveOutcome::Saved
+        );
+        assert_eq!(
+            emails
+                .save_at_time("n2", email("a@example.com"), 1, false, t - 10)
+                .await,
+            SaveOutcome::Saved,
+            "a clock stepped back opens a new window, as RequestWindow does"
+        );
+        assert_eq!(
+            emails
+                .save_at_time("n3", email("a@example.com"), 1, false, t - 9)
+                .await,
+            SaveOutcome::Limited
         );
     }
 
@@ -350,19 +442,19 @@ mod tests {
         let t = 1_000_000;
         assert_eq!(
             emails
-                .save_at_time("stranger", "a@example.com", 1, false, t)
+                .save_at_time("stranger", email("a@example.com"), 1, false, t)
                 .await,
             SaveOutcome::Saved
         );
         assert_eq!(
             emails
-                .save_at_time("flood", "a@example.com", 1, false, t)
+                .save_at_time("flood", email("a@example.com"), 1, false, t)
                 .await,
             SaveOutcome::Full
         );
         assert_eq!(
             emails
-                .save_at_time("customer", "c@example.com", 1, true, t)
+                .save_at_time("customer", email("c@example.com"), 1, true, t)
                 .await,
             SaveOutcome::Saved
         );
@@ -378,21 +470,21 @@ mod tests {
         let t = 1_000_000;
         assert_eq!(
             emails
-                .save_at_time("n1", "a@example.com", 1, false, t)
+                .save_at_time("n1", email("a@example.com"), 1, false, t)
                 .await,
             SaveOutcome::Saved
         );
         for ts in 2..10 {
             assert_eq!(
                 emails
-                    .save_at_time("n1", "a@example.com", ts, false, t)
+                    .save_at_time("n1", email("a@example.com"), ts, false, t)
                     .await,
                 SaveOutcome::Saved
             );
         }
         assert_eq!(
             emails
-                .save_at_time("n2", "a@example.com", 1, false, t)
+                .save_at_time("n2", email("a@example.com"), 1, false, t)
                 .await,
             SaveOutcome::Limited
         );
@@ -403,13 +495,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Emails::open_limited(dir.path(), 1, 10).unwrap();
         assert_eq!(
-            store.save("n1", "a@example.com", 1, false).await,
+            store.save("n1", email("a@example.com"), 1, false).await,
             SaveOutcome::Saved
         );
         drop(store);
         let reopened = Emails::open_limited(dir.path(), 1, 10).unwrap();
         assert_eq!(
-            reopened.save("n2", "a@example.com", 1, false).await,
+            reopened.save("n2", email("a@example.com"), 1, false).await,
             SaveOutcome::Full
         );
     }
@@ -444,16 +536,97 @@ mod tests {
         assert_eq!(
             Emails::open(dir.path())
                 .unwrap()
-                .save("n1", "a@example.com", 100, false)
+                .save("n1", email("a@example.com"), 100, false)
                 .await,
             SaveOutcome::Saved
         );
         assert_eq!(
             Emails::open(dir.path())
                 .unwrap()
-                .save("n1", "a@example.com", 100, false)
+                .save("n1", email("a@example.com"), 100, false)
                 .await,
             SaveOutcome::Stale
         );
+    }
+
+    fn valid(email: &str) -> bool {
+        EmailAddress::parse(email).is_some()
+    }
+
+    #[test]
+    fn email_rules() {
+        for ok in [
+            "a@b.co",
+            "you@example.com",
+            "first.last+tag@mail.example.org",
+            &format!("{}@example.com", "a".repeat(64)),
+        ] {
+            assert!(valid(ok), "{ok}");
+        }
+        let too_long = format!("a@{}.com", "b".repeat(250));
+        let long_local = format!("{}@example.com", "a".repeat(65));
+        for bad in [
+            "",
+            "a",
+            "@example.com",
+            "a@",
+            "a@b",
+            "a@b.c",
+            "a@@b.co",
+            "a@b@c.co",
+            "a@.co",
+            "a@b..co",
+            "a@b.co.",
+            " a@b.co",
+            "a@b.co ",
+            "a b@c.co",
+            "a@b\u{7}.co",
+            "A@b.co",
+            "a@B.co",
+            &too_long,
+            &long_local,
+        ] {
+            assert!(!valid(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_domain_label_is_at_most_63_bytes() {
+        assert!(valid(&format!("a@{}.com", "b".repeat(MAX_LABEL_LEN))));
+        assert!(!valid(&format!("a@{}.com", "b".repeat(MAX_LABEL_LEN + 1))));
+        assert!(!valid(&format!(
+            "a@example.{}",
+            "c".repeat(MAX_LABEL_LEN + 1)
+        )));
+    }
+
+    #[test]
+    fn an_email_with_markup_quotes_or_header_breaks_is_refused() {
+        for bad in [
+            "a<b@example.com",
+            "a>b@example.com",
+            "\"a\"@example.com",
+            "a@exa<mple.com",
+            "a@example.com/x",
+            "a@exa_mple.com",
+            "a@-example.com",
+            "a@example-.com",
+            "a\\b@example.com",
+            "a@b.co\r\nbcc: x@y.co",
+            "ä@example.com",
+            "a@exämple.com",
+            ".a@example.com",
+            "a.@example.com",
+            "a..b@example.com",
+        ] {
+            assert!(!valid(bad), "{bad:?}");
+        }
+        for ok in [
+            "o'brien@example.com",
+            "a_b-c+d@sub-domain.example.co",
+            "x@xn--bcher-kva.example",
+        ] {
+            assert!(valid(ok), "{ok}");
+        }
     }
 }

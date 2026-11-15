@@ -5,20 +5,16 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Response;
+use ldk_node::lightning::util::message_signing;
 
-use crate::emails::{Emails, SaveOutcome};
-use crate::handlers::{is_valid_node_id, verify_node_signature};
+use crate::emails::{EmailAddress, Emails, SaveOutcome};
+use crate::handlers::{is_plausible_signature, parse_node_key};
 use crate::messages::SignedEnvelope;
-use crate::stable_manager::LdkServerCalls;
 use crate::state::AppState;
 
 const REGISTER_EMAIL_TYPE: &str = "REGISTER_EMAIL_V1";
 /// Freshness window for the signed timestamp, in seconds.
 const EMAIL_SIG_WINDOW_SECS: u64 = 300;
-const MAX_EMAIL_LEN: usize = 254;
-const MAX_EMAIL_LOCAL_LEN: usize = 64;
-/// Longest DNS label.
-const MAX_LABEL_LEN: usize = 63;
 /// Longest signed payload accepted; real ones are a few hundred bytes, so a bigger one is refused before any parse or verify.
 const MAX_PAYLOAD_LEN: usize = 1024;
 
@@ -71,41 +67,9 @@ fn held_back(node_id: &str, reason: &str) -> Reply {
     }
 }
 
-/// A shareable address, already lowercased by the wallet: a dot-separated local part of plain address characters, '@', and a
-/// dotted ASCII domain with a TLD of two or more characters. Quotes, markup and non-ASCII are refused so a stored address is
-/// safe to show or mail as is.
-pub fn is_valid_email(email: &str) -> bool {
-    if email.len() > MAX_EMAIL_LEN {
-        return false;
-    }
-    let Some((local, domain)) = email.split_once('@') else {
-        return false;
-    };
-    let local_char =
-        |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || "!#$%&'*+/=?^_`{|}~-".contains(c);
-    let local_ok = local.len() <= MAX_EMAIL_LOCAL_LEN
-        && local
-            .split('.')
-            .all(|part| !part.is_empty() && part.chars().all(local_char));
-    let label_ok = |l: &str| {
-        !l.is_empty()
-            && l.len() <= MAX_LABEL_LEN
-            && !l.starts_with('-')
-            && !l.ends_with('-')
-            && l.chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-    };
-    let labels: Vec<&str> = domain.split('.').collect();
-    local_ok
-        && labels.len() >= 2
-        && labels.iter().all(|l| label_ok(l))
-        && labels.last().is_some_and(|tld| tld.len() >= 2)
-}
-
 /// Check a signed email change and store it; every refusal is decided before anything is stored.
 /// `has_channel` says whether a node has a channel with the LSP; those nodes skip the cap and the hourly limit.
 pub async fn register(
-    ldk: &dyn LdkServerCalls,
     emails: &Emails,
     has_channel: &(dyn Fn(&str) -> bool + Sync),
     body: &[u8],
@@ -117,6 +81,9 @@ pub async fn register(
     if envelope.payload.len() > MAX_PAYLOAD_LEN {
         return invalid("payload");
     }
+    if !is_plausible_signature(&envelope.signature) {
+        return invalid("signature");
+    }
     let Ok(serde_json::Value::Object(payload)) =
         serde_json::from_str::<serde_json::Value>(&envelope.payload)
     else {
@@ -125,17 +92,21 @@ pub async fn register(
     if payload.get("type").and_then(|v| v.as_str()) != Some(REGISTER_EMAIL_TYPE) {
         return invalid("type");
     }
-    let Some(node_id) = payload
+    let Some((node_id, public_key)) = payload
         .get("node_id")
         .and_then(|v| v.as_str())
-        .filter(|n| is_valid_node_id(n))
+        .and_then(|n| parse_node_key(n).map(|key| (n, key)))
     else {
         return invalid("node_id");
     };
+    // An empty email asks to remove the address.
     let Some(email) = payload
         .get("email")
         .and_then(|v| v.as_str())
-        .filter(|e| e.is_empty() || is_valid_email(e))
+        .and_then(|e| match e {
+            "" => Some(None),
+            e => EmailAddress::parse(e).map(Some),
+        })
     else {
         return invalid("email");
     };
@@ -145,20 +116,17 @@ pub async fn register(
     if now.abs_diff(ts) > EMAIL_SIG_WINDOW_SECS {
         return unauthorized(node_id, "stale");
     }
-    match verify_node_signature(
-        ldk,
-        node_id,
-        envelope.payload.as_bytes().to_vec(),
+    // Checked here with LDK's own message signing, so unsigned traffic costs LDK Server nothing and the route works while it is down.
+    if !message_signing::verify(
+        envelope.payload.as_bytes(),
         &envelope.signature,
-    )
-    .await
-    {
-        Ok(true) => {}
-        Ok(false) => return unauthorized(node_id, "signature"),
-        Err(_) => return unavailable(),
+        &public_key,
+    ) {
+        return unauthorized(node_id, "signature");
     }
     // Lowercase is the form every other node-keyed store uses.
     let node_id = node_id.to_ascii_lowercase();
+    let removed = email.is_none();
     // The window check above keeps ts far below i64::MAX.
     match emails
         .save(&node_id, email, ts as i64, has_channel(&node_id))
@@ -169,7 +137,7 @@ pub async fn register(
             body: serde_json::json!({ "ok": true }),
             audit: Some((
                 "REGISTER_EMAIL_OK",
-                serde_json::json!({ "node_id": node_id, "removed": email.is_empty() }),
+                serde_json::json!({ "node_id": node_id, "removed": removed }),
             )),
         },
         SaveOutcome::Stale => unauthorized(&node_id, "replay"),
@@ -181,23 +149,13 @@ pub async fn register(
 
 /// POST /api/register-email. Mounted OUTSIDE the auth layer; see the module docs.
 pub async fn register_email(State(state): State<AppState>, body: Bytes) -> Response {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let ldk = state.ldk_server.as_ref() as &dyn LdkServerCalls;
+    // The clock is never before 1970, so unsigned seconds lose nothing.
+    let now = u64::try_from(crate::revenue::now_secs()).unwrap_or(0);
     let registrations = &state.push_registrations;
     let Some(emails) = state.emails.as_deref() else {
         return respond(unavailable());
     };
-    let reply = register(
-        ldk,
-        emails,
-        &|node| registrations.has_channel(node),
-        &body,
-        now,
-    )
-    .await;
+    let reply = register(emails, &|node| registrations.has_channel(node), &body, now).await;
     respond(reply)
 }
 
@@ -216,68 +174,56 @@ fn respond(reply: Reply) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::handlers::register_push::tests::VerifyFake;
-    use ldk_server_client::error::LdkServerError;
-    use ldk_server_client::ldk_server_grpc::api::{
-        ListChannelsRequest, ListChannelsResponse, SignMessageRequest, SignMessageResponse,
-        SpontaneousSendRequest, SpontaneousSendResponse, VerifySignatureRequest,
-        VerifySignatureResponse,
-    };
+    use crate::handlers::MAX_SIGNATURE_CHARS;
+    use ldk_node::bitcoin::secp256k1::SecretKey;
 
-    const NODE: &str = "02465ed5be53d04fde66c9418ff14a5f2267723810176c9212b722e542dc1afb1b";
+    /// The node id of the test key [2; 32].
+    const NODE: &str = "024d4b6cd1361032ca9bd2aeb9d900aa4d45d9ead80ac9423374c451a7254d0766";
     const NOW: u64 = 1_762_790_000;
     const EMAIL: &str = "secret.person@example.com";
 
-    fn body(email: &str, node_id: &str, ts: u64) -> Vec<u8> {
-        let payload = serde_json::json!({ "email": email, "node_id": node_id, "ts": ts, "type": REGISTER_EMAIL_TYPE }).to_string();
-        serde_json::json!({ "payload": payload, "signature": "sig" })
+    /// The key behind `node_id`: NODE's, or its negation for the "03" node with the same x; any other id gets NODE's key.
+    fn key_of(node_id: &str) -> SecretKey {
+        let key = SecretKey::from_slice(&[2; 32]).unwrap();
+        if node_id.eq_ignore_ascii_case(&format!("03{}", &NODE[2..])) {
+            key.negate()
+        } else {
+            key
+        }
+    }
+
+    fn envelope(payload: &str, signature: &str) -> Vec<u8> {
+        serde_json::json!({ "payload": payload, "signature": signature })
             .to_string()
             .into_bytes()
     }
 
-    async fn send(valid: Option<bool>, emails: &Emails, body: &[u8]) -> Reply {
-        register(&VerifyFake { valid }, emails, &|_| false, body, NOW).await
+    fn payload(email: &str, node_id: &str, ts: u64) -> String {
+        serde_json::json!({ "email": email, "node_id": node_id, "ts": ts, "type": REGISTER_EMAIL_TYPE }).to_string()
+    }
+
+    /// A request signed by the key behind `node_id`.
+    fn body(email: &str, node_id: &str, ts: u64) -> Vec<u8> {
+        let payload = payload(email, node_id, ts);
+        envelope(
+            &payload,
+            &message_signing::sign(payload.as_bytes(), &key_of(node_id)),
+        )
+    }
+
+    /// A request signed by a key that is not behind `node_id`.
+    fn forged(email: &str, node_id: &str, ts: u64) -> Vec<u8> {
+        let payload = payload(email, node_id, ts);
+        let other = SecretKey::from_slice(&[3; 32]).unwrap();
+        envelope(&payload, &message_signing::sign(payload.as_bytes(), &other))
+    }
+
+    async fn send(emails: &Emails, body: &[u8]) -> Reply {
+        register(emails, &|_| false, body, NOW).await
     }
 
     fn error_of(reply: &Reply) -> &str {
         reply.body["error"].as_str().unwrap_or_default()
-    }
-
-    #[test]
-    fn email_rules() {
-        for ok in [
-            "a@b.co",
-            "you@example.com",
-            "first.last+tag@mail.example.org",
-            &format!("{}@example.com", "a".repeat(64)),
-        ] {
-            assert!(is_valid_email(ok), "{ok}");
-        }
-        let too_long = format!("a@{}.com", "b".repeat(250));
-        let long_local = format!("{}@example.com", "a".repeat(65));
-        for bad in [
-            "",
-            "a",
-            "@example.com",
-            "a@",
-            "a@b",
-            "a@b.c",
-            "a@@b.co",
-            "a@b@c.co",
-            "a@.co",
-            "a@b..co",
-            "a@b.co.",
-            " a@b.co",
-            "a@b.co ",
-            "a b@c.co",
-            "a@b\u{7}.co",
-            "A@b.co",
-            "a@B.co",
-            &too_long,
-            &long_local,
-        ] {
-            assert!(!is_valid_email(bad), "{bad:?}");
-        }
     }
 
     #[tokio::test]
@@ -309,6 +255,10 @@ mod tests {
             ),
             (body(EMAIL, "02ab", NOW), "node_id"),
             (body(EMAIL, &format!("04{}", &NODE[2..]), NOW), "node_id"),
+            (
+                body(EMAIL, &format!("02{}", "f".repeat(64)), NOW),
+                "node_id",
+            ),
             (body("Secret@example.com", NODE, NOW), "email"),
             (body("secret", NODE, NOW), "email"),
             (
@@ -331,7 +281,7 @@ mod tests {
             ),
         ];
         for (body, field) in cases {
-            let reply = send(Some(true), &emails, &body).await;
+            let reply = send(&emails, &body).await;
             assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{field}");
             assert_eq!(error_of(&reply), format!("invalid {field}"));
             assert_eq!(
@@ -349,7 +299,7 @@ mod tests {
     #[tokio::test]
     async fn a_signed_fresh_request_saves_and_removes() {
         let emails = Emails::in_memory(10);
-        let reply = send(Some(true), &emails, &body(EMAIL, NODE, NOW)).await;
+        let reply = send(&emails, &body(EMAIL, NODE, NOW)).await;
         assert_eq!(
             (reply.status, reply.body),
             (StatusCode::OK, serde_json::json!({ "ok": true }))
@@ -363,7 +313,7 @@ mod tests {
         );
         assert_eq!(emails.email_of(NODE).await.as_deref(), Some(EMAIL));
 
-        let reply = send(Some(true), &emails, &body("", NODE, NOW + 1)).await;
+        let reply = send(&emails, &body("", NODE, NOW + 1)).await;
         assert_eq!(reply.status, StatusCode::OK);
         assert_eq!(reply.audit.unwrap().1["removed"], true);
         assert_eq!(emails.email_of(NODE).await.as_deref(), Some(""));
@@ -372,12 +322,17 @@ mod tests {
     #[tokio::test]
     async fn a_bad_signature_or_stale_timestamp_is_refused() {
         let emails = Emails::in_memory(10);
-        for (valid, ts, reason) in [
-            (Some(false), NOW, "signature"),
-            (Some(true), NOW - 301, "stale"),
-            (Some(true), NOW + 301, "stale"),
+        let junk = envelope(
+            &payload(EMAIL, NODE, NOW),
+            "d9o8ftxzs3ggfpzwfkqbjzb7rsh1bs5wb5oy9ji8ayahbqzr6rksi4ff4jcb94mgfujbhp3e6z86qucb9mt1iw4cdw7aqyw4bksfb5r",
+        );
+        for (body, reason) in [
+            (forged(EMAIL, NODE, NOW), "signature"),
+            (junk, "signature"),
+            (body(EMAIL, NODE, NOW - 301), "stale"),
+            (body(EMAIL, NODE, NOW + 301), "stale"),
         ] {
-            let reply = send(valid, &emails, &body(EMAIL, NODE, ts)).await;
+            let reply = send(&emails, &body).await;
             assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
             assert_eq!(error_of(&reply), "invalid signature");
             assert_eq!(
@@ -389,32 +344,55 @@ mod tests {
             );
         }
         assert_eq!(
-            send(Some(true), &emails, &body(EMAIL, NODE, NOW - 300))
-                .await
-                .status,
+            send(&emails, &body(EMAIL, NODE, NOW - 300)).await.status,
             StatusCode::OK,
             "the window edge is inside"
         );
-        let reply = send(None, &emails, &body(EMAIL, NODE, NOW)).await;
-        assert_eq!(
-            (reply.status, error_of(&reply)),
-            (StatusCode::SERVICE_UNAVAILABLE, "unavailable")
-        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_or_overlong_signature_is_refused_before_it_is_verified() {
+        let emails = Emails::in_memory(10);
+        let payload = payload(EMAIL, NODE, NOW);
+        for (signature, status, event) in [
+            (
+                String::new(),
+                StatusCode::BAD_REQUEST,
+                "REGISTER_EMAIL_INVALID",
+            ),
+            (
+                "x".repeat(MAX_SIGNATURE_CHARS + 1),
+                StatusCode::BAD_REQUEST,
+                "REGISTER_EMAIL_INVALID",
+            ),
+            (
+                "x".repeat(MAX_SIGNATURE_CHARS),
+                StatusCode::UNAUTHORIZED,
+                "REGISTER_EMAIL_SIGNATURE_INVALID",
+            ),
+        ] {
+            let reply = send(&emails, &envelope(&payload, &signature)).await;
+            assert_eq!(reply.status, status, "{}", signature.len());
+            assert_eq!(error_of(&reply), "invalid signature");
+            let (name, data) = reply.audit.unwrap();
+            assert_eq!(name, event);
+            if status == StatusCode::BAD_REQUEST {
+                assert_eq!(data, serde_json::json!({ "field": "signature" }));
+            }
+        }
+        assert_eq!(emails.email_of(NODE).await, None);
     }
 
     #[tokio::test]
     async fn a_replayed_save_cannot_undo_a_removal() {
         let emails = Emails::in_memory(10);
         let save = body(EMAIL, NODE, NOW - 10);
+        assert_eq!(send(&emails, &save).await.status, StatusCode::OK);
         assert_eq!(
-            send(Some(true), &emails, &save).await.status,
+            send(&emails, &body("", NODE, NOW)).await.status,
             StatusCode::OK
         );
-        assert_eq!(
-            send(Some(true), &emails, &body("", NODE, NOW)).await.status,
-            StatusCode::OK
-        );
-        let reply = send(Some(true), &emails, &save).await;
+        let reply = send(&emails, &save).await;
         assert_eq!(
             (reply.status, error_of(&reply)),
             (StatusCode::UNAUTHORIZED, "invalid signature")
@@ -427,19 +405,17 @@ mod tests {
     async fn a_full_store_refuses_a_new_node_but_updates_a_stored_one() {
         let emails = Emails::in_memory(1);
         assert_eq!(
-            send(Some(true), &emails, &body(EMAIL, NODE, NOW - 1))
-                .await
-                .status,
+            send(&emails, &body(EMAIL, NODE, NOW - 1)).await.status,
             StatusCode::OK
         );
         let other = format!("03{}", &NODE[2..]);
-        let reply = send(Some(true), &emails, &body(EMAIL, &other, NOW)).await;
+        let reply = send(&emails, &body(EMAIL, &other, NOW)).await;
         assert_eq!(
             (reply.status, error_of(&reply)),
             (StatusCode::SERVICE_UNAVAILABLE, "unavailable")
         );
         assert_eq!(
-            send(Some(true), &emails, &body("new@example.com", NODE, NOW))
+            send(&emails, &body("new@example.com", NODE, NOW))
                 .await
                 .status,
             StatusCode::OK
@@ -450,13 +426,11 @@ mod tests {
     async fn when_full_a_new_node_is_held_back_but_a_customer_still_saves() {
         let emails = Emails::in_memory(1);
         assert_eq!(
-            send(Some(true), &emails, &body(EMAIL, NODE, NOW))
-                .await
-                .status,
+            send(&emails, &body(EMAIL, NODE, NOW)).await.status,
             StatusCode::OK
         );
         let stranger = format!("03{}", &NODE[2..]);
-        let reply = send(Some(true), &emails, &body(EMAIL, &stranger, NOW)).await;
+        let reply = send(&emails, &body(EMAIL, &stranger, NOW)).await;
         assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
             reply.audit.unwrap(),
@@ -467,14 +441,7 @@ mod tests {
         );
 
         let customer = |node: &str| node == stranger;
-        let reply = register(
-            &VerifyFake { valid: Some(true) },
-            &emails,
-            &customer,
-            &body(EMAIL, &stranger, NOW),
-            NOW,
-        )
-        .await;
+        let reply = register(&emails, &customer, &body(EMAIL, &stranger, NOW), NOW).await;
         assert_eq!(reply.status, StatusCode::OK);
     }
 
@@ -490,120 +457,60 @@ mod tests {
             body(&EMAIL.to_uppercase(), NODE, NOW),
             body(EMAIL, NODE, NOW - 1000),
             format!("{{\"payload\":\"{EMAIL}\"}}").into_bytes(),
+            forged(EMAIL, NODE, NOW),
+            envelope(&payload(EMAIL, NODE, NOW), ""),
         ];
-        for valid in [Some(true), Some(false), None] {
-            for body in &bodies {
-                let reply = send(valid, &emails, body).await;
-                let recorded = format!("{reply:?}").to_lowercase();
-                assert!(!recorded.contains("secret.person"), "{recorded}");
-            }
+        for body in &bodies {
+            let reply = send(&emails, body).await;
+            let recorded = format!("{reply:?}").to_lowercase();
+            assert!(!recorded.contains("secret.person"), "{recorded}");
         }
     }
 
-    /// Verifies like LDK Server would: true only for the exact bytes this node signed.
-    struct NodeKeyFake {
-        node_id: String,
-        signed: Vec<u8>,
-    }
-
-    #[async_trait::async_trait]
-    impl LdkServerCalls for NodeKeyFake {
-        async fn list_channels(
-            &self,
-            _req: ListChannelsRequest,
-        ) -> Result<ListChannelsResponse, LdkServerError> {
-            Ok(ListChannelsResponse { channels: vec![] })
-        }
-        async fn spontaneous_send(
-            &self,
-            _req: SpontaneousSendRequest,
-        ) -> Result<SpontaneousSendResponse, LdkServerError> {
-            Ok(SpontaneousSendResponse {
-                payment_id: String::new(),
-            })
-        }
-        async fn sign_message(
-            &self,
-            _req: SignMessageRequest,
-        ) -> Result<SignMessageResponse, LdkServerError> {
-            Ok(SignMessageResponse {
-                signature: String::new(),
-            })
-        }
-        async fn verify_signature(
-            &self,
-            req: VerifySignatureRequest,
-        ) -> Result<VerifySignatureResponse, LdkServerError> {
-            let valid = req.public_key.eq_ignore_ascii_case(&self.node_id)
-                && req.message.as_ref() == self.signed.as_slice();
-            Ok(VerifySignatureResponse { valid })
-        }
-    }
-
-    fn payload_of(body: &[u8]) -> Vec<u8> {
+    fn parts_of(body: &[u8]) -> (String, String) {
         let envelope: SignedEnvelope = serde_json::from_slice(body).unwrap();
-        envelope.payload.into_bytes()
+        (envelope.payload, envelope.signature)
     }
 
     #[tokio::test]
     async fn a_signature_only_counts_for_its_own_node_and_payload() {
         let emails = Emails::in_memory(10);
         let signed = body(EMAIL, NODE, NOW);
-        let ldk = NodeKeyFake {
-            node_id: NODE.to_string(),
-            signed: payload_of(&signed),
-        };
-        assert_eq!(
-            register(&ldk, &emails, &|_| false, &signed, NOW)
-                .await
-                .status,
-            StatusCode::OK
-        );
+        assert_eq!(send(&emails, &signed).await.status, StatusCode::OK);
+        let (_, signature) = parts_of(&signed);
 
         // Same signature, someone else's node id: the key does not match.
         let other = format!("03{}", &NODE[2..]);
-        let stolen = serde_json::json!({ "payload": String::from_utf8(payload_of(&body(EMAIL, &other, NOW))).unwrap(), "signature": "sig" });
-        let reply = register(
-            &ldk,
-            &emails,
-            &|_| false,
-            stolen.to_string().as_bytes(),
-            NOW,
-        )
-        .await;
-        assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+        let stolen = envelope(&payload(EMAIL, &other, NOW), &signature);
+        assert_eq!(
+            send(&emails, &stolen).await.status,
+            StatusCode::UNAUTHORIZED
+        );
         assert_eq!(emails.email_of(&other).await, None);
 
         // Same node, a different address than the one signed.
-        let swapped = body("attacker@example.com", NODE, NOW + 1);
+        let swapped = envelope(&payload("attacker@example.com", NODE, NOW + 1), &signature);
         assert_eq!(
-            register(&ldk, &emails, &|_| false, &swapped, NOW)
-                .await
-                .status,
+            send(&emails, &swapped).await.status,
             StatusCode::UNAUTHORIZED
         );
         assert_eq!(emails.email_of(NODE).await.as_deref(), Some(EMAIL));
     }
 
     // The form the wallets sign: sorted-key JSON {"email","node_id","ts","type"}; the signature must cover these bytes as sent.
-    const APP_PAYLOAD: &str = r#"{"email":"you@example.com","node_id":"02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619","ts":1762790000,"type":"REGISTER_EMAIL_V1"}"#;
+    const APP_PAYLOAD: &str = r#"{"email":"you@example.com","node_id":"024d4b6cd1361032ca9bd2aeb9d900aa4d45d9ead80ac9423374c451a7254d0766","ts":1762790000,"type":"REGISTER_EMAIL_V1"}"#;
 
     #[tokio::test]
     async fn the_payload_the_apps_send_is_verified_over_its_exact_bytes() {
         let emails = Emails::in_memory(10);
-        let node_id = "02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619";
-        let ldk = NodeKeyFake {
-            node_id: node_id.to_string(),
-            signed: APP_PAYLOAD.as_bytes().to_vec(),
-        };
-        let body = serde_json::json!({ "payload": APP_PAYLOAD, "signature": "sig" }).to_string();
-        let reply = register(&ldk, &emails, &|_| false, body.as_bytes(), 1_762_790_000).await;
+        let signature = message_signing::sign(APP_PAYLOAD.as_bytes(), &key_of(NODE));
+        let reply = send(&emails, &envelope(APP_PAYLOAD, &signature)).await;
         assert_eq!(
             (reply.status, reply.body),
             (StatusCode::OK, serde_json::json!({ "ok": true }))
         );
         assert_eq!(
-            emails.email_of(node_id).await.as_deref(),
+            emails.email_of(NODE).await.as_deref(),
             Some("you@example.com")
         );
     }
@@ -612,10 +519,10 @@ mod tests {
     async fn an_uppercase_node_id_hits_the_same_replay_guard() {
         let emails = Emails::in_memory(10);
         assert_eq!(
-            send(Some(true), &emails, &body("", NODE, NOW)).await.status,
+            send(&emails, &body("", NODE, NOW)).await.status,
             StatusCode::OK
         );
-        let reply = send(Some(true), &emails, &body(EMAIL, &NODE.to_uppercase(), NOW)).await;
+        let reply = send(&emails, &body(EMAIL, &NODE.to_uppercase(), NOW)).await;
         assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
         assert_eq!(reply.audit.unwrap().1["reason"], "replay");
         assert_eq!(emails.email_of(NODE).await.as_deref(), Some(""));
@@ -625,7 +532,7 @@ mod tests {
     async fn an_extreme_timestamp_is_refused_without_overflow() {
         let emails = Emails::in_memory(10);
         for ts in [u64::MAX, i64::MAX as u64 + 1, 0] {
-            let reply = send(Some(true), &emails, &body(EMAIL, NODE, ts)).await;
+            let reply = send(&emails, &body(EMAIL, NODE, ts)).await;
             assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "{ts}");
         }
         assert_eq!(emails.email_of(NODE).await, None);
@@ -640,38 +547,21 @@ mod tests {
             payload["pad"] = serde_json::Value::String("x".repeat(pad));
             let payload = payload.to_string();
             assert_eq!(payload.len(), len);
-            serde_json::json!({ "payload": payload, "signature": "sig" })
-                .to_string()
-                .into_bytes()
+            envelope(
+                &payload,
+                &message_signing::sign(payload.as_bytes(), &key_of(NODE)),
+            )
         };
-        // A verify call would fail as unavailable (503), so a 400 shows it was never made.
-        let reply = send(None, &emails, &padded(MAX_PAYLOAD_LEN + 1)).await;
+        // Signed correctly, so a 400 shows the size, not the signature, refused it.
+        let reply = send(&emails, &padded(MAX_PAYLOAD_LEN + 1)).await;
         assert_eq!(
             (reply.status, error_of(&reply)),
             (StatusCode::BAD_REQUEST, "invalid payload")
         );
         assert_eq!(
-            send(Some(true), &emails, &padded(MAX_PAYLOAD_LEN))
-                .await
-                .status,
+            send(&emails, &padded(MAX_PAYLOAD_LEN)).await.status,
             StatusCode::OK
         );
-    }
-
-    #[test]
-    fn a_domain_label_is_at_most_63_bytes() {
-        assert!(is_valid_email(&format!(
-            "a@{}.com",
-            "b".repeat(MAX_LABEL_LEN)
-        )));
-        assert!(!is_valid_email(&format!(
-            "a@{}.com",
-            "b".repeat(MAX_LABEL_LEN + 1)
-        )));
-        assert!(!is_valid_email(&format!(
-            "a@example.{}",
-            "c".repeat(MAX_LABEL_LEN + 1)
-        )));
     }
 
     #[tokio::test]
@@ -689,50 +579,12 @@ mod tests {
             (Emails::in_memory_limited(10, 0), "hourly_limit"),
             (Emails::in_memory_limited(0, 10), "full"),
         ] {
-            let ldk = VerifyFake { valid: Some(true) };
-            let reply = register(
-                &ldk,
-                &emails,
-                &has_channel,
-                &body(EMAIL, &stranger, NOW),
-                NOW,
-            )
-            .await;
+            let reply = register(&emails, &has_channel, &body(EMAIL, &stranger, NOW), NOW).await;
             assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE, "{reason}");
             assert_eq!(reply.audit.unwrap().1["reason"], reason);
-            let reply = register(&ldk, &emails, &has_channel, &body(EMAIL, NODE, NOW), NOW).await;
+            let reply = register(&emails, &has_channel, &body(EMAIL, NODE, NOW), NOW).await;
             assert_eq!(reply.status, StatusCode::OK, "{reason}");
             assert_eq!(emails.email_of(NODE).await.as_deref(), Some(EMAIL));
-        }
-    }
-
-    #[test]
-    fn an_email_with_markup_quotes_or_header_breaks_is_refused() {
-        for bad in [
-            "a<b@example.com",
-            "a>b@example.com",
-            "\"a\"@example.com",
-            "a@exa<mple.com",
-            "a@example.com/x",
-            "a@exa_mple.com",
-            "a@-example.com",
-            "a@example-.com",
-            "a\\b@example.com",
-            "a@b.co\r\nbcc: x@y.co",
-            "ä@example.com",
-            "a@exämple.com",
-            ".a@example.com",
-            "a.@example.com",
-            "a..b@example.com",
-        ] {
-            assert!(!is_valid_email(bad), "{bad:?}");
-        }
-        for ok in [
-            "o'brien@example.com",
-            "a_b-c+d@sub-domain.example.co",
-            "x@xn--bcher-kva.example",
-        ] {
-            assert!(is_valid_email(ok), "{ok}");
         }
     }
 }
