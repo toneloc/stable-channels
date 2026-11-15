@@ -3,7 +3,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ldk_server_client::client::LdkServerClient;
 use stable_channels::db::Database;
 use tokio::sync::Mutex;
 
@@ -12,8 +11,8 @@ use crate::stable_manager::StableChannelManager;
 
 #[derive(Clone)]
 pub struct AppState {
-    /// gRPC client for LDK Server (used by proxy handlers).
-    pub ldk_server: Arc<LdkServerClient>,
+    /// gRPC client for LDK Server; every call gives up after `LDK_CALL_TIMEOUT`.
+    pub ldk_server: Arc<crate::ldk_client::LdkClient>,
     /// HMAC api_key for this daemon's REST surface (used by auth middleware).
     pub api_key: Arc<Vec<u8>>,
     /// SC daemon's data directory (audit log, sqlite, etc.).
