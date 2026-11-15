@@ -261,8 +261,7 @@ final class NodeStartupCoordinatorTests: XCTestCase {
         shouldRun: @escaping @MainActor () -> Bool = { true },
         probe: @escaping @MainActor () async -> Void = {},
         start: @escaping @MainActor (String) async -> Void = { _ in },
-        ran: Bool = true,
-        stop: @escaping @MainActor () -> Void = {}
+        ran: Bool = true
     ) -> NodeStartupCoordinator.RetryRun {
         NodeStartupCoordinator.RetryRun(
             shouldRun: shouldRun,
@@ -273,8 +272,7 @@ final class NodeStartupCoordinatorTests: XCTestCase {
             start: { url in
                 await start(url)
                 return ran
-            },
-            stop: stop
+            }
         )
     }
 
@@ -528,39 +526,6 @@ final class NodeStartupCoordinatorTests: XCTestCase {
         await waitUntilIdle(coordinator)
 
         XCTAssertFalse(coordinator.hasRetryRunning)
-    }
-
-    func testPauseDuringStart_stopsTheStartedNode() async {
-        let coordinator = makeCoordinator()
-        let stopped = expectation(description: "node stopped")
-
-        coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall", run: run(
-            // Stands in for backgrounding while LDK's uncancellable start blocks.
-            start: { _ in coordinator.pause() },
-            stop: { stopped.fulfill() }
-        ))
-
-        await fulfillment(of: [stopped], timeout: 1)
-        coordinator.reset()
-    }
-
-    func testForegroundDuringStart_keepsTheStartedNode() async {
-        let coordinator = makeCoordinator()
-        let finished = expectation(description: "start returned")
-        var stopped = false
-
-        coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall", run: run(
-            start: { _ in
-                coordinator.pause()
-                coordinator.resumeIfIdle(maxDelay: self.maxDelay, reason: "resumed on foreground", run: self.run())
-                finished.fulfill()
-            },
-            stop: { stopped = true }
-        ))
-        await fulfillment(of: [finished], timeout: 1)
-
-        XCTAssertFalse(stopped, "A start that finishes after foreground must keep the node")
-        coordinator.reset()
     }
 
     func testSuccessfulStartInsideARetry_doesNotCancelTheRetry() async {
@@ -841,10 +806,9 @@ final class NodeStartupCoordinatorTests: XCTestCase {
         appState.nodeStartup.reset()
     }
 
-    /// Background stop during the delay between failover attempts must not free the wallet dir the
-    /// failover holds, and the failover must not start another node in the suspended app: it ends
-    /// paused and only then hands the dir back.
-    func testBackgroundStopBetweenFailoverAttempts_keepsTheLockAndStartsNoFurtherAttempt() async {
+    /// Background stop during the delay between failover attempts hands the wallet dir to the NSE at
+    /// once (a suspended app never wakes to release it), and the failover starts no further node.
+    func testBackgroundStopBetweenFailoverAttempts_releasesTheLockAndStartsNoFurtherAttempt() async {
         NodeDirLock.shared.release()
         let node = FeeStallingNodeService()
         var appState: AppState?
@@ -863,7 +827,7 @@ final class NodeStartupCoordinatorTests: XCTestCase {
 
         await appState?.retryConnection()
 
-        XCTAssertEqual(lockHeldAfterStop, true, "Background stop must leave the failover's lock held")
+        XCTAssertEqual(lockHeldAfterStop, false, "Background stop must hand the wallet dir back")
         XCTAssertEqual(
             node.startedURLs,
             [Constants.primaryChainURL, Constants.fallbackChainURL],
@@ -945,6 +909,49 @@ final class NodeStartupCoordinatorTests: XCTestCase {
     private func restoreSeedPhrase(_ saved: (url: URL, original: Data?)) {
         try? FileManager.default.removeItem(at: saved.url)
         if let original = saved.original { try? original.write(to: saved.url) }
+    }
+
+    /// LDK's start can't be cancelled: a start that finishes after background stop ran stops its
+    /// node, hands the wallet dir back and ends paused for foreground to resume.
+    func testStartFinishingAfterThePause_stopsItsNodeAndReleasesTheLock() async {
+        NodeDirLock.shared.release()
+        let node = LatePausedNodeService()
+        let appState = AppState(
+            nodeService: node,
+            networkMonitor: MockNetworkMonitor(initialStatus: .online),
+            nodeStartup: heldRetries()
+        )
+        node.whileStarting = { appState.performBackgroundStop() }
+        appState.phase = .syncing
+
+        await appState.retryConnection()
+
+        XCTAssertEqual(node.stopCount, 1, "The node that came up after the pause must be stopped")
+        XCTAssertFalse(node.isRunning)
+        XCTAssertFalse(NodeDirLock.shared.isHeld, "The stopped node hands the wallet dir back")
+        XCTAssertTrue(appState.nodeStartup.isPaused)
+        appState.nodeStartup.reset()
+    }
+
+    func testStartFinishingAfterForeground_keepsItsNode() async {
+        NodeDirLock.shared.release()
+        let node = LatePausedNodeService()
+        let appState = AppState(
+            nodeService: node,
+            networkMonitor: MockNetworkMonitor(initialStatus: .online),
+            nodeStartup: heldRetries()
+        )
+        node.whileStarting = {
+            appState.nodeStartup.pause()
+            appState.nodeStartup.resume()
+        }
+        appState.phase = .syncing
+
+        await appState.retryConnection()
+
+        XCTAssertEqual(node.stopCount, 0, "A start that finishes after foreground must keep the node")
+        XCTAssertTrue(NodeDirLock.shared.isHeld)
+        appState.nodeStartup.reset()
     }
 
     func testForegroundInAnyPhase_endsThePause() async {
@@ -1064,6 +1071,31 @@ private class FeeStallingNodeService: StallingNodeService {
 /// A node whose start fails fee-rate estimation only against the primary provider.
 private class PrimaryStallingNodeService: FeeStallingNodeService {
     override func stall(_ url: String) -> NodeError? { url == Constants.primaryChainURL ? super.stall(url) : nil }
+}
+
+/// A node whose start succeeds after `whileStarting` ran, holding the wallet dir like a real node.
+private final class LatePausedNodeService: NodeService {
+    var whileStarting: @MainActor () -> Void = {}
+    private(set) var stopCount = 0
+    private var started = false
+
+    override var isRunning: Bool { started }
+
+    override func start(
+        network _: Network,
+        esploraURL _: String,
+        mnemonic _: String,
+        lspConfig _: LSPConfig
+    ) async throws {
+        await whileStarting()
+        _ = NodeDirLock.shared.tryAcquire(dataDir: Constants.userDataDir)
+        started = true
+    }
+
+    override func stop() {
+        stopCount += 1
+        started = false
+    }
 }
 
 /// Fails over like `PrimaryStallingNodeService` and takes the wallet-dir lease the way `NodeService.start`

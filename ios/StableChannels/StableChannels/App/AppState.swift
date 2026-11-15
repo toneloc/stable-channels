@@ -1405,8 +1405,7 @@ class AppState {
                 guard let self else { return false }
                 self.chainURL = url
                 return await self.retryConnection()
-            },
-            stop: { [weak self] in self?.performBackgroundStop() }
+            }
         )
     }
 
@@ -1592,7 +1591,7 @@ class AppState {
             // starved of stability pushes for the suspended app's lifetime.
             // While a flow IS live (even pre-isStarting, e.g. stalled in DB
             // init), the lock stays: that flow owns it and may still resume.
-            if !nodeService.isStarting && !nodeFlowInProgress && !nodeStartup.isFailoverRunning {
+            if !nodeService.isStarting && !nodeFlowInProgress {
                 NodeDirLock.shared.release()
             }
             if backgroundTaskID != .invalid {
@@ -4337,7 +4336,7 @@ class AppState {
     /// One wallet-dir lease spans every provider attempt (a no-op where the caller already
     /// holds it), so a failed attempt never frees the dir for the NSE before the next one.
     /// On total failure the lock is released so a broken app process never starves the NSE;
-    /// on success the running node keeps it.
+    /// on success the running node keeps it, unless the app was paused meanwhile.
     private func startNodeWithFailover(mnemonic: String = "") async throws {
         // Backgrounded: leave the wallet dir to the notification extension; the caller keeps the start pending.
         guard !nodeStartup.isPaused else { throw CancellationError() }
@@ -4358,6 +4357,11 @@ class AppState {
                     lspConfig: self.activeLSP
                 )
             }
+        }
+        // LDK's start can't be cancelled: a node that came up after the pause gets the background stop it missed.
+        guard !nodeStartup.isPaused else {
+            performBackgroundStop()
+            throw CancellationError()
         }
     }
 

@@ -20,8 +20,6 @@ final class NodeStartupCoordinator {
         let probe: @MainActor () async -> String
         /// Starts the node against the probed provider; false when the start was turned away without running.
         let start: @MainActor (String) async -> Bool
-        /// Stops a node that came up after the app was paused, handing the wallet dir back.
-        let stop: @MainActor () -> Void
     }
 
     /// Whether a requested retry was scheduled or the retry budget is spent.
@@ -45,10 +43,6 @@ final class NodeStartupCoordinator {
     @ObservationIgnored private(set) var isPaused = false
     /// True while a fired retry is still running (probing providers or starting the node).
     var hasRetryRunning: Bool { runningRetry != nil }
-    /// True while `start` walks its attempts, including the delay between them, when no
-    /// `NodeService` start is in flight; background stop must keep the lock the failover holds.
-    var isFailoverRunning: Bool { runningFailovers > 0 }
-    @ObservationIgnored private var runningFailovers = 0
     /// Bumped by every background pause, so a failover can tell it was paused mid-sequence.
     @ObservationIgnored private var pauseCount = 0
     @ObservationIgnored private let sleep: (Duration) async throws -> Void
@@ -93,8 +87,6 @@ final class NodeStartupCoordinator {
         guard let primaryURL = attempts.first?.url else { throw NodeStartupError.noAttempts }
         // Every start goes through here, so a start asked for while the app is suspended never runs LDK.
         guard !isPaused else { throw CancellationError() }
-        runningFailovers += 1
-        defer { runningFailovers -= 1 }
         let pausesAtStart = pauseCount
         var firstError: Error?
         var lastError: Error?
@@ -223,11 +215,7 @@ final class NodeStartupCoordinator {
         // Background-stop pauses the retry and may hand the wallet dir to the NSE during the
         // probe; a cancelled retry must not start the node.
         guard !Task.isCancelled else { return false }
-        let ran = await run.start(url)
-        // LDK's start can't be cancelled, so a retry paused mid-start may still bring the node up
-        // in a suspended app; stop it so the NSE gets the wallet dir.
-        if isPaused { run.stop() }
-        return ran
+        return await run.start(url)
     }
 
     /// Back in foreground: a start that finishes from now on keeps its node.

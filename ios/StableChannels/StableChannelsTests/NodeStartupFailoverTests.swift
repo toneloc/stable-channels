@@ -204,4 +204,47 @@ final class NodeStartupFailoverTests: XCTestCase {
         XCTAssertFalse(lease.held)
         XCTAssertLessThan(ContinuousClock.now - cancelledAt, .seconds(1))
     }
+
+    /// A failed body under an outer lease (restore's) leaves the lock with the lease's owner.
+    @MainActor
+    func testWithHeldLock_failureUnderAnOuterLeaseKeepsTheLock() async {
+        let tempDir = makeTempDir()
+        defer {
+            NodeDirLock.shared.release()
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+        XCTAssertTrue(NodeDirLock.shared.tryAcquire(dataDir: tempDir))
+
+        await failInsideHeldLock(dataDir: tempDir)
+
+        XCTAssertTrue(NodeDirLock.shared.isHeld, "Only the call that took the lock may release it")
+    }
+
+    /// A failed body that took the lock itself hands it back so a broken start never starves the NSE.
+    @MainActor
+    func testWithHeldLock_failureWithoutAnOuterLeaseReleasesTheLock() async {
+        let tempDir = makeTempDir()
+        defer {
+            NodeDirLock.shared.release()
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+        NodeDirLock.shared.release()
+
+        await failInsideHeldLock(dataDir: tempDir)
+
+        XCTAssertFalse(NodeDirLock.shared.isHeld)
+    }
+
+    @MainActor
+    private func failInsideHeldLock(dataDir: URL) async {
+        do {
+            try await NodeDirLock.shared.withHeldLock(
+                dataDir: dataDir,
+                timeout: 1,
+                caller: "test",
+                isNodeRunning: { false }
+            ) { () async throws in throw NodeServiceError.dataDirLocked }
+            XCTFail("The body's error must propagate")
+        } catch {}
+    }
 }

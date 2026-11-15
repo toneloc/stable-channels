@@ -68,7 +68,7 @@ final class NodeDirLock: @unchecked Sendable {
                 return (held: false, newlyAcquired: false)
             }
             do {
-                try await Task.sleep(nanoseconds: 200_000_000)
+                try await Task.sleep(for: Constants.nodeDirLockPollInterval)
             } catch {
                 return (held: false, newlyAcquired: false)
             }
@@ -104,7 +104,8 @@ final class NodeDirLock: @unchecked Sendable {
 
 extension NodeDirLock {
     /// Runs `body` under one wallet-dir lease (a no-op acquire under an outer lease). When `body`
-    /// fails and no node is running, the lock is released so a broken start never starves the NSE.
+    /// fails, no node is running and this call took the lock, it is released so a broken start never
+    /// starves the NSE; an outer lease stays with its owner.
     /// A wait cancelled by a pause throws `CancellationError`; a timed-out wait logs
     /// `NODE_LOCK_TIMEOUT` for `caller` and throws `NodeServiceError.dataDirLocked`.
     @MainActor
@@ -115,16 +116,17 @@ extension NodeDirLock {
         isNodeRunning: () -> Bool,
         _ body: () async throws -> T
     ) async throws -> T {
+        let lease = await acquireReportingNew(dataDir: dataDir, timeout: timeout)
+        guard lease.held else {
+            // A paused retry gave up waiting; report the pause, not a locked wallet dir.
+            try Task.checkCancellation()
+            AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": caller])
+            throw NodeServiceError.dataDirLocked
+        }
         do {
-            guard await acquire(dataDir: dataDir, timeout: timeout) else {
-                // A paused retry gave up waiting; report the pause, not a locked wallet dir.
-                try Task.checkCancellation()
-                AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": caller])
-                throw NodeServiceError.dataDirLocked
-            }
             return try await body()
         } catch {
-            if !isNodeRunning() {
+            if lease.newlyAcquired, !isNodeRunning() {
                 release()
             }
             throw error
