@@ -150,6 +150,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn queued_splice_calls_through_the_trait_keep_the_timeout_and_unknown_outcome() {
+        let (address, accepted) = silent_server().await;
+        let client = client_for(address, Duration::from_millis(200));
+        let ldk: &dyn LdkServerCalls = &client;
+        let error = tokio::time::timeout(Duration::from_secs(10), ldk.splice_in(SpliceInRequest::default()))
+            .await
+            .expect("queued splices use the bounded client")
+            .unwrap_err();
+        assert_eq!(error.error_code, LdkServerErrorCode::InternalError);
+        assert!(unanswered(&error), "a timeout must not count as a node refusal");
+        assert!(error.message.contains("splice_in"), "{}", error.message);
+        assert!(accepted.load(Ordering::SeqCst) >= 1, "the call reached the server and waited there");
+    }
+
+    #[tokio::test]
     async fn opening_the_event_stream_is_bounded_too() {
         let (address, _) = silent_server().await;
         let client = client_for(address, Duration::from_millis(200));
