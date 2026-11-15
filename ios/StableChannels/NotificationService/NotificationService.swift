@@ -88,6 +88,11 @@ class NotificationService: UNNotificationServiceExtension {
     /// becomes fresh late.
     private static let userToLspFreshnessDeadlineSecs: TimeInterval = 20
 
+    /// lsp_splice_in only: when the wait for the LSP's splice ends, counted from `extensionStart`
+    /// like the user_to_lsp deadline. It leaves a few seconds of the ~30s window to stop the node
+    /// and deliver the notification.
+    private static let lspSpliceDeadlineSecs: TimeInterval = 24
+
     // MARK: - Dependencies (injected for testability)
 
     private var logger: Logger = FileLogger(appGroup: Constants.appGroup)
@@ -106,6 +111,9 @@ class NotificationService: UNNotificationServiceExtension {
     /// deadline. Recorded before node build or price work so those costs count against
     /// the wait budget, not on top of it.
     private var extensionStart = Date()
+
+    /// This run's push direction, for the text shown when the run cannot finish.
+    private var direction: PaymentDirection = .lspToUser
 
     /// Coordinates serviceExtensionTimeWillExpire with an in-flight node
     /// build: while `buildInFlight`, the expire handler must NOT release the
@@ -150,11 +158,17 @@ class NotificationService: UNNotificationServiceExtension {
 
         // Parse direction
         let direction = PaymentDirection(from: request.content.userInfo)
+        self.direction = direction
 
         // Tag with notification type
         var updatedUserInfo = content.userInfo
         updatedUserInfo["notification_type"] = direction.notificationType
         content.userInfo = updatedUserInfo
+        // Shown if the run ends before the splice locks, including every early exit below.
+        if direction == .lspSpliceIn {
+            content.title = LspSpliceNotice.title
+            content.body = LspSpliceNotice.body
+        }
 
         logger.log("didReceive: direction=\(direction.rawValue)")
 
@@ -201,8 +215,7 @@ class NotificationService: UNNotificationServiceExtension {
             cleanup()
         }
         if let content = bestAttemptContent {
-            content.title = "Payment Pending"
-            content.body = "Open app to process your payment"
+            setPendingText(content)
             finish(content)
         }
     }
@@ -310,8 +323,7 @@ class NotificationService: UNNotificationServiceExtension {
             lifecycleLock.unlock()
             logger.log("NODE FAILED: \(error)")
             cleanup()
-            content.title = "Payment Pending"
-            content.body = "Open app to process your payment"
+            setPendingText(content)
             finish(content)
         }
     }
@@ -330,9 +342,15 @@ class NotificationService: UNNotificationServiceExtension {
         // The user_to_lsp handler waits for a fresh Lightning-wallet sync at its send
         // boundary (see #243); this gate lets that wait observe the extension lifecycle
         // (checked under the lock each iteration) and the extension-wide deadline.
-        let syncGate: StabilitySyncGate? = direction == .userToLsp
-            ? StabilitySyncGate(
-                deadline: extensionStart.addingTimeInterval(Self.userToLspFreshnessDeadlineSecs),
+        // The lsp_splice_in wait uses the same gate for its own deadline.
+        let deadlineSecs: TimeInterval? = switch direction {
+        case .userToLsp: Self.userToLspFreshnessDeadlineSecs
+        case .lspSpliceIn: Self.lspSpliceDeadlineSecs
+        case .lspToUser, .incomingPayment: nil
+        }
+        let syncGate: StabilitySyncGate? = deadlineSecs.map { secs in
+            StabilitySyncGate(
+                deadline: extensionStart.addingTimeInterval(secs),
                 isCancelled: { [weak self] in
                     guard let self else { return true }
                     self.lifecycleLock.lock()
@@ -342,7 +360,7 @@ class NotificationService: UNNotificationServiceExtension {
                 },
                 log: { [logger] message in logger.log(message) }
             )
-            : nil
+        }
 
         let handler = PaymentHandlerFactory.handler(for: direction, syncGate: syncGate)
         handler
@@ -368,9 +386,20 @@ class NotificationService: UNNotificationServiceExtension {
         contentHandler _: @escaping (UNNotificationContent) -> Void
     ) {
         cleanup()
-        content.title = "Payment Pending"
-        content.body = "Open app to process your payment"
+        setPendingText(content)
         finish(content)
+    }
+
+    /// The text for a run that could not finish: open the app to process the payment, or to
+    /// finish the LSP's channel update.
+    private func setPendingText(_ content: UNMutableNotificationContent) {
+        if direction == .lspSpliceIn {
+            content.title = LspSpliceNotice.title
+            content.body = LspSpliceNotice.body
+        } else {
+            content.title = "Payment Pending"
+            content.body = "Open app to process your payment"
+        }
     }
 
     // MARK: - Helpers

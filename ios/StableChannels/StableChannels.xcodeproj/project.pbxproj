@@ -109,6 +109,7 @@
 		499127822FFEB50B00D9C81F /* NodeStarter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4991277C2FFEB50B00D9C81F /* NodeStarter.swift */; };
 		499127832FFEB50B00D9C81F /* UserToLSPHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4991277F2FFEB50B00D9C81F /* UserToLSPHandler.swift */; };
 		499127842FFEB50B00D9C81F /* LSPToUserHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4991277B2FFEB50B00D9C81F /* LSPToUserHandler.swift */; };
+		EF4CE45F34B39171B1BA925D /* LSPSpliceInHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 861685AA8D77ADBA9D77D399 /* LSPSpliceInHandler.swift */; };
 		499127862FFEB50B00D9C81F /* SQLitePaymentDatabase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4991277E2FFEB50B00D9C81F /* SQLitePaymentDatabase.swift */; };
 		4991278A2FFEB51600D9C81F /* PaymentHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499127882FFEB51600D9C81F /* PaymentHandler.swift */; };
 		4991278B2FFEB51600D9C81F /* PriceFetcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499127892FFEB51600D9C81F /* PriceFetcher.swift */; };
@@ -270,6 +271,7 @@
 		7015C73934B1CDBCEF48751A /* LSPService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0D4B3FBC893E4863B95AB9 /* LSPService.swift */; };
 		70CCF0022F9D46C70004CB73 /* OnChainConfirmationPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70CCF0012F9D46C70004CB73 /* OnChainConfirmationPolicyTests.swift */; };
 		742685EC8E3DF3469AB13F42 /* SpliceEventRecorderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 407FF957B8C27164D619752C /* SpliceEventRecorderTests.swift */; };
+		7719B8EC3611239A6CEDCA0E /* LspSplicePushTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D5A8AABEAEFEE7241CECC1F /* LspSplicePushTests.swift */; };
 		76D934F4495402F7B4944BE3 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 8811E90D4B2B5C5C51093A95 /* Assets.xcassets */; };
 		77C4A0020FE831C371A5B32D /* SpliceEventRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BFB106CCF56DFD45F8E3AC5 /* SpliceEventRecorder.swift */; };
 		8173B7F0205744685F9E67E6 /* NodeService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61BB0D1D623E0794FC1ED6ED /* NodeService.swift */; };
@@ -373,6 +375,7 @@
 		3940DC5406ABC63AA090441A /* DatabaseService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DatabaseService.swift; sourceTree = "<group>"; };
 		3B46630309755AE15EF291D4 /* HistoricalPrices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoricalPrices.swift; sourceTree = "<group>"; };
 		407FF957B8C27164D619752C /* SpliceEventRecorderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpliceEventRecorderTests.swift; sourceTree = "<group>"; };
+		5D5A8AABEAEFEE7241CECC1F /* LspSplicePushTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LspSplicePushTests.swift; sourceTree = "<group>"; };
 		445B52C4DEC5CE8D3B0B3DA9 /* ReceiveView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReceiveView.swift; sourceTree = "<group>"; };
 		45B3E864653E657FB0FCA3D2 /* Trade.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Trade.swift; sourceTree = "<group>"; };
 		490224CB302F90A500DF84AA /* PriceServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PriceServiceTests.swift; sourceTree = "<group>"; };
@@ -444,6 +447,7 @@
 		499127792FFEB50B00D9C81F /* IncomingPaymentHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IncomingPaymentHandler.swift; sourceTree = "<group>"; };
 		4991277A2FFEB50B00D9C81F /* Logger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Logger.swift; sourceTree = "<group>"; };
 		4991277B2FFEB50B00D9C81F /* LSPToUserHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LSPToUserHandler.swift; sourceTree = "<group>"; };
+		861685AA8D77ADBA9D77D399 /* LSPSpliceInHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LSPSpliceInHandler.swift; sourceTree = "<group>"; };
 		4991277C2FFEB50B00D9C81F /* NodeStarter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeStarter.swift; sourceTree = "<group>"; };
 		4991277E2FFEB50B00D9C81F /* SQLitePaymentDatabase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SQLitePaymentDatabase.swift; sourceTree = "<group>"; };
 		4991277F2FFEB50B00D9C81F /* UserToLSPHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserToLSPHandler.swift; sourceTree = "<group>"; };
@@ -831,6 +835,7 @@
 				BB9FA0AF6BCBF33B350E316C /* LightningPaymentRecovery.swift */,
 				4991277A2FFEB50B00D9C81F /* Logger.swift */,
 				4991277B2FFEB50B00D9C81F /* LSPToUserHandler.swift */,
+				861685AA8D77ADBA9D77D399 /* LSPSpliceInHandler.swift */,
 				4991277C2FFEB50B00D9C81F /* NodeStarter.swift */,
 				499127912FFEC7B700D9C81F /* NotificationContentMutator.swift */,
 				D57E67E4DF7526619CFA2395 /* SharedPaymentSQL.swift */,
@@ -1282,6 +1287,7 @@
 				49F36456000000000000A003 /* OwnForceCloseTests.swift */,
 				DA5CDE09198A922915380E55 /* SpliceCompletionPolicyTests.swift */,
 				407FF957B8C27164D619752C /* SpliceEventRecorderTests.swift */,
+				5D5A8AABEAEFEE7241CECC1F /* LspSplicePushTests.swift */,
 				5C279A012FEA00010074ACD2 /* SpliceRepositoryTests.swift */,
 				D1A60F120000000000000004 /* SPVHeaderChainServiceTests.swift */,
 				4993591730712D1500D6B50E /* SQLitePaymentDatabaseTests.swift */,
@@ -1426,6 +1432,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				7719B8EC3611239A6CEDCA0E /* LspSplicePushTests.swift in Sources */,
 				4993591830712D1500D6B50E /* AddressVisualChunkerTests.swift in Sources */,
 				4993591930712D1500D6B50E /* Base58CheckTests.swift in Sources */,
 				D20000000000000000000037 /* Bech32Tests.swift in Sources */,
@@ -1722,6 +1729,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				EF4CE45F34B39171B1BA925D /* LSPSpliceInHandler.swift in Sources */,
 				499127782FFEB4FB00D9C81F /* PaymentDirection.swift in Sources */,
 				4991278A2FFEB51600D9C81F /* PaymentHandler.swift in Sources */,
 				4991278F2FFEC05D00D9C81F /* Constants.swift in Sources */,
