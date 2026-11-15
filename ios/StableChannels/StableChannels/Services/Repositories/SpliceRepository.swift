@@ -216,7 +216,8 @@ final class SpliceRepository {
     /// acknowledged, since LDK's event queue must keep moving). The node proves the splice once the
     /// channel's live funding is the event's txid; it is then bound only when exactly one operation
     /// on that channel still waits for a txid. One started after the lock saved that txid as its
-    /// previous funding, so it never qualifies.
+    /// previous funding, so it never qualifies. A negotiation recorded as the LSP's splice is never
+    /// bound: the live funding proves the LSP's splice, not a Move.
     func recoverUnboundNegotiations(
         liveFunding: (_ userChannelId: String, _ channelId: String) -> (txid: String, vout: UInt32)?
     ) throws {
@@ -229,6 +230,7 @@ final class SpliceRepository {
                       SELECT 1 FROM payments p
                       WHERE p.txid = e.txid AND p.payment_type IN \(SpliceEventRecorder.spliceTypesSQL)
                   )
+                  AND NOT EXISTS (SELECT 1 FROM lsp_splices l WHERE l.txid = e.txid)
                 ORDER BY e.rowid LIMIT ?
                 """,
                 params: [.integer(Int64(Self.readyEventRecoveryBatchSize))]

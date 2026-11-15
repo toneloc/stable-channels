@@ -2938,7 +2938,9 @@ class AppState {
         // finished or unknown operation must not take over the in-memory splice state or monitor.
         guard (try? databaseService?.spliceRepo.isPendingSplice(txid: txidStr)) == true else {
             if (try? databaseService?.spliceRepo.isLspSplice(txid: txidStr)) == true {
-                // The LSP's own splice: no Move of the user's, so only the balances change.
+                // The LSP's own splice: no Move of the user's, so only the funding and the balances
+                // change.
+                fundingTxid = txidStr
                 refreshBalances()
                 updateStableBalances()
                 return

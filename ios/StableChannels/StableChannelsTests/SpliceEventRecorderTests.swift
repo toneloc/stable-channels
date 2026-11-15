@@ -388,6 +388,29 @@ final class SpliceEventRecorderTests: XCTestCase {
         XCTAssertEqual(try service.rawSQL.query("SELECT COUNT(*) FROM payments").first?.int64(0), 1)
     }
 
+    func testOnceTheLspsSpliceLocksTheLiveFundingDoesNotBindItToALeftoverMove() throws {
+        let expired = try begin()
+        try ageOut(expired)
+        _ = try service.spliceRepo.hasPendingSplice()
+        try service.spliceRepo.recordEvent(negotiated(newFunding), lspSplice: true)
+        try service.spliceRepo.recordEvent(ready(eventFunding: newFunding))
+        let locked = newFunding
+        try service.spliceRepo.recoverUnboundNegotiations { _, _ in (txid: locked, vout: 1) }
+        XCTAssertEqual(try row(expired).status, "expired")
+        XCTAssertNil(try row(expired).txid)
+        XCTAssertFalse(try service.spliceRepo.hasPendingSplice())
+    }
+
+    func testOnceTheLspsSpliceLocksAPendingLeftoverRecordedInTheBackgroundStaysWithoutIt() throws {
+        let pending = try begin()
+        XCTAssertTrue(backgroundDB.recordSpliceEvent(negotiated(newFunding), lspSplice: true))
+        XCTAssertTrue(backgroundDB.recordSpliceEvent(ready(eventFunding: newFunding), lspSplice: true))
+        let locked = newFunding
+        try service.spliceRepo.recoverUnboundNegotiations { _, _ in (txid: locked, vout: 1) }
+        XCTAssertNil(try row(pending).txid)
+        XCTAssertNil(try service.spliceRepo.getPendingSpliceTxid())
+    }
+
     func testAnExpiredMoveIsKeptFromTheLspsSpliceToo() throws {
         let leftover = try begin()
         try ageOut(leftover)
