@@ -51,10 +51,8 @@ final class NodeStartupCoordinator {
 
     init(
         sleep: @escaping (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
-        log: @escaping (String, [String: Any]) -> Void = { AuditService.log($0, data: $1) },
-        chainURLStore: ChainURLStore = UserDefaultsChainURLStore(
-            defaults: UserDefaults(suiteName: Constants.appGroupIdentifier)
-        )
+        log: @escaping (String, [String: Any]) -> Void,
+        chainURLStore: ChainURLStore
     ) {
         self.sleep = sleep
         self.log = log

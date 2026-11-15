@@ -1024,6 +1024,49 @@ final class NodeStartupCoordinatorTests: XCTestCase {
         coordinator.reset()
     }
 
+    /// A launch that background paused between provider attempts hands the wallet dir back,
+    /// so the suspended app never keeps it from the notification extension.
+    func testLaunchPausedBetweenAttempts_releasesTheWalletDir() async {
+        NodeDirLock.shared.release()
+        var appState: AppState?
+        let coordinator = makeCoordinator(sleep: { duration in
+            guard duration == Constants.nodeStartRetryDelay else { return }
+            appState?.performBackgroundStop()
+        })
+        appState = AppState(
+            nodeService: FeeStallingNodeService(),
+            networkMonitor: MockNetworkMonitor(initialStatus: .online),
+            nodeStartup: coordinator
+        )
+
+        await appState?.start()
+
+        XCTAssertTrue(coordinator.isPaused)
+        XCTAssertFalse(NodeDirLock.shared.isHeld, "No node runs, so the paused launch hands the wallet dir back")
+        coordinator.reset()
+    }
+
+    /// A foreground restart picks up the funding txid the notification extension saved while the
+    /// app was suspended, like every other recovered start.
+    func testForegroundRestart_reloadsTheFundingTxidSavedWhileSuspended() async {
+        NodeDirLock.shared.release()
+        let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        let saved = shared?.string(forKey: "funding_txid")
+        defer { shared?.set(saved, forKey: "funding_txid") }
+        let appState = AppState(
+            nodeService: LatePausedNodeService(),
+            networkMonitor: MockNetworkMonitor(initialStatus: .online),
+            nodeStartup: heldRetries()
+        )
+        appState.phase = .wallet
+        shared?.set("nse-funding-txid", forKey: "funding_txid")
+
+        await appState.restartNodeFromForeground()
+
+        XCTAssertEqual(appState.fundingTxid, "nse-funding-txid")
+        appState.nodeStartup.reset()
+    }
+
     func testBackgroundStopDuringLaunch_doesNotProduceTerminalError() async {
         let node = FeeStallingNodeService()
         var appState: AppState?

@@ -79,6 +79,27 @@ final class NodeStartupFailoverTests: XCTestCase {
         }
     }
 
+    /// Fee-rate failures fail over to another provider; wallet-sync failures only retry the start with backoff.
+    func testNodeStartRetriesCoverFeeRateAndSyncFailures_failoverOnlyFeeRate() {
+        let feeRate: [Error] = [
+            NodeError.FeerateEstimationUpdateFailed(message: "429"),
+            NodeError.FeerateEstimationUpdateTimeout(message: "timed out")
+        ]
+        let sync: [Error] = [NodeError.TxSyncFailed(message: "sync"), NodeError.TxSyncTimeout(message: "sync")]
+        let neither: [Error] = [NodeError.PersistenceFailed(message: "disk"), NodeServiceError.dataDirLocked]
+
+        for error in feeRate {
+            XCTAssertTrue(error.isRetryableNodeStartError, "\(error)")
+        }
+        for error in sync {
+            XCTAssertTrue(error.isRetryableNodeStartError, "\(error)")
+            XCTAssertFalse(error.isRetryableEsploraStartupError, "\(error)")
+        }
+        for error in neither {
+            XCTAssertFalse(error.isRetryableNodeStartError, "\(error)")
+        }
+    }
+
     // MARK: - NodeDirLock (binary lease with ownership reporting)
 
     private func makeTempDir() -> URL {
@@ -242,6 +263,7 @@ final class NodeStartupFailoverTests: XCTestCase {
                 dataDir: dataDir,
                 timeout: 1,
                 caller: "test",
+                log: { _, _ in },
                 isNodeRunning: { false }
             ) { () async throws in throw NodeServiceError.dataDirLocked }
             XCTFail("The body's error must propagate")

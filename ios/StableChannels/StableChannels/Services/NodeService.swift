@@ -75,6 +75,21 @@ final class NodeDirLock: @unchecked Sendable {
         }
     }
 
+    /// `acquireReportingNew` that logs `NODE_LOCK_TIMEOUT` for `caller` when the wait times out, not
+    /// when a pause cancelled it.
+    func acquireReportingTimeout(
+        dataDir: URL,
+        timeout: TimeInterval,
+        caller: String,
+        log: (String, [String: Any]) -> Void
+    ) async -> (held: Bool, newlyAcquired: Bool) {
+        let lease = await acquireReportingNew(dataDir: dataDir, timeout: timeout)
+        if !lease.held, !Task.isCancelled {
+            log("NODE_LOCK_TIMEOUT", ["where": caller])
+        }
+        return lease
+    }
+
     /// Release if held. Safe to call when not holding (no-op).
     func release() {
         queue.sync {
@@ -113,14 +128,14 @@ extension NodeDirLock {
         dataDir: URL,
         timeout: TimeInterval,
         caller: String,
+        log: (String, [String: Any]) -> Void,
         isNodeRunning: () -> Bool,
         _ body: () async throws -> T
     ) async throws -> T {
-        let lease = await acquireReportingNew(dataDir: dataDir, timeout: timeout)
+        let lease = await acquireReportingTimeout(dataDir: dataDir, timeout: timeout, caller: caller, log: log)
         guard lease.held else {
             // A paused retry gave up waiting; report the pause, not a locked wallet dir.
             try Task.checkCancellation()
-            AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": caller])
             throw NodeServiceError.dataDirLocked
         }
         do {
@@ -155,24 +170,6 @@ protocol NodeServiceProtocol {
 
 @Observable
 class NodeService: NodeServiceProtocol {
-    /// The app node's Esplora sync intervals and timeouts, shared by every builder in the app.
-    static var esploraSyncConfig: EsploraSyncConfig {
-        EsploraSyncConfig(
-            backgroundSyncConfig: BackgroundSyncConfig(
-                onchainWalletSyncIntervalSecs: Constants.onchainWalletSyncIntervalSecs,
-                lightningWalletSyncIntervalSecs: Constants.lightningWalletSyncIntervalSecs,
-                feeRateCacheUpdateIntervalSecs: Constants.feeRateCacheUpdateIntervalSecs
-            ),
-            timeoutsConfig: SyncTimeoutsConfig(
-                onchainWalletSyncTimeoutSecs: Constants.onchainWalletSyncTimeoutSecs,
-                lightningWalletSyncTimeoutSecs: Constants.lightningWalletSyncTimeoutSecs,
-                feeRateCacheUpdateTimeoutSecs: Constants.feeRateCacheUpdateTimeoutSecs,
-                txBroadcastTimeoutSecs: Constants.txBroadcastTimeoutSecs,
-                perRequestTimeoutSecs: Constants.esploraRequestTimeoutSecs
-            )
-        )
-    }
-
     static let shared = NodeService()
 
     private(set) var node: Node?
@@ -223,14 +220,15 @@ class NodeService: NodeServiceProtocol {
 
         // Cross-process exclusivity: never open the wallet dir while another
         // process (the NSE) has a node on it. No-op if already held.
-        let lease = await NodeDirLock.shared.acquireReportingNew(
+        let lease = await NodeDirLock.shared.acquireReportingTimeout(
             dataDir: Constants.userDataDir,
-            timeout: Constants.nodeDirLockTimeoutSecs
+            timeout: Constants.nodeDirLockTimeoutSecs,
+            caller: "NodeService.start",
+            log: AuditService.log
         )
         guard lease.held else {
             // A paused retry gave up waiting; report the pause, not a locked wallet dir.
             try Task.checkCancellation()
-            AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": "NodeService.start"])
             throw NodeServiceError.dataDirLocked
         }
         // A failed start leaves no node; free the dir for the NSE — but only when this
@@ -275,7 +273,7 @@ class NodeService: NodeServiceProtocol {
         let logPath = Constants.userDataDir.appendingPathComponent("ldk-node.log").path
         builder.setFilesystemLogger(logFilePath: logPath, maxLogLevel: .debug)
 
-        builder.setChainSourceEsplora(serverUrl: esploraURL, config: Self.esploraSyncConfig)
+        builder.setChainSourceEsplora(serverUrl: esploraURL, config: Constants.esploraSyncConfig)
 
         switch network {
         case .bitcoin:
@@ -858,31 +856,15 @@ extension Notification.Name {
     static let ldkEventReceived = Notification.Name("ldkEventReceived")
 }
 
-// Keep in sync with NotificationService/Services/NodeStarter.swift.
 extension Error {
-    /// Determines whether a startup error is an Esplora feerate estimation failure or timeout
-    /// eligible for provider failover. Non-Esplora errors (database, storage, lock, entropy)
-    /// return false and should not be retried.
-    var isRetryableEsploraStartupError: Bool {
-        // Typed match only: NodeError's description is a human sentence ("Failed to
-        // update fee rate estimates."), so string-matching case names never fires for
-        // real errors and could false-positive on a bridged error carrying the text.
-        guard let nodeError = self as? NodeError else { return false }
-        switch nodeError {
-        case .FeerateEstimationUpdateFailed, .FeerateEstimationUpdateTimeout:
-            return true
-        default:
-            return false
-        }
-    }
-
     /// Determines whether a failed node start is a transient chain-source failure (fee
     /// estimation or wallet sync) worth retrying with backoff instead of showing the error
     /// screen. Typed match only, for the same reason as `isRetryableEsploraStartupError`.
     var isRetryableNodeStartError: Bool {
+        if isRetryableEsploraStartupError { return true }
         guard let nodeError = self as? NodeError else { return false }
         switch nodeError {
-        case .FeerateEstimationUpdateFailed, .FeerateEstimationUpdateTimeout, .TxSyncFailed, .TxSyncTimeout:
+        case .TxSyncFailed, .TxSyncTimeout:
             return true
         default:
             return false

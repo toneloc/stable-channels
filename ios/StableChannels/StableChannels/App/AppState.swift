@@ -178,7 +178,10 @@ class AppState {
         self.priceHistoryProvider = PriceHistoryService(databaseService: nil)
         self.customRepairBooksUseCase = repairBooksUseCase
         self.networkMonitor = networkMonitor
-        self.nodeStartup = nodeStartup ?? NodeStartupCoordinator()
+        self.nodeStartup = nodeStartup ?? NodeStartupCoordinator(
+            log: { AuditService.log($0, data: $1) },
+            chainURLStore: UserDefaultsChainURLStore(defaults: UserDefaults(suiteName: Constants.appGroupIdentifier))
+        )
         self.chainSourceProbe = chainSourceProbe
         self.isOnline = networkMonitor.isOnline
 
@@ -803,11 +806,12 @@ class AppState {
         // Own the wallet dir before stopping/wiping: restore can be reached
         // while the lock is not held (e.g. after a startup failure released
         // it), and wiping under a live NSE node would corrupt its state.
-        if await !(NodeDirLock.shared.acquire(
+        guard await NodeDirLock.shared.acquireReportingTimeout(
             dataDir: Constants.userDataDir,
-            timeout: Constants.nodeDirLockTimeoutSecs
-        )) {
-            AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": "restoreWalletFromMnemonic"])
+            timeout: Constants.nodeDirLockTimeoutSecs,
+            caller: "restoreWalletFromMnemonic",
+            log: AuditService.log
+        ).held else {
             phase = priorPhase
             statusMessage = ""
             throw WalletRestoreError.walletBusy
@@ -815,12 +819,9 @@ class AppState {
 
         // Backgrounded while restore waited for the wallet dir: leave the current wallet untouched.
         if nodeStartup.isPaused {
-            if !nodeService.isRunning {
-                NodeDirLock.shared.release()
-            }
             phase = priorPhase
             statusMessage = ""
-            AuditService.log("WALLET_RESTORE_PAUSED", data: ["wiped": "false"])
+            endStartPaused("WALLET_RESTORE_PAUSED", data: ["wiped": "false"], keepPending: false)
             throw WalletRestoreError.interrupted
         }
 
@@ -862,24 +863,18 @@ class AppState {
             refreshBalances()
             updateStableBalances()
             startStabilityTimer()
-            blockHeightService.start()
-            mempoolWebSocketService.connect()
+            startChainWatchers()
             if let addr = transactionLinkService.onchainReceiveAddress, !addr.isEmpty {
                 mempoolWebSocketService.trackAddress(addr)
             }
-            Task { await confirmationPollingService?.pollOnce() }
             reregisterPushTokenIfNeeded()
             statusMessage = ""
             NotificationCenter.default.post(name: .priceHistoryUpdated, object: nil)
         } catch is CancellationError {
-            if !nodeService.isRunning {
-                NodeDirLock.shared.release()
-            }
             phase = priorPhase
             statusMessage = ""
             // The restored seed is saved, so the pending start opens the restored wallet on foreground.
-            pendingOnlineRetry = true
-            AuditService.log("WALLET_RESTORE_PAUSED", data: ["wiped": "true"])
+            endStartPaused("WALLET_RESTORE_PAUSED", data: ["wiped": "true"])
             throw WalletRestoreError.interrupted
         } catch {
             // If we failed before the node came up (e.g. DB init threw), no
@@ -984,7 +979,7 @@ class AppState {
         config.network = .bitcoin
         let builder = Builder.fromConfig(config: config)
         // A chain source is required to build; nothing syncs without start().
-        builder.setChainSourceEsplora(serverUrl: Constants.primaryChainURL, config: NodeService.esploraSyncConfig)
+        builder.setChainSourceEsplora(serverUrl: Constants.primaryChainURL, config: Constants.esploraSyncConfig)
         let entropy = NodeEntropy.fromBip39Mnemonic(mnemonic: mnemonic, passphrase: nil)
         guard let node = try? builder.build(nodeEntropy: entropy) else { return nil }
         return node.nodeId()
@@ -1046,11 +1041,12 @@ class AppState {
         // Take the wallet-dir lock before any DB access (network-graph purge,
         // database init, node start). Kernel-enforced; outlasts a live NSE.
         let lockStart = Date()
-        if await !(NodeDirLock.shared.acquire(
+        guard await NodeDirLock.shared.acquireReportingTimeout(
             dataDir: Constants.userDataDir,
-            timeout: Constants.nodeDirLockTimeoutSecs
-        )) {
-            AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": "AppState.start"])
+            timeout: Constants.nodeDirLockTimeoutSecs,
+            caller: "AppState.start",
+            log: AuditService.log
+        ).held else {
             await MainActor.run { phase = .error("Wallet is busy. Please reopen the app.") }
             return
         }
@@ -1164,9 +1160,7 @@ class AppState {
                 }
                 await resumeAfterNodeStart()
             } catch is CancellationError {
-                // Background paused the launch; keeps coordinator's state and leaves startup resumable on foreground.
-                AuditService.log("STARTUP_LAUNCH_PAUSED", data: [:])
-                pendingOnlineRetry = true
+                endStartPaused("STARTUP_LAUNCH_PAUSED")
             } catch {
                 await handleNodeStartFailure(error, failPrefix: "Node start failed") {
                     AuditService.log("STARTUP_OFFLINE", data: ["error": error.localizedDescription])
@@ -1216,10 +1210,7 @@ class AppState {
                 reregisterPushTokenIfNeeded()
                 replayPendingTxidWork()
             } catch is CancellationError {
-                // Background paused wallet creation; keeps coordinator's state and leaves startup resumable on
-                // foreground.
-                AuditService.log("WALLET_CREATE_PAUSED", data: [:])
-                pendingOnlineRetry = true
+                endStartPaused("WALLET_CREATE_PAUSED")
             } catch {
                 await handleNodeStartFailure(error, failPrefix: "Wallet creation failed") {
                     AuditService.log("WALLET_CREATE_OFFLINE", data: ["error": error.localizedDescription])
@@ -1294,17 +1285,14 @@ class AppState {
                 await synchronizeActiveWalletState()
                 await resumeAfterNodeStart()
             } catch is CancellationError {
-                // Background paused the retry mid-start; the backoff is kept and foreground resumes it.
-                AuditService.log("NODE_START_RETRY_PAUSED", data: [:])
-                if let schedule = nodeStartup.rescheduleIfResumed(
+                // Paused mid-start: the backoff is kept, and rescheduled now if foreground is already back.
+                let schedule = nodeStartup.rescheduleIfResumed(
                     maxDelay: Constants.nodeStartRetryMaxDelay,
                     reason: "resumed after pause",
                     run: nodeStartRetryRun()
-                ) {
-                    showRetrySchedule(schedule)
-                } else {
-                    pendingOnlineRetry = true
-                }
+                )
+                if let schedule { showRetrySchedule(schedule) }
+                endStartPaused("NODE_START_RETRY_PAUSED", keepPending: schedule == nil)
             } catch {
                 if previousPhase.isRecoveringNodeStart {
                     await handleNodeStartFailure(error, failPrefix: "Node start failed") {
@@ -1409,8 +1397,20 @@ class AppState {
         )
     }
 
-    /// True while the 30s background stop is armed and has not run yet.
+    /// True while the 30s background stop is armed and has not run yet; read by tests, which cannot wait 30 s.
     var hasPendingBackgroundStop: Bool { backgroundStopWorkItem != nil }
+
+    /// A start that ended paused: no node starts while suspended, so with no node running the wallet
+    /// dir goes back to the notification extension, and a kept-pending start runs on foreground.
+    private func endStartPaused(_ event: String, data: [String: Any] = [:], keepPending: Bool = true) {
+        AuditService.log(event, data: data)
+        if !nodeService.isRunning {
+            NodeDirLock.shared.release()
+        }
+        if keepPending {
+            pendingOnlineRetry = true
+        }
+    }
 
     /// Post-start steps shared by launch and recovered starts: resume a pending splice, start
     /// chain watchers and timers, and replay work queued while the node was down.
@@ -1663,32 +1663,23 @@ class AppState {
         }
         print("[App] Restarting node from foreground")
         // Reclaim the wallet dir before writing gossip back into the LDK DB.
-        if await !(NodeDirLock.shared.acquire(
+        guard await NodeDirLock.shared.acquireReportingTimeout(
             dataDir: Constants.userDataDir,
-            timeout: Constants.nodeDirLockTimeoutSecs
-        )) {
-            AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": "restartNodeFromForeground"])
-            return
-        }
+            timeout: Constants.nodeDirLockTimeoutSecs,
+            caller: "restartNodeFromForeground",
+            log: AuditService.log
+        ).held else { return }
         restoreGossipToDB()
         do {
             try await startNodeWithFailover(mnemonic: "")
             refreshBalances()
-            startChainWatchers()
             updateStableBalances()
             StabilityService.reconcileIncoming(&stableChannel)
             saveChannelToDB()
-            resumePendingSpliceConfirmation()
-            reregisterPushTokenIfNeeded()
-            startStabilityTimer()
-            await processPendingPushPayment()
-            reconcilePendingLightningPayments()
+            await resumeAfterNodeStart()
             clearSyncStatusMessage()
         } catch is CancellationError {
-            // Backgrounded again before the node came up: hand the wallet dir back and finish on the next foreground.
-            AuditService.log("FOREGROUND_RESTART_PAUSED", data: [:])
-            if !nodeService.isRunning { NodeDirLock.shared.release() }
-            pendingOnlineRetry = true
+            endStartPaused("FOREGROUND_RESTART_PAUSED")
         } catch {
             print("[App] Node restart failed: \(error)")
         }
@@ -4344,6 +4335,7 @@ class AppState {
             dataDir: Constants.userDataDir,
             timeout: Constants.nodeDirLockTimeoutSecs,
             caller: "startNodeWithFailover",
+            log: AuditService.log,
             isNodeRunning: { nodeService.isRunning }
         ) {
             try await nodeStartup.startWithFailover(
