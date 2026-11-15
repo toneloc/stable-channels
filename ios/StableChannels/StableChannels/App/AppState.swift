@@ -608,6 +608,7 @@ class AppState {
         case activeChannelDetected
         case channelCheckUnavailable
         case walletBusy
+        case interrupted
 
         var errorDescription: String? {
             switch self {
@@ -620,6 +621,8 @@ class AppState {
                 return "Could not verify whether this wallet has an open Lightning channel."
             case .walletBusy:
                 return "Wallet is busy in another process. Please try again."
+            case .interrupted:
+                return "Restore was interrupted when the app went to the background. Please try again."
             }
         }
     }
@@ -810,6 +813,17 @@ class AppState {
             throw WalletRestoreError.walletBusy
         }
 
+        // Backgrounded while restore waited for the wallet dir: leave the current wallet untouched.
+        if nodeStartup.isPaused {
+            if !nodeService.isRunning {
+                NodeDirLock.shared.release()
+            }
+            phase = priorPhase
+            statusMessage = ""
+            AuditService.log("WALLET_RESTORE_PAUSED", data: ["wiped": "false"])
+            throw WalletRestoreError.interrupted
+        }
+
         stabilityTimer?.cancel()
         stabilityTimer = nil
         txidResolutionService.cancelAllLaunchers()
@@ -823,6 +837,8 @@ class AppState {
         wipeWalletPersistence()
 
         do {
+            // The restored words replace the wiped seed at once, so no later start can create a new wallet.
+            try NodeService.saveSeedPhrase(words)
             try initializeDatabaseServices()
             seedHistoricalPrices()
             Task {
@@ -861,7 +877,10 @@ class AppState {
             }
             phase = priorPhase
             statusMessage = ""
-            AuditService.log("WALLET_RESTORE_PAUSED", data: [:])
+            // The restored seed is saved, so the pending start opens the restored wallet on foreground.
+            pendingOnlineRetry = true
+            AuditService.log("WALLET_RESTORE_PAUSED", data: ["wiped": "true"])
+            throw WalletRestoreError.interrupted
         } catch {
             // If we failed before the node came up (e.g. DB init threw), no
             // node owns the wallet dir — release so the NSE isn't blocked.

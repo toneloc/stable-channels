@@ -834,6 +834,79 @@ final class NodeStartupCoordinatorTests: XCTestCase {
         coordinator.reset()
     }
 
+    /// A restore that finds startup paused once it holds the wallet dir touches no wallet data,
+    /// hands the dir back and reports the interruption.
+    func testRestoreWhilePaused_deletesNothingAndThrowsInterrupted() async throws {
+        NodeDirLock.shared.release()
+        let seed = try replaceSeedPhrase(with: Self.existingWords)
+        defer { restoreSeedPhrase(seed) }
+        let appState = AppState(
+            nodeService: FeeStallingNodeService(),
+            networkMonitor: MockNetworkMonitor(initialStatus: .online),
+            nodeStartup: heldRetries()
+        )
+        appState.phase = .wallet
+        appState.nodeStartup.pause()
+
+        await assertRestoreInterrupted(appState)
+
+        XCTAssertEqual(try String(contentsOf: seed.url, encoding: .utf8), Self.existingWords)
+        XCTAssertFalse(NodeDirLock.shared.isHeld, "The paused restore hands the wallet dir back")
+        XCTAssertEqual(appState.phase, .wallet)
+    }
+
+    /// A restore paused after the wipe keeps the restored words on disk, so the next start opens the
+    /// restored wallet instead of creating a new empty one, and reports the interruption.
+    func testRestorePausedAfterTheWipe_keepsTheRestoredSeedForTheNextStart() async throws {
+        NodeDirLock.shared.release()
+        let seed = try replaceSeedPhrase(with: Self.existingWords)
+        defer { restoreSeedPhrase(seed) }
+        var appState: AppState?
+        let coordinator = makeCoordinator(sleep: { duration in
+            guard duration == Constants.nodeStartRetryDelay else { return }
+            appState?.performBackgroundStop()
+        })
+        appState = AppState(
+            nodeService: FeeStallingNodeService(),
+            networkMonitor: MockNetworkMonitor(initialStatus: .online),
+            nodeStartup: coordinator
+        )
+        appState?.phase = .wallet
+
+        if let appState { await assertRestoreInterrupted(appState) }
+
+        XCTAssertEqual(try String(contentsOf: seed.url, encoding: .utf8), Self.restoredWords)
+        XCTAssertFalse(NodeDirLock.shared.isHeld, "No node runs, so the wallet dir is handed back")
+        XCTAssertTrue(coordinator.isPaused, "Foreground, not the failed restore, ends the pause")
+    }
+
+    private static let existingWords = Array(repeating: "zoo", count: 11).joined(separator: " ") + " wrong"
+    private static let restoredWords = Array(repeating: "abandon", count: 11).joined(separator: " ") + " about"
+
+    private func assertRestoreInterrupted(_ appState: AppState) async {
+        do {
+            try await appState.restoreWalletFromMnemonic(Self.restoredWords, acknowledgeForceClose: true)
+            XCTFail("A paused restore must not report success")
+        } catch AppState.WalletRestoreError.interrupted {
+        } catch {
+            XCTFail("Expected .interrupted, got \(error)")
+        }
+    }
+
+    /// Puts `words` in the app's seed file and returns what was there, for `restoreSeedPhrase`.
+    private func replaceSeedPhrase(with words: String) throws -> (url: URL, original: Data?) {
+        try FileManager.default.createDirectory(at: Constants.userDataDir, withIntermediateDirectories: true)
+        let url = Constants.userDataDir.appendingPathComponent("seed_phrase")
+        let original = try? Data(contentsOf: url)
+        try words.write(to: url, atomically: true, encoding: .utf8)
+        return (url, original)
+    }
+
+    private func restoreSeedPhrase(_ saved: (url: URL, original: Data?)) {
+        try? FileManager.default.removeItem(at: saved.url)
+        if let original = saved.original { try? original.write(to: saved.url) }
+    }
+
     func testForegroundInAnyPhase_endsThePause() async {
         let appState = AppState()
         appState.phase = .offline

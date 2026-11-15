@@ -318,7 +318,7 @@ class NodeService: NodeServiceProtocol {
         // Save mnemonic to file and derive node entropy (now passed to build()).
         let nodeEntropy: NodeEntropy
         if !words.isEmpty {
-            try words.write(toFile: seedPhrasePath.path, atomically: true, encoding: .utf8)
+            try Self.saveSeedPhrase(words)
             self.savedMnemonic = words
             nodeEntropy = NodeEntropy.fromBip39Mnemonic(mnemonic: words, passphrase: nil)
         } else {
@@ -764,6 +764,12 @@ class NodeService: NodeServiceProtocol {
 
     func verifySignature(message: [UInt8], signature: String, pubkey: PublicKey) -> Bool {
         node?.verifySignature(msg: message, sig: signature, pkey: pubkey) ?? false
+    }
+
+    /// Writes the wallet's seed words, which every later start of the app or the notification extension opens.
+    static func saveSeedPhrase(_ words: String) throws {
+        let path = Constants.userDataDir.appendingPathComponent("seed_phrase")
+        try words.write(to: path, atomically: true, encoding: .utf8)
     }
 
     /// Wipe all wallet data files (keys_seed, SQLite + journals, seed_phrase)

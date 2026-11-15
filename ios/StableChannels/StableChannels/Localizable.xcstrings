@@ -7983,6 +7983,77 @@
         }
       }
     },
+    "error_restore_interrupted" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "توقفت الاستعادة عندما انتقل التطبيق إلى الخلفية. يرجى المحاولة مرة أخرى."
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "অ্যাপটি ব্যাকগ্রাউন্ডে যাওয়ায় পুনরুদ্ধার বাধাপ্রাপ্ত হয়েছে। আবার চেষ্টা করুন।"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Die Wiederherstellung wurde unterbrochen, weil die App in den Hintergrund gewechselt ist. Bitte versuche es erneut."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Restore was interrupted when the app went to the background. Please try again."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "La restauración se interrumpió porque la app pasó a segundo plano. Inténtalo de nuevo."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "La restauration a été interrompue lorsque l'app est passée en arrière-plan. Veuillez réessayer."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ऐप के बैकग्राउंड में जाने से पुनर्स्थापना बाधित हो गई। कृपया फिर से प्रयास करें।"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "アプリがバックグラウンドに移ったため、復元が中断されました。もう一度お試しください。"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "A restauração foi interrompida quando o app foi para segundo plano. Tente novamente."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Восстановление прервано, так как приложение ушло в фон. Попробуйте ещё раз."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "应用转入后台，恢复已中断。请重试。"
+          }
+        }
+      }
+    },
     "error_seed_word_count" : {
       "extractionState" : "manual",
       "localizations" : {
