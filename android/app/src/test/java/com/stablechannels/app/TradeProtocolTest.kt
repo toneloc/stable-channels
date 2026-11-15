@@ -21,6 +21,69 @@ import org.robolectric.annotation.Config
 class TradeProtocolTest {
     private val identifier = "ab".repeat(32)
 
+    /** A trade that started from $100 / 100,000 sats and prepared [newBacking]. */
+    private fun accepted(
+        newBacking: Long,
+        currentBacking: Long,
+        oldBacking: Long? = 100_000,
+        oldExpected: Double? = 100.0,
+        currentExpected: Double = 100.0,
+    ) =
+        TradeProtocol.acceptedTradeBacking(
+            newBackingSats = newBacking,
+            oldBackingSats = oldBacking,
+            currentBackingSats = currentBacking,
+            oldExpectedUsd = oldExpected,
+            currentExpectedUsd = currentExpected,
+        )
+
+    @Test
+    fun acceptedTradeBackingAppliesTheTradeToTheCurrentBacking() {
+        // Buy $10 of $100 at $100k: 100,000 -> 90,000 sats. A 20,000-sat stability payment
+        // made while the result was in flight stays paid.
+        assertEquals(70_000L, accepted(90_000, 80_000))
+        // Nothing moved in flight: the prepared value.
+        assertEquals(90_000L, accepted(90_000, 100_000))
+        // A 22,500-sat credit from the LSP in flight stays credited.
+        assertEquals(112_500L, accepted(90_000, 122_500))
+    }
+
+    @Test
+    fun acceptedTradeBackingKeepsThePreparedValueWhereARebaseCannotApply() {
+        // A full exit stays at 0, even if a credit landed in flight.
+        assertEquals(0L, accepted(0, 105_000))
+        // A trade recorded before old_backing_sats or old_expected_usd existed.
+        assertEquals(90_000L, accepted(90_000, 80_000, oldBacking = null))
+        assertEquals(90_000L, accepted(90_000, 80_000, oldExpected = null))
+        // In-flight payments used up the whole new position: zero backing would stop stability.
+        assertEquals(10_000L, accepted(10_000, 85_000))
+        // ...including when the rebase lands exactly on 0.
+        assertEquals(90_000L, accepted(90_000, 10_000))
+    }
+
+    @Test
+    fun acceptedTradeBackingRebasesOnlyOntoTheTargetTheTradeStartedFrom() {
+        // A send moved the target to $50 with the backing: the prepared value is kept.
+        assertEquals(90_000L, accepted(90_000, 50_000, currentExpected = 50.0))
+        // A difference within the tolerance is the same target.
+        assertEquals(
+            70_000L,
+            accepted(
+                90_000,
+                80_000,
+                currentExpected = 100.0 + TradeProtocol.EXPECTED_USD_TOLERANCE / 2,
+            ),
+        )
+        assertEquals(
+            90_000L,
+            accepted(
+                90_000,
+                80_000,
+                currentExpected = 100.0 + TradeProtocol.EXPECTED_USD_TOLERANCE * 2,
+            ),
+        )
+    }
+
     @Test
     fun requestHashUsesForwardLowercaseSha256OfExactBytes() {
         val payload = "{\"type\":\"TRADE_V1\",\"user_channel_id\":\"7\",\"expected_usd\":25.0}"

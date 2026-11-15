@@ -585,6 +585,7 @@ class StabilityProcessingService : Service() {
         val paymentId = event.paymentId ?: event.paymentHash
         if (isStabilityPayment) {
             val amountSats = event.amountMsat.toLong() / 1000
+            val userChannelId = activeUserChannelId()
             val result =
                 recordPaymentAtomicInDB(
                     dbPath,
@@ -594,8 +595,9 @@ class StabilityProcessingService : Service() {
                     event.amountMsat.toLong(),
                     price.get(),
                     amountSats,
-                    userChannelId = activeUserChannelId(),
+                    userChannelId = userChannelId,
                     settlementId = inbound.settlementId,
+                    liveReceiverSats = liveReceiverSats(node, userChannelId),
                 )
             when (result) {
                 InsertResult.INSERTED,
@@ -816,6 +818,18 @@ class StabilityProcessingService : Service() {
         }
     }
 
+    /** Our live balance in the given channel, or null if it can't be read. */
+    private fun liveReceiverSats(node: Node, userChannelId: String?): Long? =
+        try {
+            node
+                .listChannels()
+                .singleOrNull { it.userChannelId == userChannelId && it.isChannelReady }
+                ?.let(StabilityService::receiverBalanceSats)
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not read the live channel balance", e)
+            null
+        }
+
     /**
      * Insert a payment and optionally update channel backing sats in one SQLite transaction. BEGIN
      * IMMEDIATE is used so the write lock is held before the dedup SELECT, preventing TOCTOU races
@@ -831,6 +845,7 @@ class StabilityProcessingService : Service() {
         backingDeltaSats: Long?,
         userChannelId: String? = null,
         settlementId: String? = null,
+        liveReceiverSats: Long? = null,
     ): InsertResult {
         return try {
             val db = SQLiteDatabase.openDatabase(dbPath, null, SQLiteDatabase.OPEN_READWRITE)
@@ -940,12 +955,18 @@ class StabilityProcessingService : Service() {
                             "BACKING_CLAMPED: current=$currentBacking delta=$backingDeltaSats clamped_to=$newBacking user_channel_id=$userChannelId",
                         )
                     }
+                    // A trade result bounds its backing by receiver_sats, so store the live
+                    // balance with the credit, as the app does after each save. Adding the
+                    // credit instead would count it twice if the app already saved a balance
+                    // that includes it. If the balance could not be read, keep the stored one.
                     val updateStmt =
                         db.compileStatement(
-                            "UPDATE channels SET stable_sats = ?, updated_at = strftime('%s','now') WHERE user_channel_id = ?"
+                            "UPDATE channels SET stable_sats = ?, receiver_sats = COALESCE(?, receiver_sats), updated_at = strftime('%s','now') WHERE user_channel_id = ?"
                         )
                     updateStmt.bindLong(1, newBacking)
-                    updateStmt.bindString(2, userChannelId)
+                    if (liveReceiverSats != null) updateStmt.bindLong(2, liveReceiverSats)
+                    else updateStmt.bindNull(2)
+                    updateStmt.bindString(3, userChannelId)
                     val rowsAffected = updateStmt.executeUpdateDelete()
                     if (rowsAffected != 1) {
                         throw Exception(
@@ -1030,6 +1051,7 @@ class StabilityProcessingService : Service() {
                         val result =
                             if (isStabilityPayment) {
                                 val amountSats = event.amountMsat.toLong() / 1000
+                                val userChannelId = activeUserChannelId()
                                 recordPaymentAtomicInDB(
                                     dbPath,
                                     pid,
@@ -1038,8 +1060,9 @@ class StabilityProcessingService : Service() {
                                     event.amountMsat.toLong(),
                                     price,
                                     amountSats,
-                                    userChannelId = activeUserChannelId(),
+                                    userChannelId = userChannelId,
                                     settlementId = inbound.settlementId,
+                                    liveReceiverSats = liveReceiverSats(node, userChannelId),
                                 )
                             } else {
                                 recordPaymentAtomicInDB(

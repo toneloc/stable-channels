@@ -1,5 +1,6 @@
 pub mod apns;
 pub mod fcm;
+pub mod registrations;
 pub mod tokens;
 
 use std::collections::HashMap;
@@ -88,11 +89,6 @@ impl PushService {
             last_push_sent: HashMap::new(),
             last_push_failed: HashMap::new(),
         }
-    }
-
-    /// Persist a wallet's device token. Called by the RegisterPush handler.
-    pub fn register_token(&self, token: &str, platform: &str, node_id: &str, environment: &str) {
-        tokens::save_token(&self.data_dir, token, platform, node_id, environment);
     }
 
     /// Whether a push to this node may be sent now: no accepted push inside the cooldown, and no
@@ -203,7 +199,7 @@ pub(crate) mod testing {
     ) -> Arc<Mutex<PushService>> {
         let service = PushService::with_sender(sender, data_dir);
         for node in nodes {
-            service.register_token(&format!("token-{node}"), "ios", node, "sandbox");
+            tokens::save_token(&service.data_dir, &format!("token-{node}"), "ios", node, "sandbox");
         }
         Arc::new(Mutex::new(service))
     }

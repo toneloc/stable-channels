@@ -10,7 +10,8 @@ let package = Package(
         .package(url: "https://github.com/toneloc/ldk-node.git", exact: "0.7.5"),
         .package(url: "https://github.com/kishikawakatsumi/KeychainAccess.git", from: "4.2.2"),
         .package(url: "https://github.com/twostraws/CodeScanner.git", from: "2.5.0"),
-        .package(url: "https://github.com/dagronf/QRCode.git", exact: "28.0.2")
+        .package(url: "https://github.com/dagronf/QRCode.git", exact: "28.0.2"),
+        .package(path: "../../mobile/force-close/swift")
     ],
     targets: [
         .executableTarget(
@@ -19,7 +20,8 @@ let package = Package(
                 .product(name: "LDKNode", package: "ldk-node"),
                 "KeychainAccess",
                 "CodeScanner",
-                .product(name: "QRCode", package: "QRCode")
+                .product(name: "QRCode", package: "QRCode"),
+                .product(name: "SCForceClose", package: "swift")
             ],
             path: "StableChannels"
         ),

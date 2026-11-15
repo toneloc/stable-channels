@@ -4,6 +4,7 @@ import UIKit
 struct ChannelSettingsView: View {
     @Environment(AppState.self) private var appState
     @State private var showCloseChannelAlert = false
+    @State private var showForceCloseSheet = false
 
     var body: some View {
         // Read observable property on AppState to ensure view invalidation when channel state changes,
@@ -100,6 +101,7 @@ struct ChannelSettingsView: View {
                             ))
                         }
                     }
+
                 } else {
                     Section {
                         HStack {
@@ -108,6 +110,25 @@ struct ChannelSettingsView: View {
                             Text(String(localized: "status_closing_channel", defaultValue: "Closing channel..."))
                                 .foregroundStyle(.secondary)
                         }
+                    }
+                }
+
+                // Shown while the channel is listed, even when it is not usable or its close is
+                // stuck (#363). A move spends the funding output the app's own close follows, until
+                // LDK reports the splice's output (#456).
+                let movePending = appState.emergencyCloseWaitsForMove(appState.nodeService.channels.first)
+                Section {
+                    Button(
+                        String(localized: "button_force_close", defaultValue: "Emergency force close"),
+                        role: .destructive
+                    ) {
+                        showForceCloseSheet = true
+                    }
+                    .disabled(!appState.isOnline || movePending)
+                    .foregroundStyle(appState.isOnline && !movePending ? .red : .secondary)
+                } footer: {
+                    if movePending {
+                        Text(EmergencyClose.movePending)
                     }
                 }
             } else if appState.isChannelClosing {
@@ -190,10 +211,15 @@ struct ChannelSettingsView: View {
                 defaultValue: "This will cooperatively close the channel and return your funds to your onchain wallet after confirmation."
             ))
         }
+        .sheet(isPresented: $showForceCloseSheet) {
+            ForceCloseSheet {
+                closeChannel(emergency: true)
+            }
+        }
     }
 
     @MainActor
-    private func closeChannel() {
+    private func closeChannel(emergency: Bool = false) {
         guard let channel = appState.nodeService.channels.first,
               let outpoint = channel.fundingTxo else {
             // Edge case: channel exists but no funding outpoint. Log and abort.
@@ -203,15 +229,45 @@ struct ChannelSettingsView: View {
             ])
             return
         }
+        // Read again before the close starts.
+        if emergency, appState.emergencyCloseWaitsForMove(channel) {
+            appState.statusMessage = EmergencyClose.movePending
+            return
+        }
+        let closeStarted = appState.isChannelClosing
         appState.isChannelClosing = true
         Task { @MainActor in
             do {
-                try await appState.requestChannelClose(
-                    userChannelId: channel.userChannelId,
-                    counterpartyNodeId: channel.counterpartyNodeId,
-                    fundingOutpointTxid: "\(outpoint.txid)",
-                    fundingOutpointVout: outpoint.vout
-                )
+                let request = { (force: Bool) in
+                    try await appState.requestChannelClose(
+                        userChannelId: channel.userChannelId,
+                        counterpartyNodeId: channel.counterpartyNodeId,
+                        fundingOutpointTxid: "\(outpoint.txid)",
+                        fundingOutpointVout: outpoint.vout,
+                        force: force
+                    )
+                }
+                if emergency {
+                    // The emergency close (#363), as EmergencyClose decides. LDK knows of a close under
+                    // way also after a restart, or when the LSP started it.
+                    let node = appState.nodeService.node
+                    let lspOnline = node?.listPeers().contains {
+                        $0.nodeId == channel.counterpartyNodeId && $0.isConnected
+                    } ?? false
+                    let shutdownState = node?.listChannels()
+                        .first { $0.userChannelId == channel.userChannelId }?.channelShutdownState
+                    try await EmergencyClose.closeChannel(
+                        force: EmergencyClose.forcesAtOnce(
+                            closeStarted: closeStarted,
+                            lspOnline: lspOnline,
+                            shutdownState: shutdownState
+                        ),
+                        close: { try await request(false) },
+                        forceClose: { try await request(true) }
+                    )
+                } else {
+                    try await request(false)
+                }
             } catch {
                 appState.statusMessage = "Close channel failed: \(error.localizedDescription)"
                 appState.isChannelClosing = false
@@ -234,6 +290,85 @@ struct ChannelSettingsView: View {
                 Text(isReady
                     ? String(localized: "channel_status_ready", defaultValue: "Ready")
                     : String(localized: "channel_status_pending", defaultValue: "Pending"))
+            }
+        }
+    }
+}
+
+private struct ForceCloseSheet: View {
+    let onConfirm: () -> Void
+    @Environment(AppState.self) private var appState
+    @Environment(\.dismiss) private var dismiss
+    @State private var input = ""
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Text(String(
+                        localized: "info_force_close_normal_first",
+                        defaultValue: "The app first tries a normal close."
+                    ))
+                        + Text(" ")
+                        + Text(String(
+                            localized: "info_force_close_when",
+                            defaultValue: "If the provider is offline or the close is stuck, it force closes."
+                        ))
+                        .foregroundStyle(.red)
+                    Text(String(
+                        localized: "info_force_close_funds",
+                        defaultValue: "After a force close, your funds move to your onchain wallet."
+                    ))
+                        + Text(" ")
+                        + Text(String(
+                            localized: "info_force_close_about_a_day",
+                            defaultValue: "This can take about a day."
+                        ))
+                        .foregroundStyle(.red)
+                    Text(String(
+                        localized: "info_force_close_keep_app",
+                        defaultValue: "Do not uninstall the app or clear its data until the funds arrive."
+                    ))
+                    .foregroundStyle(.red)
+                    + Text(" ")
+                    + Text(String(
+                        localized: "info_force_close_channel_data",
+                        defaultValue: "The app needs its channel data to claim them."
+                    ))
+                }
+                Section {
+                    TextField(
+                        String(
+                            format: String(localized: "placeholder_force_close", defaultValue: "Type %@ to confirm"),
+                            ForceCloseConfirmation.phrase
+                        ),
+                        text: $input
+                    )
+                    .textInputAutocapitalization(.characters)
+                    .autocorrectionDisabled()
+                }
+                Section {
+                    Button(
+                        String(localized: "button_force_close_confirm", defaultValue: "Force close"),
+                        role: .destructive
+                    ) {
+                        dismiss()
+                        onConfirm()
+                    }
+                    // Coming back to the app can restore a pending move while the sheet is open.
+                    .disabled(
+                        !appState.isOnline
+                            || appState.emergencyCloseWaitsForMove(appState.nodeService.channels.first)
+                            || !ForceCloseConfirmation.isConfirmed(input)
+                    )
+                }
+            }
+            .navigationTitle(String(localized: "button_force_close", defaultValue: "Emergency force close"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(String(localized: "alert_close_channel_cancel", defaultValue: "Cancel")) { dismiss() }
+                }
             }
         }
     }

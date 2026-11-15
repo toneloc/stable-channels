@@ -2017,3 +2017,222 @@ async fn test_onchain_send_preserves_lightning_stable() {
     user_node.stop().unwrap();
     lsp_node.stop().unwrap();
 }
+
+// ==================================================================
+// Test 12: The app's own force close confirms without the LSP (#456)
+// ==================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires bitcoind + electrs (run with --ignored)"]
+async fn test_app_force_close_without_lsp() {
+    use sc_force_close::build_force_close;
+    use serde_json::{json, Value};
+
+    let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+
+    let lsp_node = setup_lsp_node(&electrsd);
+    let lsp_pubkey = lsp_node.node_id();
+    let lsp_addr = lsp_node
+        .listening_addresses()
+        .unwrap()
+        .first()
+        .unwrap()
+        .clone();
+    let user_seed = random_seed();
+    let user_node = setup_user_node_with_seed(&electrsd, lsp_pubkey, lsp_addr, user_seed);
+
+    let addr_lsp = lsp_node.onchain_payment().new_address().unwrap();
+    premine_and_distribute_funds(
+        &bitcoind.client,
+        &electrsd.client,
+        vec![addr_lsp],
+        Amount::from_sat(2_125_000),
+    )
+    .await;
+    lsp_node.sync_wallets().unwrap();
+
+    // The LSP opens the channel with 400k sats on the user's side.
+    open_channel_and_confirm(
+        &lsp_node,
+        &user_node,
+        1_000_000,
+        Some(400_000_000),
+        &bitcoind.client,
+        &electrsd,
+    )
+    .await;
+    let channel = user_node.list_channels().into_iter().next().unwrap();
+
+    // The LSP is offline when the user force closes. ldk-node does not broadcast the close,
+    // as the LSP is a trusted peer.
+    lsp_node.stop().unwrap();
+    user_node
+        .force_close_channel(&channel.user_channel_id, lsp_pubkey, None)
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let mempool: Value = bitcoind.client.call("getrawmempool", &[]).unwrap();
+    assert_eq!(mempool, json!([]), "ldk-node broadcast a close");
+
+    // The app's steps: stop the node, read its stored monitors, build the close.
+    user_node.stop().unwrap();
+    let close = build_force_close(
+        channel.channel_id.to_string(),
+        user_seed.to_vec(),
+        stored_monitors(&user_node.config().storage_dir_path),
+    )
+    .unwrap();
+    println!(
+        "[close] {} fee bump {}",
+        close.close_txid, close.anchor_child_txid
+    );
+
+    // Broadcast the close, then its fee bump. Both confirm in the next block.
+    for hex in [&close.close_tx_hex, &close.anchor_child_hex] {
+        bitcoind
+            .client
+            .call::<Value>("sendrawtransaction", &[json!(hex)])
+            .unwrap();
+    }
+    generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
+    let block_hash: Value = bitcoind.client.call("getbestblockhash", &[]).unwrap();
+    for txid in [&close.close_txid, &close.anchor_child_txid] {
+        let tx: Value = bitcoind
+            .client
+            .call(
+                "getrawtransaction",
+                &[json!(txid), json!(true), block_hash.clone()],
+            )
+            .unwrap();
+        assert_eq!(tx["confirmations"], json!(1), "{txid} not confirmed");
+    }
+
+    // Started again, the node sweeps the user's output to its wallet after the delay.
+    user_node.start().unwrap();
+    generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 144).await;
+    for _ in 0..10 {
+        user_node.sync_wallets().unwrap();
+        if user_node.list_balances().total_onchain_balance_sats > 0 {
+            break;
+        }
+        generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
+    }
+    let onchain = user_node.list_balances().total_onchain_balance_sats;
+    println!("[sweep] user on-chain {} sats", onchain);
+    assert!(
+        onchain > 390_000 && onchain < 400_000,
+        "user's 400k sats not swept to the wallet: {onchain}"
+    );
+
+    println!("\n[PASS] test_app_force_close_without_lsp");
+    user_node.stop().unwrap();
+}
+
+// ==================================================================
+// Test 13: The app's own close is built after the node saw a block (#363)
+// ==================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires bitcoind + electrs (run with --ignored)"]
+async fn test_app_force_close_after_a_block() {
+    use sc_force_close::build_force_close;
+    use serde_json::{json, Value};
+
+    let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+
+    let lsp_node = setup_lsp_node(&electrsd);
+    let lsp_pubkey = lsp_node.node_id();
+    let lsp_addr = lsp_node
+        .listening_addresses()
+        .unwrap()
+        .first()
+        .unwrap()
+        .clone();
+    let user_seed = random_seed();
+    let user_node = setup_user_node_with_seed(&electrsd, lsp_pubkey, lsp_addr, user_seed);
+
+    let addr_lsp = lsp_node.onchain_payment().new_address().unwrap();
+    premine_and_distribute_funds(
+        &bitcoind.client,
+        &electrsd.client,
+        vec![addr_lsp],
+        Amount::from_sat(2_125_000),
+    )
+    .await;
+    lsp_node.sync_wallets().unwrap();
+
+    open_channel_and_confirm(
+        &lsp_node,
+        &user_node,
+        1_000_000,
+        Some(400_000_000),
+        &bitcoind.client,
+        &electrsd,
+    )
+    .await;
+    let channel = user_node.list_channels().into_iter().next().unwrap();
+
+    lsp_node.stop().unwrap();
+    user_node
+        .force_close_channel(&channel.user_channel_id, lsp_pubkey, None)
+        .unwrap();
+
+    // The node runs on and sees a block before the app builds the close. While a close is
+    // pending, LDK saves the whole monitor each block: with the close's claim, but not the event
+    // that hands the close over, which LDK only makes again when it rebroadcasts pending claims.
+    generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
+    user_node.sync_wallets().unwrap();
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    user_node.stop().unwrap();
+    let close = build_force_close(
+        channel.channel_id.to_string(),
+        user_seed.to_vec(),
+        stored_monitors(&user_node.config().storage_dir_path),
+    )
+    .unwrap();
+
+    for hex in [&close.close_tx_hex, &close.anchor_child_hex] {
+        bitcoind
+            .client
+            .call::<Value>("sendrawtransaction", &[json!(hex)])
+            .unwrap();
+    }
+    generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
+    let block_hash: Value = bitcoind.client.call("getbestblockhash", &[]).unwrap();
+    for txid in [&close.close_txid, &close.anchor_child_txid] {
+        let tx: Value = bitcoind
+            .client
+            .call(
+                "getrawtransaction",
+                &[json!(txid), json!(true), block_hash.clone()],
+            )
+            .unwrap();
+        assert_eq!(tx["confirmations"], json!(1), "{txid} not confirmed");
+    }
+
+    println!("\n[PASS] test_app_force_close_after_a_block");
+}
+
+/// What the apps pass to `build_force_close`: the node's stored monitors and their pending updates,
+/// read in one query.
+fn stored_monitors(storage_dir_path: &str) -> Vec<sc_force_close::StoredValue> {
+    let db_path = std::path::Path::new(storage_dir_path).join("ldk_node_data.sqlite");
+    let db = rusqlite::Connection::open(db_path).unwrap();
+    let mut stmt = db
+        .prepare(
+            "SELECT primary_namespace, secondary_namespace, key, value FROM ldk_node_data \
+             WHERE primary_namespace IN ('monitors', 'monitor_updates')",
+        )
+        .unwrap();
+    stmt.query_map([], |row| {
+        Ok(sc_force_close::StoredValue {
+            primary_namespace: row.get(0)?,
+            secondary_namespace: row.get(1)?,
+            key: row.get(2)?,
+            value: row.get(3)?,
+        })
+    })
+    .unwrap()
+    .map(Result::unwrap)
+    .collect()
+}

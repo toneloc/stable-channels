@@ -242,6 +242,20 @@ final class SpliceRepository {
         return rows.count == 1 && rows[0].string(0) == "pending"
     }
 
+    /// Whether a move of ours that has not failed or expired spends `fundingTxid`, the channel's funding
+    /// output as LDK reports it. LDK reports the pre-splice output until the splice locks, which comes
+    /// after it confirms (#456).
+    func moveSpends(userChannelId: String, fundingTxid: String) throws -> Bool {
+        try !rawSQL.query(
+            """
+            SELECT 1 FROM splice_operations s JOIN payments p ON p.id = s.payment_row_id
+            WHERE s.user_channel_id = ? AND s.previous_funding_txid = ? AND p.status IN ('pending', 'completed')
+            LIMIT 1
+            """,
+            params: [.text(userChannelId), .text(fundingTxid)]
+        ).isEmpty
+    }
+
     func getPendingSpliceTxid() throws -> String? {
         let rows = try rawSQL.query(
             "SELECT txid FROM payments WHERE status = 'pending' AND payment_type IN \(SpliceEventRecorder.spliceTypesSQL) AND txid IS NOT NULL ORDER BY id DESC LIMIT 1"

@@ -263,11 +263,14 @@ async fn run(state: AppState) {
         };
         let (_reader, mut events, active) = buffer_events_with_health(stream);
         info!("[event_loop] subscribed");
-        let ldk_server_version = match state
+        let node_info = state
             .ldk_server
             .get_node_info(ldk_server_client::ldk_server_grpc::api::GetNodeInfoRequest {})
-            .await
-        {
+            .await;
+        if let Ok(info) = &node_info {
+            state.funding_outpoints.remember_lsp_node_id(&info.node_id);
+        }
+        let ldk_server_version = match node_info {
             Ok(info) if !info.version.is_empty() => {
                 if ldk_server_matches_pin(Some(&info.version)) == Some(false) {
                     warn!("[event_loop] LDK Server reports {}, but this daemon is built for LDK Server {}; run them at the same rev", info.version, PINNED_LDK_SERVER_REV);

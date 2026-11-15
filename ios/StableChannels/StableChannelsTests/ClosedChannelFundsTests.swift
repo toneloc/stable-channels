@@ -273,6 +273,108 @@ final class ClosedChannelFundsTests: XCTestCase {
         XCTAssertNil(ClosedChannelFunds.orRecovered(nil, recoveredSats: 0))
     }
 
+    func testForceCloseConfirmation() {
+        XCTAssertTrue(ForceCloseConfirmation.isConfirmed(" FORCE CLOSE "))
+        XCTAssertFalse(ForceCloseConfirmation.isConfirmed("force close"))
+        XCTAssertFalse(ForceCloseConfirmation.isConfirmed("FORCE"))
+    }
+
+    func testEmergencyCloseTriesANormalCloseOnlyWhileTheLspIsOnlineAndNoCloseIsUnderWay() {
+        let forces = { (started: Bool, online: Bool, state: ChannelShutdownState?) in
+            EmergencyClose.forcesAtOnce(closeStarted: started, lspOnline: online, shutdownState: state)
+        }
+        XCTAssertFalse(forces(false, true, .notShuttingDown))
+        XCTAssertFalse(forces(false, true, nil))
+        XCTAssertTrue(forces(true, true, .notShuttingDown))
+        XCTAssertTrue(forces(false, false, .notShuttingDown))
+        // A close under way, after a restart or started by the LSP, which this session never saw.
+        for state in [ChannelShutdownState.shutdownInitiated, .resolvingHtlCs, .negotiatingClosingFee] {
+            XCTAssertTrue(forces(false, true, state))
+        }
+    }
+
+    private struct Refused: Error {}
+
+    func testEmergencyCloseKeepsANormalCloseThatLdkTakes() async throws {
+        var calls: [String] = []
+
+        let forced = try await EmergencyClose.closeChannel(
+            force: false,
+            close: { calls.append("close") },
+            forceClose: { calls.append("force close") }
+        )
+
+        XCTAssertFalse(forced)
+        XCTAssertEqual(calls, ["close"])
+    }
+
+    func testEmergencyCloseForcesANormalCloseThatLdkRefuses() async throws {
+        var calls: [String] = []
+
+        let forced = try await EmergencyClose.closeChannel(
+            force: false,
+            close: {
+                calls.append("close")
+                throw Refused()
+            },
+            forceClose: { calls.append("force close") }
+        )
+
+        XCTAssertTrue(forced)
+        XCTAssertEqual(calls, ["close", "force close"])
+    }
+
+    func testEmergencyCloseForcesWithoutANormalCloseWhenToldTo() async throws {
+        var calls: [String] = []
+
+        let forced = try await EmergencyClose.closeChannel(
+            force: true,
+            close: { calls.append("close") },
+            forceClose: { calls.append("force close") }
+        )
+
+        XCTAssertTrue(forced)
+        XCTAssertEqual(calls, ["force close"])
+    }
+
+    @MainActor
+    func testTheEmergencyCloseWaitsForAMoveUntilLdkReportsItsSplice() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let appState = AppState()
+        appState.databaseService = try DatabaseService(dataDir: dir)
+        let splices = try XCTUnwrap(appState.databaseService?.spliceRepo)
+        let waits = { (funding: String) in
+            appState.emergencyCloseWaitsForMove(userChannelId: "7", fundingTxid: funding)
+        }
+        XCTAssertFalse(waits("old"))
+
+        // A move starts.
+        appState.isSweeping = true
+        appState.pendingSplice = PendingSplice(paymentType: .spliceOut, amountSats: 20_000, address: "tb1qtest")
+        try splices.recordPendingSplice(
+            paymentType: .spliceOut, amountMsat: 20_000_000, amountUSD: nil, btcPrice: nil, address: "tb1qtest",
+            channel: SpliceChannelIdentity(userChannelId: "7", channelId: "channel", previousFundingTxid: "old")
+        )
+        XCTAssertTrue(waits("old"))
+        // Its splice is negotiated: the splice-pending handler clears pendingSplice.
+        try splices.recordEvent(SpliceEventReceipt(
+            kind: .negotiated, userChannelId: "7", channelId: "channel",
+            identityTxid: "new", funding: OutPoint(txid: "new", vout: 0)
+        ))
+        appState.pendingSplice = nil
+        XCTAssertTrue(waits("old"))
+        // Its splice confirms, and the app's move flags clear. LDK reports the pre-splice output until the
+        // splice locks.
+        XCTAssertTrue(splices.completeSplice(txid: "new"))
+        appState.isSweeping = false
+        XCTAssertFalse(appState.isMovePending)
+        XCTAssertTrue(waits("old"))
+        // The splice locks: LDK reports its output.
+        XCTAssertFalse(waits("new"))
+    }
+
     /// Recovery waits for LDK's own sweep to confirm, even once the card leaves it out.
     func testLdkHandlesACloseUntilItsSweepConfirms() {
         let sweep = PendingSweepBalance.broadcastAwaitingConfirmation(

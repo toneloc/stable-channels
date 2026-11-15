@@ -68,6 +68,7 @@ long_description = "A self-custodial bitcoin wallet with USD stability."
 tempfile = "3"
 electrsd = { version = "0.36.1", features = ["legacy", "esplora_a33e97e1", "corepc-node_27_2"] }
 electrum-client = "0.24.0"
+sc-force-close = { path = "mobile/force-close" }
 
 [workspace]
 members = [
@@ -75,6 +76,7 @@ members = [
     "server/sc-rest-client",
     "server/lsp-server-gui",
     "server/stable-channels-lsp",
+    "mobile/force-close",
 ]
 
 # Windows-only build dep: lets build.rs embed an icon resource (.ico) into

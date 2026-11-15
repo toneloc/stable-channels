@@ -18,7 +18,7 @@ jobs:
     name: Build Android APK
     if: startsWith(github.ref, 'refs/tags/') || contains(github.event.head_commit.message, 'build')
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
 
     env:
       GRADLE_OPTS: "-Xmx3g -XX:+UseG1GC"
@@ -45,6 +45,12 @@ jobs:
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build sc-force-close (native library and Kotlin bindings)
+        working-directory: .
+        run: mobile/force-close/build-android.sh
 
       # Debug APK: auto-signed with the debug keystore so it installs directly.
       # (release build type has no signingConfig -> assembleRelease is unsigned.)

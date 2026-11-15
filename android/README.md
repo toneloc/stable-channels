@@ -70,13 +70,18 @@ The LSP backend loads this file lazily on first use. If the file is missing, And
 - JDK 17
 - Android SDK 35
 - `google-services.json` placed at `android/app/google-services.json`
+- Rust and the Android NDK, for the force close library
 
 ### Build
 
 ```bash
+mobile/force-close/build-android.sh
 cd android
 ./gradlew assembleDebug
 ```
+
+`build-android.sh` builds the library the app uses to send its own force close. Run it again after
+changes in `mobile/force-close`.
 
 The debug APK will be at `app/build/outputs/apk/debug/app-debug.apk`.
 
