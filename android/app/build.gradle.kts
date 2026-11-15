@@ -160,3 +160,19 @@ dependencies {
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     testImplementation("fr.acinq.secp256k1:secp256k1-kmp-jni-jvm:0.19.0")
 }
+
+// The app's own force close (#456) uses a Rust library that is built, not committed.
+val forceCloseFiles =
+    listOf(
+        file("src/main/jniLibs/arm64-v8a/libsc_force_close.so"),
+        file("src/main/java/uniffi/sc_force_close/sc_force_close.kt"),
+    )
+val checkForceCloseLibrary by
+    tasks.registering {
+        doLast {
+            check(forceCloseFiles.all { it.exists() }) {
+                "Run mobile/force-close/build-android.sh first: it builds the force close library."
+            }
+        }
+    }
+tasks.named("preBuild") { dependsOn(checkForceCloseLibrary) }

@@ -73,6 +73,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     val isOnline by appState.isOnline.collectAsState()
     val isOpeningChannel by appState.isOpeningChannelFlow.collectAsState()
     val closedChannelFunds by appState.closedChannelFunds.collectAsState()
+    val ownForceClose by appState.ownForceCloseState.collectAsState()
 
     var showSend by remember { mutableStateOf(false) }
     var selectedTrade by remember { mutableStateOf<TradeRecord?>(null) }
@@ -249,6 +250,15 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 ClosedChannelFundsCard(funds, btcPrice)
                 Spacer(Modifier.height(12.dp))
             }
+
+            // The app's own close of a channel, while it is slow to confirm (#456)
+            ownForceClose
+                ?.takeIf { it.isSlow(System.currentTimeMillis()) }
+                ?.closeTxid
+                ?.let {
+                    OwnForceCloseCard(it)
+                    Spacer(Modifier.height(12.dp))
+                }
 
             // On-chain section
             // Stays visible after the balance hits zero while a send or splice is still confirming

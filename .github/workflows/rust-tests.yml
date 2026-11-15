@@ -7,6 +7,7 @@ on:
       - "Cargo.lock"
       - "src/**"
       - "server/**"
+      - "mobile/**"
       - ".github/workflows/rust-tests.yml"
   push:
     branches: [main]
@@ -15,6 +16,7 @@ on:
       - "Cargo.lock"
       - "src/**"
       - "server/**"
+      - "mobile/**"
       - ".github/workflows/rust-tests.yml"
 
 permissions:
@@ -50,10 +52,10 @@ jobs:
           rustup target add wasm32-unknown-unknown
 
       - name: Run Rust tests
-        run: cargo test -p stable-channels -p stable-channels-lsp -p sc-protos -p sc-rest-client -p lsp-server-gui --locked
+        run: cargo test -p stable-channels -p stable-channels-lsp -p sc-protos -p sc-rest-client -p lsp-server-gui -p sc-force-close --locked
 
       - name: Build Rust packages
-        run: cargo build -p stable-channels -p stable-channels-lsp -p sc-protos -p sc-rest-client -p lsp-server-gui --locked
+        run: cargo build -p stable-channels -p stable-channels-lsp -p sc-protos -p sc-rest-client -p lsp-server-gui -p sc-force-close --locked
 
       - name: Check the GUI web build
         run: cargo check -p lsp-server-gui --locked --target wasm32-unknown-unknown --no-default-features --features web

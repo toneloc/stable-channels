@@ -238,6 +238,22 @@ final class PaymentRepository {
         }
     }
 
+    /// Points a channel close row at the close that confirmed, when another close replaced the one
+    /// it recorded (#456). Explorers report any txid they don't know as unconfirmed, so the row
+    /// would stay at 0 confirmations. Returns whether it wrote.
+    @discardableResult
+    func replaceChannelCloseTxid(paymentId: String, txid: String) throws -> Bool {
+        try rawSQL.executeReturningChanges(
+            """
+            UPDATE payments
+            SET txid = ?, confirmations = 0, tx_block_height = NULL
+            WHERE payment_id = ? AND payment_type = 'channel_close' AND (txid IS NULL OR txid != ?)
+            AND NOT EXISTS (SELECT 1 FROM payments p WHERE p.txid = ?)
+            """,
+            params: [.text(txid), .text(paymentId), .text(txid), .text(txid)]
+        ) > 0
+    }
+
     /// Fails an on-chain receive whose transaction left the mempool. Only unconfirmed rows: a
     /// "removed" report that arrives after a block (or for another row type) must not fail
     /// a deposit that is already in the chain. Returns the sats of the receive it failed, if any.

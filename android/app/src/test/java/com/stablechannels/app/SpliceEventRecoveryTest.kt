@@ -194,6 +194,42 @@ class SpliceEventRecoveryTest {
 
     private fun generation(state: AppState) = (read(state, "spliceGeneration") as AtomicLong).get()
 
+    @Suppress("UNCHECKED_CAST")
+    @Test
+    fun theEmergencyCloseWaitsForAMoveUntilLdkReportsItsSplice() {
+        val state = appState()
+        val inFlight = read(state, "_isSpliceInFlight") as MutableStateFlow<Boolean>
+        val waits = { funding: String -> state.emergencyCloseWaitsForMove("7", funding) }
+        assertFalse(waits(oldTxid))
+
+        // A move starts.
+        pending()
+        inFlight.value = true
+        assertTrue(waits(oldTxid))
+        // Its splice is negotiated.
+        assertTrue(record(negotiated))
+        assertTrue(waits(oldTxid))
+        // Its splice confirms, and the app's move flag clears. LDK reports the pre-splice output
+        // until the splice locks.
+        assertTrue(db.completeSplice(txid))
+        inFlight.value = false
+        assertFalse(state.isSpliceInFlight)
+        assertTrue(waits(oldTxid))
+        // The splice locks: LDK reports its output.
+        assertFalse(waits(txid))
+    }
+
+    @Test
+    fun onlyAMoveThatHasNotFailedSpendsLdksFunding() {
+        val move = pending()
+        assertTrue(db.moveSpends("7", oldTxid))
+        assertFalse(db.moveSpends("8", oldTxid))
+        // A later splice the app didn't record, such as one the LSP started, moved the funding on.
+        assertFalse(db.moveSpends("7", "12".repeat(32)))
+        assertTrue(db.failPendingSplice(move))
+        assertFalse(db.moveSpends("7", oldTxid))
+    }
+
     @Test
     fun negotiatedEventsSurviveBackgroundHandoffRestartAndReplayForBothDirections() {
         for (type in listOf("splice_out", "splice_in")) {

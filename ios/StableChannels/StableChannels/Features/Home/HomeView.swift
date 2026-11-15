@@ -40,6 +40,11 @@ struct HomeView: View {
                         HomeClosedChannelView(funds: funds, btcPrice: appState.btcPrice)
                     }
 
+                    if let state = appState.ownForceCloseState, state.isSlow(now: Date().timeIntervalSince1970),
+                       let closeTxid = state.closeTxid {
+                        HomeOwnForceCloseView(closeTxid: closeTxid)
+                    }
+
                     if let onchainCard {
                         HomeSavingsSectionView(card: onchainCard, showBTC: showBTC)
                     }

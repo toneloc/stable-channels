@@ -19,6 +19,8 @@ packages:
   QRCode:
     url: https://github.com/dagronf/QRCode.git
     from: "28.0.2"
+  SCForceClose:
+    path: ../../mobile/force-close/swift
 
 targets:
   StableChannels:
@@ -50,6 +52,7 @@ targets:
       - package: KeychainAccess
       - package: CodeScanner
       - package: QRCode
+      - package: SCForceClose
       - target: NotificationService
     info:
       path: StableChannels/Info.plist

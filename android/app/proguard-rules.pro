@@ -1,6 +1,9 @@
 # LDK Node — bindings are invoked reflectively through JNA; keep everything
 -keep class org.lightningdevkit.ldknode.** { *; }
 
+# sc-force-close (the app's own force close, #456) — the same kind of JNA bindings
+-keep class uniffi.sc_force_close.** { *; }
+
 # JNA — loads libldk_node.so; relies on reflection over Structure/Callback types
 -keep class com.sun.jna.** { *; }
 -keepclassmembers class * extends com.sun.jna.Structure { *; }

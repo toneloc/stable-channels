@@ -206,6 +206,12 @@ local.properties
 *.aab
 *.iml
 google-services.json
+# Built by mobile/force-close/build-android.sh
+android/app/src/main/jniLibs/
+android/app/src/main/java/uniffi/
+# Built by mobile/force-close/build-ios.sh
+mobile/force-close/swift/sc_force_closeFFI.xcframework/
+mobile/force-close/swift/Sources/
 
 # WASM build output from lsp-server-gui
 server/lsp-server-gui/dist/

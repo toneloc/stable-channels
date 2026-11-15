@@ -1,0 +1,24 @@
+[package]
+name = "sc-force-close"
+version = "0.1.0"
+edition = "2021"
+description = "Builds the app's own force close of a channel from ldk-node's stored data, for the mobile apps"
+publish = false
+
+[lib]
+name = "sc_force_close"
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+# The LDK revision of ldk-node 0.7.5 (toneloc/ldk-node), which the mobile apps use. It must match
+# the apps' ldk-node: the channel data is read with this LDK.
+lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "090e09f3992694040d3a55c1c798b3a92fb77182", features = ["std"] }
+uniffi = "0.29.5"
+
+[features]
+bindgen = ["uniffi/cli"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+required-features = ["bindgen"]
