@@ -15,10 +15,14 @@ final class LSPSpliceInHandler: PaymentHandler {
     static let defaultWaitSecs: TimeInterval = 22
 
     private let window: StabilitySyncGate?
+    private let channelsAtStart: [ChannelDetails]?
 
     /// `window` carries the run's deadline and whether the extension already expired or finished.
-    init(window: StabilitySyncGate? = nil) {
+    /// `channelsAtStart` lists the channels as the node started, before it connected to the LSP, so
+    /// a splice that locks before the wait begins is not taken for the starting funding.
+    init(window: StabilitySyncGate? = nil, channelsAtStart: [ChannelDetails]? = nil) {
         self.window = window
+        self.channelsAtStart = channelsAtStart
     }
 
     func handle(
@@ -29,7 +33,9 @@ final class LSPSpliceInHandler: PaymentHandler {
         mutator: NotificationContentMutator,
         completion: @escaping (UNMutableNotificationContent, Bool?) -> Void
     ) {
-        let channel = LspSpliceWait.channel(in: node.listChannels(), savedUserChannelId: db.activeUserChannelId())
+        let channel = LspSpliceWait.channel(
+            in: channelsAtStart ?? node.listChannels(), savedUserChannelId: db.activeUserChannelId()
+        )
         var wait = LspSpliceWait(
             userChannelId: channel?.userChannelId,
             startFundingTxid: channel?.fundingTxo?.txid,
@@ -37,6 +43,7 @@ final class LSPSpliceInHandler: PaymentHandler {
             settleSecs: Self.settleSecs
         )
         var receipts = LSPWakeReceipts()
+        var paymentLeftForForeground = false
 
         eventLoop: while !wait.isDone(at: Date()), window?.isCancelled() != true {
             guard let event = node.nextEvent() else {
@@ -57,6 +64,7 @@ final class LSPSpliceInHandler: PaymentHandler {
                 case .next, .controlHandled:
                     break
                 case .stop:
+                    paymentLeftForForeground = true
                     break eventLoop
                 }
             case .spliceNegotiated, .channelReady, .spliceNegotiationFailed:
@@ -78,21 +86,32 @@ final class LSPSpliceInHandler: PaymentHandler {
         }
         window?.log("lsp_splice_in wait ended: outcome=\(wait.outcome.rawValue)")
 
-        let result = Self.content(wait: wait, receipts: receipts, base: baseContent, mutator: mutator)
+        let result = Self.content(
+            wait: wait, receipts: receipts, paymentLeftForForeground: paymentLeftForForeground,
+            base: baseContent, mutator: mutator
+        )
         completion(result.content, result.pending)
     }
 
     /// The notification once the wait ends, and the new pending-push state (nil leaves it as is).
-    /// A locked splice needs nothing from the user, so it shows nothing.
+    /// A locked splice needs nothing from the user, so it shows nothing. A payment left
+    /// unacknowledged is flagged for the app, as in the lsp_to_user wait.
     static func content(
         wait: LspSpliceWait,
         receipts: LSPWakeReceipts,
+        paymentLeftForForeground: Bool,
         base: UNMutableNotificationContent,
         mutator: NotificationContentMutator
     ) -> (content: UNMutableNotificationContent, pending: Bool?) {
         if receipts.deferStableControlToForeground {
             let content = mutator.buildPending(
                 base: base, title: "Payment Pending", body: "Open app to sync stable position"
+            )
+            return (content, true)
+        }
+        if paymentLeftForForeground {
+            let content = mutator.buildPending(
+                base: base, title: "Payment Pending", body: "Open app to receive your payment"
             )
             return (content, true)
         }

@@ -109,9 +109,10 @@ enum SpliceEventAcknowledgement {
 
 /// When the extension's wait for an LSP splice (`lsp_splice_in`) ends: at a failed negotiation, at
 /// the lock plus a settle window for a stability payment that may follow it, or at the deadline.
-/// Only events on the channel the wait started from count, and a ready event locks the splice only
-/// once that channel's funding moved off the one the wait started from, so a replayed ready for the
-/// current funding does not end the wait.
+/// Only events on the channel the wait started from count. A ready event locks the splice once that
+/// channel's funding moved off the one the wait started from, or when it is on a negotiation seen in
+/// this wait (a splice that locked before the wait began); a replayed ready for the current funding
+/// with no such negotiation does not end the wait.
 struct LspSpliceWait {
     enum Outcome: String {
         case timedOut = "timed_out"
@@ -124,7 +125,7 @@ struct LspSpliceWait {
     let startFundingTxid: String?
     let deadline: Date
     let settleSecs: TimeInterval
-    private(set) var negotiated = false
+    private(set) var negotiatedTxids: Set<String> = []
     private(set) var lockedAt: Date?
     private(set) var failed = false
 
@@ -148,7 +149,7 @@ struct LspSpliceWait {
     var outcome: Outcome {
         if lockedAt != nil { return .locked }
         if failed { return .failed }
-        return negotiated ? .negotiated : .timedOut
+        return negotiatedTxids.isEmpty ? .timedOut : .negotiated
     }
 
     func isDone(at now: Date) -> Bool {
@@ -160,12 +161,13 @@ struct LspSpliceWait {
     /// `liveFunding` gives the channel's current funding txid, for a ready event without one.
     mutating func see(_ event: Event, at now: Date, liveFunding: (_ userChannelId: String) -> String?) {
         switch event {
-        case .spliceNegotiated(_, let eventChannel, _, _):
-            if watches(eventChannel) { negotiated = true }
+        case .spliceNegotiated(_, let eventChannel, _, let newFundingTxo):
+            if watches(eventChannel) { negotiatedTxids.insert(newFundingTxo.txid) }
         case .channelReady(_, let eventChannel, _, let fundingTxo):
-            guard watches(eventChannel), lockedAt == nil, let startFundingTxid,
-                  let funding = fundingTxo?.txid ?? liveFunding(eventChannel), funding != startFundingTxid
-            else { return }
+            guard watches(eventChannel), lockedAt == nil,
+                  let funding = fundingTxo?.txid ?? liveFunding(eventChannel) else { return }
+            let moved = startFundingTxid.map { funding != $0 } ?? false
+            guard moved || negotiatedTxids.contains(funding) else { return }
             lockedAt = now
         case .spliceNegotiationFailed(_, let eventChannel, _):
             if watches(eventChannel) { failed = true }

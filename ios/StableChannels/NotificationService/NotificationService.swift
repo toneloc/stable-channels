@@ -302,6 +302,9 @@ class NotificationService: UNNotificationServiceExtension {
                 return // expire handler already delivered the notification
             }
             logger.log("Node started")
+            // Before the connect, so the LSP's splice cannot have locked yet: the splice wait reads
+            // its starting funding from this list.
+            let channelsAtStart = direction == .lspSpliceIn ? node.listChannels() : nil
 
             // Connect to LSP
             do {
@@ -317,6 +320,7 @@ class NotificationService: UNNotificationServiceExtension {
                 node: node,
                 content: content,
                 direction: direction,
+                channelsAtStart: channelsAtStart,
                 contentHandler: contentHandler
             )
         } catch {
@@ -334,6 +338,7 @@ class NotificationService: UNNotificationServiceExtension {
         node: Node,
         content: UNMutableNotificationContent,
         direction: PaymentDirection,
+        channelsAtStart: [ChannelDetails]?,
         contentHandler: @escaping (UNNotificationContent) -> Void
     ) {
         guard let db else {
@@ -364,7 +369,9 @@ class NotificationService: UNNotificationServiceExtension {
             )
         }
 
-        let handler = PaymentHandlerFactory.handler(for: direction, syncGate: syncGate)
+        let handler = PaymentHandlerFactory.handler(
+            for: direction, syncGate: syncGate, channelsAtStart: channelsAtStart
+        )
         handler
             .handle(node: node, db: db, priceFetcher: priceFetcher, baseContent: content,
                     mutator: contentMutator) { [weak self] resultContent, newPendingState in
