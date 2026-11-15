@@ -1,0 +1,184 @@
+import XCTest
+@testable import StableChannels
+
+final class NodeStartupPolicyTests: XCTestCase {
+    private let primary = "https://primary.example/api"
+    private let fallback = "https://fallback.example/api"
+    private let delay = Duration.seconds(2)
+    private let maxDelay = Duration.seconds(60)
+
+    private func attempt(_ url: String, _ delayBefore: Duration = .zero) -> NodeStartupPolicy.Attempt {
+        NodeStartupPolicy.Attempt(url: url, delayBefore: delayBefore)
+    }
+
+    // MARK: - Attempts
+
+    func testPreferredPrimary_triesFallbackThenPrimaryAgain() {
+        let attempts = NodeStartupPolicy.attempts(preferred: primary, providers: [primary, fallback], retryDelay: delay)
+
+        XCTAssertEqual(attempts, [attempt(primary), attempt(fallback), attempt(primary, delay)])
+    }
+
+    func testPreferredFallback_triesPrimaryThenFallbackAgain() {
+        let attempts = NodeStartupPolicy.attempts(
+            preferred: fallback,
+            providers: [primary, fallback],
+            retryDelay: delay
+        )
+
+        XCTAssertEqual(attempts, [attempt(fallback), attempt(primary), attempt(fallback, delay)])
+    }
+
+    func testDuplicateProviders_areTriedOnce() {
+        let attempts = NodeStartupPolicy.attempts(
+            preferred: primary,
+            providers: [fallback, primary, fallback],
+            retryDelay: delay
+        )
+
+        XCTAssertEqual(attempts, [attempt(primary), attempt(fallback), attempt(primary, delay)])
+    }
+
+    func testEmptyProviders_triesPreferredTwice() {
+        let attempts = NodeStartupPolicy.attempts(preferred: primary, providers: [], retryDelay: delay)
+
+        XCTAssertEqual(attempts, [attempt(primary), attempt(primary, delay)])
+    }
+
+    func testOnlyLastAttemptWaits() {
+        let attempts = NodeStartupPolicy.attempts(preferred: primary, providers: [primary, fallback], retryDelay: delay)
+
+        XCTAssertEqual(attempts.dropLast().map(\.delayBefore), [.zero, .zero])
+        XCTAssertEqual(attempts.last?.delayBefore, delay)
+    }
+
+    // MARK: - Notification extension providers
+
+    /// The extension starts on the stored provider (or the primary) and fails over once, exactly
+    /// as it did before it shared the policy: no delayed final retry.
+    func testExtensionProviders_areTheFirstTwoAttempts() {
+        let providers = [primary, fallback]
+        let cases: [(stored: String?, expected: [String])] = [
+            (nil, [primary, fallback]),
+            (primary, [primary, fallback]),
+            (fallback, [fallback, primary])
+        ]
+        for (stored, expected) in cases {
+            let preferred = stored ?? primary
+            let order = NodeStartupPolicy.extensionProviders(preferred: preferred, providers: providers)
+
+            XCTAssertEqual(order, expected, "stored: \(stored ?? "nil")")
+            XCTAssertEqual(
+                order,
+                NodeStartupPolicy.attempts(preferred: preferred, providers: providers, retryDelay: delay)
+                    .prefix(2).map(\.url)
+            )
+        }
+    }
+
+    // MARK: - Launch provider
+
+    func testLaunchProvider_primaryWhenReachableElseFallback() {
+        XCTAssertEqual(
+            NodeStartupPolicy.launchProvider(primaryReachable: true, primary: primary, fallback: fallback),
+            primary
+        )
+        XCTAssertEqual(
+            NodeStartupPolicy.launchProvider(primaryReachable: false, primary: primary, fallback: fallback),
+            fallback
+        )
+    }
+
+    // MARK: - Retry delay
+
+    func testRetryDelay_doublesFromOneSecond() {
+        XCTAssertEqual(NodeStartupPolicy.retryDelay(forAttempt: 0, maxDelay: maxDelay), .seconds(1))
+        XCTAssertEqual(NodeStartupPolicy.retryDelay(forAttempt: 1, maxDelay: maxDelay), .seconds(2))
+        XCTAssertEqual(NodeStartupPolicy.retryDelay(forAttempt: 5, maxDelay: maxDelay), .seconds(32))
+    }
+
+    func testRetryDelay_isCappedWithoutOverflow() {
+        XCTAssertEqual(NodeStartupPolicy.retryDelay(forAttempt: 6, maxDelay: maxDelay), maxDelay)
+        XCTAssertEqual(NodeStartupPolicy.retryDelay(forAttempt: 1000, maxDelay: maxDelay), maxDelay)
+        XCTAssertEqual(NodeStartupPolicy.retryDelay(forAttempt: Int.max, maxDelay: maxDelay), maxDelay)
+    }
+
+    func testRetryDelay_negativeAttemptIsTreatedAsFirst() {
+        XCTAssertEqual(NodeStartupPolicy.retryDelay(forAttempt: -3, maxDelay: maxDelay), .seconds(1))
+    }
+
+    func testRetryDelay_startsAtBaseDelay() {
+        XCTAssertEqual(
+            NodeStartupPolicy.retryDelay(forAttempt: 0, maxDelay: maxDelay),
+            NodeStartupPolicy.baseRetryDelay
+        )
+    }
+
+    // MARK: - Retry gate
+
+    func testRetryGate_runningNodeSkips() {
+        for isNetworkOffline in [true, false] {
+            XCTAssertEqual(NodeStartupPolicy.retryGate(isNodeRunning: true, isNetworkOffline: isNetworkOffline), .skip)
+        }
+    }
+
+    func testRetryGate_offlineGoesOfflineAndOnlineRuns() {
+        XCTAssertEqual(NodeStartupPolicy.retryGate(isNodeRunning: false, isNetworkOffline: true), .offline)
+        XCTAssertEqual(NodeStartupPolicy.retryGate(isNodeRunning: false, isNetworkOffline: false), .run)
+    }
+
+    // MARK: - Foreground resume
+
+    func testShouldResumeRetry_onlyWhileSyncingRetryingAndNodeDown() {
+        XCTAssertTrue(NodeStartupPolicy.shouldResumeRetry(isSyncing: true, isRetrying: true, isNodeRunning: false))
+        XCTAssertFalse(NodeStartupPolicy.shouldResumeRetry(isSyncing: false, isRetrying: true, isNodeRunning: false))
+        XCTAssertFalse(NodeStartupPolicy.shouldResumeRetry(isSyncing: true, isRetrying: false, isNodeRunning: false))
+        XCTAssertFalse(NodeStartupPolicy.shouldResumeRetry(isSyncing: true, isRetrying: true, isNodeRunning: true))
+    }
+
+    // MARK: - Failure outcome
+
+    func testFailureOutcome_offlineWinsOverRetryable() {
+        for looksOffline in [true, false] {
+            for isRetryable in [true, false] {
+                XCTAssertEqual(
+                    NodeStartupPolicy.failureOutcome(
+                        isNetworkOffline: true,
+                        looksOffline: looksOffline,
+                        isRetryable: isRetryable
+                    ),
+                    .offline
+                )
+            }
+        }
+    }
+
+    func testFailureOutcome_onlineRetriesTransientAndFailsTheRest() {
+        XCTAssertEqual(
+            NodeStartupPolicy.failureOutcome(isNetworkOffline: false, looksOffline: false, isRetryable: true),
+            .retry
+        )
+        XCTAssertEqual(
+            NodeStartupPolicy.failureOutcome(isNetworkOffline: false, looksOffline: false, isRetryable: false),
+            .fail
+        )
+    }
+
+    func testFailureOutcome_onlineTransientBeatsOfflineLookingText() {
+        XCTAssertEqual(
+            NodeStartupPolicy.failureOutcome(isNetworkOffline: false, looksOffline: true, isRetryable: true),
+            .retry
+        )
+        XCTAssertEqual(
+            NodeStartupPolicy.failureOutcome(isNetworkOffline: false, looksOffline: true, isRetryable: false),
+            .offline
+        )
+    }
+
+    func testHasRetriesLeft_stopsAtTheBudget() {
+        XCTAssertTrue(NodeStartupPolicy.hasRetriesLeft(retryAttempt: 0, maxRetries: 6))
+        XCTAssertTrue(NodeStartupPolicy.hasRetriesLeft(retryAttempt: 5, maxRetries: 6))
+        XCTAssertFalse(NodeStartupPolicy.hasRetriesLeft(retryAttempt: 6, maxRetries: 6))
+        XCTAssertFalse(NodeStartupPolicy.hasRetriesLeft(retryAttempt: 0, maxRetries: 0))
+    }
+}
