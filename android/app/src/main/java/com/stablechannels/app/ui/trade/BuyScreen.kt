@@ -423,8 +423,7 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                     )
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        if (isDelayed)
-                            "This is taking longer than usual. Keep the app open and online. Your balance will update when the order finishes. Please don't place it again."
+                        if (isDelayed) TRADE_RESULT_DELAYED_MESSAGE
                         else
                             "Your order is being processed. Balance will update when the provider confirms the order. Do not place this order again while its result is unknown.",
                         style = MaterialTheme.typography.bodyMedium,

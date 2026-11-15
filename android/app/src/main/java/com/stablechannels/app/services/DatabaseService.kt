@@ -1175,7 +1175,7 @@ class DatabaseService(context: Context) :
                                 c.getString(6),
                                 c.getString(7),
                                 c.getLongOrNull(8),
-                                if (c.isNull(9)) null else c.getDouble(9),
+                                c.getDoubleOrNull(9),
                             )
                     } ?: return rollbackResult(db, TradeControlApplyStatus.INVALID)
             val tradeId = trade[0] as Long
@@ -1192,7 +1192,8 @@ class DatabaseService(context: Context) :
                 tradeChannelId != sync.channelId ||
                     tradeUserChannelId != sync.userChannelId ||
                     storedPaymentId != null && storedPaymentId != correlation.tradePaymentId ||
-                    kotlin.math.abs(storedExpected - sync.expectedUsd) > 0.000000001
+                    kotlin.math.abs(storedExpected - sync.expectedUsd) >
+                        TradeProtocol.EXPECTED_USD_TOLERANCE
             )
                 return rollbackResult(db, TradeControlApplyStatus.INVALID)
             if (status == "accepted") {
@@ -1235,20 +1236,14 @@ class DatabaseService(context: Context) :
             val currentBacking = channel[3] as Long
             val currentExpected = channel[4] as Double
             val allocationApplied = sync.syncVersion > currentVersion
-            // Rebase only onto the target the trade started from. A send or a backing repair
-            // changes the target along with the backing; then the prepared backing is used,
-            // bounded by the receiver below.
-            val targetUnchanged =
-                storedOldExpected != null &&
-                    kotlin.math.abs(currentExpected - storedOldExpected) <= 0.000000001
             val acceptedBacking =
-                if (targetUnchanged)
-                    TradeProtocol.acceptedTradeBacking(
-                        storedBacking,
-                        storedOldBacking,
-                        currentBacking,
-                    )
-                else storedBacking
+                TradeProtocol.acceptedTradeBacking(
+                    newBackingSats = storedBacking,
+                    oldBackingSats = storedOldBacking,
+                    currentBackingSats = currentBacking,
+                    oldExpectedUsd = storedOldExpected,
+                    currentExpectedUsd = currentExpected,
+                )
             if (allocationApplied) {
                 if (acceptedBacking < 0L || acceptedBacking > receiverSats) {
                     return rollbackResult(db, TradeControlApplyStatus.RETRY)

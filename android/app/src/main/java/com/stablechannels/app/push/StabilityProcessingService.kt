@@ -723,12 +723,17 @@ class StabilityProcessingService : Service() {
                             "BACKING_CLAMPED: current=$currentBacking delta=$backingDeltaSats clamped_to=$newBacking user_channel_id=$userChannelId",
                         )
                     }
+                    // A received credit also raises the channel balance. The app refreshes
+                    // receiver_sats after each save, but this process does not, and a trade
+                    // result bounds its backing by this value.
+                    val receiverCredit = if (incomingStability) amountMsat / 1000 else 0L
                     val updateStmt =
                         db.compileStatement(
-                            "UPDATE channels SET stable_sats = ?, updated_at = strftime('%s','now') WHERE user_channel_id = ?"
+                            "UPDATE channels SET stable_sats = ?, receiver_sats = receiver_sats + ?, updated_at = strftime('%s','now') WHERE user_channel_id = ?"
                         )
                     updateStmt.bindLong(1, newBacking)
-                    updateStmt.bindString(2, userChannelId)
+                    updateStmt.bindLong(2, receiverCredit)
+                    updateStmt.bindString(3, userChannelId)
                     val rowsAffected = updateStmt.executeUpdateDelete()
                     if (rowsAffected != 1) {
                         throw Exception(
