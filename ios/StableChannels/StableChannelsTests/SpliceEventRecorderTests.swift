@@ -369,11 +369,129 @@ final class SpliceEventRecorderTests: XCTestCase {
         SQLitePaymentDatabase(dbPath: dataDir.appendingPathComponent(DatabaseService.dbFilename).path)
     }
 
+    // MARK: - The LSP's splice (#476)
+
+    private func isLsp(_ txid: String) throws -> Bool {
+        try service.spliceRepo.isLspSplice(txid: txid)
+    }
+
+    func testTheLspsSpliceIsKeptFromAMoveWaitingForItsTransaction() throws {
+        let leftover = try begin()
+        XCTAssertEqual(try service.spliceRepo.recordEvent(negotiated(newFunding), lspSplice: true), .negotiated)
+        XCTAssertNil(try row(leftover).txid)
+        XCTAssertTrue(try isLsp(newFunding))
+        XCTAssertTrue(try service.spliceRepo.hasPendingLspSplice())
+
+        XCTAssertEqual(try service.spliceRepo.recordEvent(ready(eventFunding: newFunding)), .locked)
+        XCTAssertNil(try row(leftover).txid, "the ready on its funding cannot claim the Move either")
+        XCTAssertFalse(try service.spliceRepo.hasPendingLspSplice())
+        XCTAssertEqual(try service.rawSQL.query("SELECT COUNT(*) FROM payments").first?.int64(0), 1)
+    }
+
+    func testAnExpiredMoveIsKeptFromTheLspsSpliceToo() throws {
+        let leftover = try begin()
+        try ageOut(leftover)
+        _ = try service.spliceRepo.hasPendingSplice()
+        XCTAssertEqual(try row(leftover).status, "expired")
+        XCTAssertEqual(try service.spliceRepo.recordEvent(negotiated(newFunding), lspSplice: true), .negotiated)
+        XCTAssertEqual(try row(leftover).status, "expired")
+        XCTAssertNil(try row(leftover).txid)
+    }
+
+    func testWithoutThePushAMoveWaitingForItsTransactionStillTakesTheNegotiation() throws {
+        let move = try begin()
+        XCTAssertNil(try service.spliceRepo.recordEvent(negotiated(newFunding)))
+        XCTAssertEqual(try row(move).txid, newFunding)
+        XCTAssertFalse(try isLsp(newFunding))
+    }
+
+    func testANegotiationNothingClaimsIsTheLspsWhenNoMoveIsWaiting() throws {
+        XCTAssertEqual(try service.spliceRepo.recordEvent(negotiated(newFunding)), .negotiated)
+        XCTAssertTrue(try isLsp(newFunding))
+        XCTAssertEqual(try service.rawSQL.query("SELECT COUNT(*) FROM payments").first?.int64(0), 0)
+        XCTAssertNil(try service.spliceRepo.recordEvent(negotiated(newFunding)), "a replay changes nothing")
+    }
+
+    func testAMoveLeftAmbiguousIsNotTakenForTheLsps() throws {
+        let first = try begin(), second = try begin()
+        try ageOut(first)
+        try ageOut(second)
+        _ = try service.spliceRepo.hasPendingSplice()
+        XCTAssertNil(try service.spliceRepo.recordEvent(negotiated(newFunding)))
+        XCTAssertFalse(try isLsp(newFunding))
+        XCTAssertNil(try service.spliceRepo.recordEvent(negotiated(newFunding), lspSplice: true), "nor on a replay")
+        XCTAssertFalse(try isLsp(newFunding))
+        XCTAssertTrue(backgroundDB.recordSpliceEvent(negotiated(newFunding), lspSplice: true))
+        XCTAssertFalse(try isLsp(newFunding))
+    }
+
+    func testTheUsersOwnTransactionIsStillRecognisedWithinThePushWindow() throws {
+        let move = try begin()
+        try service.spliceRepo.recordEvent(negotiated(newFunding))
+        XCTAssertEqual(try row(move).txid, newFunding)
+        XCTAssertNil(try service.spliceRepo.recordEvent(ready(eventFunding: newFunding), lspSplice: true))
+        XCTAssertFalse(try isLsp(newFunding))
+        let captured = try service.rawSQL.query(
+            "SELECT payment_row_id FROM splice_events WHERE event_type = 'ready'"
+        )
+        XCTAssertEqual(captured.first?.optInt64(0), move)
+    }
+
+    func testTheReadyOfAKnownLspSpliceCannotClaimALaterMove() throws {
+        XCTAssertEqual(try service.spliceRepo.recordEvent(negotiated(newFunding)), .negotiated)
+        let move = try begin()
+        XCTAssertEqual(try service.spliceRepo.recordEvent(ready(eventFunding: newFunding)), .locked)
+        XCTAssertNil(try row(move).txid)
+    }
+
+    func testANegotiatedLspSpliceHoldsTheRepairForADay() throws {
+        let now = Date()
+        try service.spliceRepo.recordEvent(negotiated(newFunding), lspSplice: true, now: now.addingTimeInterval(-3600))
+        XCTAssertTrue(try service.spliceRepo.hasPendingLspSplice(now: now))
+        XCTAssertFalse(try service.spliceRepo.hasPendingLspSplice(now: now.addingTimeInterval(24 * 3600)))
+        XCTAssertTrue(DatabaseSpliceStatusAdapter(databaseService: service).hasPendingSplice())
+    }
+
+    func testBackgroundKeepsTheLspsSpliceFromAMoveWaitingForItsTransaction() throws {
+        let leftover = try begin()
+        XCTAssertTrue(backgroundDB.recordSpliceEvent(negotiated(newFunding), lspSplice: true))
+        XCTAssertNil(try row(leftover).txid)
+        XCTAssertTrue(try isLsp(newFunding))
+        XCTAssertTrue(backgroundDB.recordSpliceEvent(ready(eventFunding: newFunding), lspSplice: false))
+        XCTAssertFalse(try service.spliceRepo.hasPendingLspSplice())
+        XCTAssertNil(try row(leftover).txid)
+    }
+
+    func testThePushWindowStartsAtThePushAndLastsTenMinutes() {
+        XCTAssertFalse(LspSpliceExpectation.expectedWithin(pushedAt: 0, now: 100))
+        XCTAssertTrue(LspSpliceExpectation.expectedWithin(pushedAt: 1_000, now: 1_000))
+        XCTAssertTrue(LspSpliceExpectation.expectedWithin(pushedAt: 1_000, now: 1_599))
+        XCTAssertFalse(LspSpliceExpectation.expectedWithin(pushedAt: 1_000, now: 1_600))
+        XCTAssertFalse(LspSpliceExpectation.expectedWithin(pushedAt: 1_000, now: 999), "clock set back")
+
+        let suite = "LspSpliceExpectationTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)
+        defer { defaults?.removePersistentDomain(forName: suite) }
+        let pushed = Date(timeIntervalSince1970: 5_000)
+        XCTAssertFalse(LspSpliceExpectation.isExpected(defaults, at: pushed))
+        LspSpliceExpectation.note(defaults, at: pushed)
+        XCTAssertTrue(LspSpliceExpectation.isExpected(defaults, at: pushed.addingTimeInterval(60)))
+        XCTAssertFalse(LspSpliceExpectation.isExpected(defaults, at: pushed.addingTimeInterval(600)))
+    }
+
+    func testOnlyTheLspsSplicePushIsNoted() {
+        XCTAssertTrue(LspSpliceExpectation.isSplicePush(["stability": ["direction": "lsp_splice_in"]]))
+        XCTAssertTrue(LspSpliceExpectation.isSplicePush(["stability": #"{"direction":"lsp_splice_in"}"#]))
+        XCTAssertFalse(LspSpliceExpectation.isSplicePush(["stability": ["direction": "lsp_to_user"]]))
+        XCTAssertFalse(LspSpliceExpectation.isSplicePush(["stability": "not json"]))
+        XCTAssertFalse(LspSpliceExpectation.isSplicePush([:]))
+    }
+
     func testBackgroundCommitsNegotiatedAndReadyBeforeAcknowledging() throws {
         let id = try begin()
-        XCTAssertTrue(backgroundDB.recordSpliceEvent(ready(eventFunding: nil)))
-        XCTAssertTrue(backgroundDB.recordSpliceEvent(negotiated(newFunding)))
-        XCTAssertTrue(backgroundDB.recordSpliceEvent(negotiated(newFunding)))
+        XCTAssertTrue(backgroundDB.recordSpliceEvent(ready(eventFunding: nil), lspSplice: false))
+        XCTAssertTrue(backgroundDB.recordSpliceEvent(negotiated(newFunding), lspSplice: false))
+        XCTAssertTrue(backgroundDB.recordSpliceEvent(negotiated(newFunding), lspSplice: false))
 
         XCTAssertEqual(try row(id).txid, newFunding)
         XCTAssertEqual(try eventCount(), 2)
@@ -386,7 +504,7 @@ final class SpliceEventRecorderTests: XCTestCase {
             amountUSD: nil, btcPrice: nil, counterparty: nil, status: "pending", txid: newFunding
         )
         let id = try begin(selfSend: true)
-        XCTAssertTrue(backgroundDB.recordSpliceEvent(negotiated(newFunding)))
+        XCTAssertTrue(backgroundDB.recordSpliceEvent(negotiated(newFunding), lspSplice: false))
 
         XCTAssertEqual(try row(id).txid, newFunding)
         XCTAssertEqual(try service.spliceRepo.isSelfSendSplice(txid: newFunding), true)
@@ -402,7 +520,7 @@ final class SpliceEventRecorderTests: XCTestCase {
             amountUSD: nil, btcPrice: nil, counterparty: nil, status: "pending", txid: newFunding
         )
         let id = try begin(selfSend: false)
-        XCTAssertTrue(backgroundDB.recordSpliceEvent(negotiated(newFunding)))
+        XCTAssertTrue(backgroundDB.recordSpliceEvent(negotiated(newFunding), lspSplice: false))
 
         XCTAssertNil(try row(id).txid)
         XCTAssertEqual(
@@ -413,7 +531,7 @@ final class SpliceEventRecorderTests: XCTestCase {
 
     func testBackgroundDatabaseFailureLeavesTheEventUnacknowledged() {
         let missing = SQLitePaymentDatabase(dbPath: dataDir.appendingPathComponent("missing/none.db").path)
-        XCTAssertFalse(missing.recordSpliceEvent(negotiated(newFunding)))
+        XCTAssertFalse(missing.recordSpliceEvent(negotiated(newFunding), lspSplice: false))
         XCTAssertNil(missing.hasPendingSplice())
     }
 

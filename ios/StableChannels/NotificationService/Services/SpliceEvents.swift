@@ -76,14 +76,23 @@ enum SpliceEventAcknowledgement {
     /// safe to drop, and may be acknowledged; false leaves it for the foreground.
     /// A negotiation failure needs the foreground's broadcast-verified bookkeeping, so it is only
     /// acknowledged while no splice is pending.
-    static func backgroundMayAcknowledge(_ event: Event, db: PaymentDatabase, node: LDKNode.Node) -> Bool {
-        backgroundMayAcknowledge(event, db: db, channels: node.listChannels)
+    ///
+    /// `lspSplice` says the splice is known to be the LSP's: the lsp_splice_in wait passes true, the
+    /// other waits pass whether the LSP's splice push came within `LspSpliceExpectation`'s window.
+    static func backgroundMayAcknowledge(
+        _ event: Event,
+        db: PaymentDatabase,
+        node: LDKNode.Node,
+        lspSplice: Bool
+    ) -> Bool {
+        backgroundMayAcknowledge(event, db: db, lspSplice: lspSplice, channels: node.listChannels)
     }
 
     /// `channels` is read only for events that need the live channel funding.
     static func backgroundMayAcknowledge(
         _ event: Event,
         db: PaymentDatabase,
+        lspSplice: Bool = false,
         channels listChannels: () -> [ChannelDetails]
     ) -> Bool {
         if case .spliceNegotiationFailed = event {
@@ -94,7 +103,7 @@ enum SpliceEventAcknowledgement {
             SpliceEventReceipt.liveFunding(in: channels, userChannelId: $0, channelId: $1)
         }
         guard let receipt else { return true }
-        return db.recordSpliceEvent(receipt)
+        return db.recordSpliceEvent(receipt, lspSplice: lspSplice)
     }
 }
 
@@ -173,7 +182,48 @@ struct LspSpliceWait {
 /// What the user sees for an LSP splice push (`lsp_splice_in`) the extension could not see through to the lock.
 /// The app is open for the splice in the foreground, so it shows no banner there.
 enum LspSpliceNotice {
+    static let direction = "lsp_splice_in"
     static let notificationType = "lsp_splice"
     static let title = "Channel Update"
     static let body = "Open app to finish updating your channel"
+}
+
+/// What a splice event did to the LSP's splice record.
+enum LspSpliceChange {
+    /// A negotiation no Move claimed was recorded as the LSP's splice.
+    case negotiated
+    /// The ready event on its funding locked it.
+    case locked
+}
+
+/// The LSP pushes `lsp_splice_in` before each splice of its own. For a while after that push, a
+/// negotiation with no Move of the app's own in flight is taken as the LSP's. The extension and
+/// the app both note the push in the shared app-group defaults.
+enum LspSpliceExpectation {
+    static let windowSecs: TimeInterval = 10 * 60
+    static let pushedAtKey = "lsp_splice_pushed_at"
+
+    static func note(_ defaults: UserDefaults?, at now: Date = Date()) {
+        defaults?.set(now.timeIntervalSince1970, forKey: pushedAtKey)
+    }
+
+    static func isExpected(_ defaults: UserDefaults?, at now: Date = Date()) -> Bool {
+        expectedWithin(pushedAt: defaults?.double(forKey: pushedAtKey) ?? 0, now: now.timeIntervalSince1970)
+    }
+
+    /// From the push until the window ends; a clock set back before the push expects nothing.
+    static func expectedWithin(pushedAt: TimeInterval, now: TimeInterval) -> Bool {
+        pushedAt > 0 && now >= pushedAt && now - pushedAt < windowSecs
+    }
+
+    /// Whether a push payload is the LSP's splice push; the direction comes as a dictionary or as
+    /// JSON text, as the extension reads it.
+    static func isSplicePush(_ userInfo: [AnyHashable: Any]) -> Bool {
+        if let stability = userInfo["stability"] as? [String: Any] {
+            return stability["direction"] as? String == LspSpliceNotice.direction
+        }
+        guard let text = userInfo["stability"] as? String, let data = text.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+        return json["direction"] as? String == LspSpliceNotice.direction
+    }
 }

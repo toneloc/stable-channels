@@ -461,6 +461,32 @@ final class SpliceFailureRecoveryTests: XCTestCase {
         try db.rawSQL.query("SELECT status FROM payments WHERE txid = ?", params: [.text(txid)]).first?.string(0)
     }
 
+    func testAFailedNegotiationWithNoMoveInFlightFailsNoRow() throws {
+        // A Move the app lost track of before negotiation: its row has no transaction and the app
+        // holds no Move in memory, so the failed negotiation was the LSP's.
+        let rowId = try db.spliceRepo.recordPendingSplice(
+            paymentType: .spliceOut, amountMsat: 50_000_000, amountUSD: 25, btcPrice: 50000,
+            address: "bc1qtest", selfSend: false, channel: channel
+        )
+        let ack = EventAckToken()
+        app.handleSpliceNegotiationFailed(channelId: "channel", userChannelId: "7", ackToken: ack)
+        XCTAssertTrue(ack.shouldAck)
+        let status = try db.rawSQL.query("SELECT status FROM payments WHERE id = ?", params: [.integer(rowId)])
+        XCTAssertEqual(status.first?.string(0), "pending")
+        XCTAssertNotEqual(app.statusMessage, "Splice failed")
+        XCTAssertFalse(app.isSweeping)
+    }
+
+    func testAFailedNegotiationOfTheAppsOwnMoveStillFailsItsRow() throws {
+        try app.beginSpliceOut(amountSats: 50_000, address: "bc1qtest", channel: channel)
+        let ack = EventAckToken()
+        app.handleSpliceNegotiationFailed(channelId: "channel", userChannelId: "7", ackToken: ack)
+        XCTAssertTrue(ack.shouldAck)
+        let status = try db.rawSQL.query("SELECT status FROM payments WHERE payment_type = 'splice_out'")
+        XCTAssertEqual(status.first?.string(0), "failed")
+        XCTAssertEqual(app.statusMessage, "Splice failed")
+    }
+
     func testFailureEventIsDurableBeforeAcknowledgement() throws {
         try beginNegotiatedSplice()
         let ack = EventAckToken()

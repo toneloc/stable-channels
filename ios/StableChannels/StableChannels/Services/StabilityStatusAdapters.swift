@@ -40,8 +40,11 @@ final class DatabaseSpliceStatusAdapter: SpliceStatusProviding {
         self.databaseService = databaseService
     }
 
+    /// Also while the LSP's own splice is negotiated and not locked: the channel is changing under
+    /// the books.
     func hasPendingSplice() -> Bool {
-        (try? databaseService.spliceRepo.hasPendingSplice()) ?? true
+        let repo = databaseService.spliceRepo
+        return (try? repo.hasPendingSplice() || repo.hasPendingLspSplice()) ?? true
     }
 }
 

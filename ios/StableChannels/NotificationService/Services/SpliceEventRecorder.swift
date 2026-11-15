@@ -38,11 +38,26 @@ enum SpliceEventRecorder {
             vout INTEGER,
             payment_row_id INTEGER
         )
+        """,
+        // A splice the LSP made into the channel, kept apart from the user's history so it never
+        // shows as something received: "negotiated" until the channel is ready on its funding,
+        // then "locked".
+        """
+        CREATE TABLE IF NOT EXISTS lsp_splices (
+            txid TEXT PRIMARY KEY,
+            user_channel_id TEXT NOT NULL,
+            channel_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            locked_at INTEGER
+        )
         """
     ]
 
-    /// Both statements bind: ?1 event key, ?2 kind, ?3 user channel id, ?4 channel id,
-    /// ?5 funding txid, ?6 funding vout.
+    /// The event statements bind: ?1 event key, ?2 kind, ?3 user channel id, ?4 channel id,
+    /// ?5 funding txid, ?6 funding vout; `insertEventSQL` and the LSP splice statements also bind
+    /// ?7, 1 when the caller knows the splice is the LSP's, and the LSP splice statements ?8, the
+    /// time in epoch seconds.
     ///
     /// Captures the operation once, at first receipt; a replay keeps its original capture and an
     /// unmatched event is never reassigned to an operation created later. Each tier must yield
@@ -55,6 +70,10 @@ enum SpliceEventRecorder {
     ///   over `expired` ones, so an overdue attempt left behind by a retry cannot make the retry
     ///   ambiguous.
     /// - legacy: rows created before operation identity was persisted, scoped to the saved channel.
+    ///
+    /// Only the exact tier runs for the LSP's splice: when the caller knows it is the LSP's (?7), or
+    /// its funding is an LSP splice already recorded. A Move still waiting for its transaction is
+    /// then not given the LSP's, while a replay of the user's own negotiation is still recognised.
     static let insertEventSQL = """
     WITH
     exact AS (
@@ -86,10 +105,41 @@ enum SpliceEventRecorder {
     INSERT OR IGNORE INTO splice_events (event_key, event_type, user_channel_id, channel_id, txid, vout, payment_row_id)
     SELECT ?1, ?2, ?3, ?4, ?5, ?6, CASE
         WHEN EXISTS (SELECT 1 FROM exact) THEN (SELECT CASE WHEN COUNT(*) = 1 THEN MAX(id) END FROM exact)
+        WHEN ?7 = 1 OR EXISTS (SELECT 1 FROM lsp_splices l WHERE l.txid = ?5) THEN NULL
         WHEN EXISTS (SELECT 1 FROM tracked) THEN (SELECT CASE WHEN COUNT(*) = 1 THEN MAX(id) END FROM preferred)
         ELSE (SELECT CASE WHEN COUNT(*) = 1 THEN MAX(id) END FROM legacy)
     END
     """
+
+    /// Run on an event's first receipt only. Records a negotiation no operation claimed as the
+    /// LSP's splice: when the caller knows it is the LSP's (?7), or no Move is waiting for a
+    /// transaction at all, so a Move left ambiguous between two attempts is not taken for the LSP's.
+    static let recordLspSpliceSQL = """
+    INSERT OR IGNORE INTO lsp_splices (txid, user_channel_id, channel_id, status, created_at)
+    SELECT ?5, ?3, ?4, 'negotiated', ?8
+    WHERE ?2 = 'negotiated' AND ?5 IS NOT NULL
+      AND EXISTS (SELECT 1 FROM splice_events WHERE event_key = ?1 AND payment_row_id IS NULL)
+      AND (?7 = 1 OR NOT EXISTS (
+          SELECT 1 FROM payments
+          WHERE status IN ('pending', 'expired') AND txid IS NULL AND payment_type IN \(spliceTypesSQL)
+      ))
+    """
+
+    /// The ready event on an LSP splice's funding locks it.
+    static let lockLspSpliceSQL = """
+    UPDATE lsp_splices SET status = 'locked', locked_at = ?8
+    WHERE txid = ?5 AND status = 'negotiated' AND ?2 = 'ready'
+    """
+
+    static let lspSpliceStatusSQL = "SELECT status FROM lsp_splices WHERE txid = ?"
+
+    /// A negotiated LSP splice not yet locked, newer than ?1 (epoch seconds): the channel is
+    /// changing under the books, which must not be repaired against it meanwhile.
+    static let hasPendingLspSpliceSQL =
+        "SELECT 1 FROM lsp_splices WHERE status = 'negotiated' AND created_at > ? LIMIT 1"
+
+    /// How long a negotiated LSP splice holds the books repair back.
+    static let lspSplicePendingMaxAgeSecs: Int64 = 24 * 60 * 60
 
     /// A replayed ready event may carry funding its first receipt lacked.
     static let attachFundingSQL = """

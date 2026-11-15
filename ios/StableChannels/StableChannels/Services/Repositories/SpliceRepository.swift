@@ -133,17 +133,50 @@ final class SpliceRepository {
 
     /// Commits the event receipt and any txid it lets an operation claim; once this returns the
     /// event is safe to acknowledge.
-    func recordEvent(_ receipt: SpliceEventReceipt) throws {
+    ///
+    /// With `lspSplice` the caller knows the splice is the LSP's, so a Move still waiting for its
+    /// transaction is not given this one. A negotiation no operation claims is recorded as the
+    /// LSP's splice and the ready event on its funding locks it; the result says when this event did
+    /// either, nil otherwise.
+    @discardableResult
+    func recordEvent(
+        _ receipt: SpliceEventReceipt,
+        lspSplice: Bool = false,
+        now: Date = Date()
+    ) throws -> LspSpliceChange? {
         let params: [SQLValue] = [
             .text(receipt.eventKey), .text(receipt.kind.rawValue), .text(receipt.userChannelId),
             .text(receipt.channelId), receipt.fundingTxid.map { .text($0) } ?? .null,
             receipt.fundingVout.map { .integer(Int64($0)) } ?? .null
         ]
+        let lspParams = params + [.integer(lspSplice ? 1 : 0), .integer(Int64(now.timeIntervalSince1970))]
+        var change: LspSpliceChange?
         try rawSQL.inTransaction {
-            try rawSQL.execute(SpliceEventRecorder.insertEventSQL, params: params)
+            let firstReceipt = try rawSQL.executeReturningChanges(
+                SpliceEventRecorder.insertEventSQL, params: Array(lspParams.prefix(7))
+            ) > 0
             try rawSQL.execute(SpliceEventRecorder.attachFundingSQL, params: params)
+            if firstReceipt,
+               try rawSQL.executeReturningChanges(SpliceEventRecorder.recordLspSpliceSQL, params: lspParams) > 0 {
+                change = .negotiated
+            }
+            if try rawSQL.executeReturningChanges(SpliceEventRecorder.lockLspSpliceSQL, params: lspParams) > 0 {
+                change = .locked
+            }
             try recoverAssignments()
         }
+        return change
+    }
+
+    /// Whether `txid` funds a splice the LSP made into the channel.
+    func isLspSplice(txid: String) throws -> Bool {
+        try !rawSQL.query(SpliceEventRecorder.lspSpliceStatusSQL, params: [.text(txid)]).isEmpty
+    }
+
+    /// Whether the LSP negotiated a splice in the last day that has not locked.
+    func hasPendingLspSplice(now: Date = Date()) throws -> Bool {
+        let since = Int64(now.timeIntervalSince1970) - SpliceEventRecorder.lspSplicePendingMaxAgeSecs
+        return try !rawSQL.query(SpliceEventRecorder.hasPendingLspSpliceSQL, params: [.integer(since)]).isEmpty
     }
 
     /// Resolves saved ready events that arrived without funding, against the live channel, and
