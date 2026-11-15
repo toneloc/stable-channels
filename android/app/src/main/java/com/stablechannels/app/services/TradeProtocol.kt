@@ -86,6 +86,8 @@ data class PreparedTrade(
     val feeMsat: Long,
     val oldExpectedUsd: Double,
     val newExpectedUsd: Double,
+    /** The backing [newBackingSats] was computed from. */
+    val oldBackingSats: Long,
     val newBackingSats: Long,
     val quotePrice: Double,
     val createdAt: Long,
@@ -97,6 +99,8 @@ object TradeProtocol {
     const val RESULT_CONTROL_AMOUNT_MSAT = 1L
     const val RESULT_TIMEOUT_SECS = 15L * 60L
     const val RESPONSE_RETRY_WINDOW_SECS = 14L * 24L * 60L * 60L
+    /** Two dollar targets closer than this are the same target. */
+    const val EXPECTED_USD_TOLERANCE = 0.000000001
     private val rejectionReasons =
         setOf(
             "invalid_amount",
@@ -276,12 +280,44 @@ object TradeProtocol {
                 feeMsat = feeMsat,
                 oldExpectedUsd = sc.expectedUSD.amount,
                 newExpectedUsd = normalizedExpected,
+                oldBackingSats = sc.backingSats,
                 newBackingSats = backing,
                 quotePrice = quotePrice,
                 createdAt = now,
                 expiresAt = now + RESULT_TIMEOUT_SECS,
             )
         )
+    }
+
+    /**
+     * The backing to book when a correlated trade is accepted. Stability payments made while the
+     * result was in flight move backing without a sync_version bump, so the trade's change is
+     * applied to the backing as it is now, as the LSP applies a trade to its live books. The LSP
+     * values that change at its own price, which it keeps within 0.5% of the quote; here it is the
+     * change computed at the quote. Writing the prepared value instead would undo those payments
+     * and the next check would pay them again.
+     *
+     * The rebase applies only while the dollar target is still the one the trade started from. A
+     * send or a backing repair changes the target along with the backing; then the prepared value
+     * is kept.
+     *
+     * A full exit stays at its prepared 0. A rebase that leaves no backing for a non-zero target
+     * keeps the prepared value: zero backing would stop stability checks for the position. Trades
+     * recorded without [oldBackingSats] or [oldExpectedUsd] keep the prepared value.
+     */
+    fun acceptedTradeBacking(
+        newBackingSats: Long,
+        oldBackingSats: Long?,
+        currentBackingSats: Long,
+        oldExpectedUsd: Double?,
+        currentExpectedUsd: Double,
+    ): Long {
+        if (oldBackingSats == null || oldExpectedUsd == null || newBackingSats == 0L) {
+            return newBackingSats
+        }
+        if (abs(currentExpectedUsd - oldExpectedUsd) > EXPECTED_USD_TOLERANCE) return newBackingSats
+        val rebased = currentBackingSats + (newBackingSats - oldBackingSats)
+        return if (rebased > 0L) rebased else newBackingSats
     }
 
     fun tradeBackingAfterDelta(
