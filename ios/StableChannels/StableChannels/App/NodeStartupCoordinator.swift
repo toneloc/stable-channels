@@ -18,8 +18,8 @@ final class NodeStartupCoordinator {
         let shouldRun: @MainActor () -> Bool
         /// Picks the provider to start against.
         let probe: @MainActor () async -> String
-        /// Starts the node against the probed provider.
-        let start: @MainActor (String) async -> Void
+        /// Starts the node against the probed provider; false when the start was turned away without running.
+        let start: @MainActor (String) async -> Bool
         /// Stops a node that came up after the app was paused, handing the wallet dir back.
         let stop: @MainActor () -> Void
     }
@@ -168,14 +168,9 @@ final class NodeStartupCoordinator {
     /// After background cancelled a retry mid-start: if foreground already came back, the retry
     /// it armed may have been turned away while this one ran, so schedule the next one here.
     /// Returns nil while still paused; foreground resumes the retry then.
-    func rescheduleIfResumed(
-        maxDelay: Duration,
-        maxRetries: Int = Constants.nodeStartMaxRetries,
-        reason: String,
-        run: RetryRun
-    ) -> RetrySchedule? {
+    func rescheduleIfResumed(maxDelay: Duration, reason: String, run: RetryRun) -> RetrySchedule? {
         guard !isPaused else { return nil }
-        return scheduleRetry(maxDelay: maxDelay, maxRetries: maxRetries, reason: reason, run: run)
+        return scheduleRetry(maxDelay: maxDelay, reason: reason, run: run)
     }
 
     /// Arms one retry after the policy backoff. A pending retry is not duplicated. Once it
@@ -203,8 +198,10 @@ final class NodeStartupCoordinator {
             self.runningRetry = self.pendingRetry
             self.runningGeneration = generation
             self.pendingRetry = nil
-            await self.perform(run)
+            let ran = await self.perform(run)
             if self.runningGeneration == generation {
+                // A retry turned away before it started the node spends no attempt.
+                if !ran { self.retryAttempt -= 1 }
                 self.runningRetry = nil
                 self.runningGeneration = nil
             }
@@ -219,16 +216,18 @@ final class NodeStartupCoordinator {
         arm(maxDelay: maxDelay, reason: reason, run: run)
     }
 
-    private func perform(_ run: RetryRun) async {
-        guard run.shouldRun() else { return }
+    /// Runs the retry steps; false when the gate or the start turned it away.
+    private func perform(_ run: RetryRun) async -> Bool {
+        guard run.shouldRun() else { return false }
         let url = await run.probe()
         // Background-stop pauses the retry and may hand the wallet dir to the NSE during the
         // probe; a cancelled retry must not start the node.
-        guard !Task.isCancelled else { return }
-        await run.start(url)
+        guard !Task.isCancelled else { return false }
+        let ran = await run.start(url)
         // LDK's start can't be cancelled, so a retry paused mid-start may still bring the node up
         // in a suspended app; stop it so the NSE gets the wallet dir.
         if isPaused { run.stop() }
+        return ran
     }
 
     /// Back in foreground: a start that finishes from now on keeps its node.
@@ -257,10 +256,9 @@ final class NodeStartupCoordinator {
         runningGeneration = nil
     }
 
-    /// Stops any retry and forgets the backoff.
+    /// Stops any retry and forgets the backoff. A pause stays until foreground calls `resume`.
     func reset() {
         cancelRetries()
-        isPaused = false
         retryAttempt = 0
         isRetrying = false
     }

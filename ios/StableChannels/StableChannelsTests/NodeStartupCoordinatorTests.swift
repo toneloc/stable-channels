@@ -255,11 +255,13 @@ final class NodeStartupCoordinatorTests: XCTestCase {
 
     // MARK: - Retry scheduling
 
-    /// A retry run with fakes: `shouldRun` gates it, `probe` returns `url` after `probe` runs.
+    /// A retry run with fakes: `shouldRun` gates it, `probe` returns `url` after `probe` runs, and
+    /// `start` reports `ran` (false = turned away).
     private func run(
         shouldRun: @escaping @MainActor () -> Bool = { true },
         probe: @escaping @MainActor () async -> Void = {},
         start: @escaping @MainActor (String) async -> Void = { _ in },
+        ran: Bool = true,
         stop: @escaping @MainActor () -> Void = {}
     ) -> NodeStartupCoordinator.RetryRun {
         NodeStartupCoordinator.RetryRun(
@@ -268,7 +270,10 @@ final class NodeStartupCoordinatorTests: XCTestCase {
                 await probe()
                 return self.fallback
             },
-            start: start,
+            start: { url in
+                await start(url)
+                return ran
+            },
             stop: stop
         )
     }
@@ -313,6 +318,41 @@ final class NodeStartupCoordinatorTests: XCTestCase {
 
         XCTAssertFalse(probed)
         XCTAssertFalse(coordinator.hasRetryRunning)
+        XCTAssertEqual(coordinator.retryAttempt, 0, "A retry its gate turns away spends no attempt")
+    }
+
+    /// A retry whose start is turned away (another start or retry already in flight) spends no
+    /// attempt, so the next one keeps the same backoff.
+    func testScheduleRetry_startTurnedAwaySpendsNoAttempt() async {
+        let coordinator = makeCoordinator()
+        let started = expectation(description: "start asked")
+
+        coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall", run: run(start: { _ in
+            started.fulfill()
+        }, ran: false))
+        await fulfillment(of: [started], timeout: 1)
+        await waitUntilIdle(coordinator)
+
+        XCTAssertEqual(coordinator.retryAttempt, 0)
+        XCTAssertTrue(coordinator.isRetrying)
+    }
+
+    /// Stopping or wiping the node while the app is backgrounded must not lift the pause: only
+    /// foreground does, so no start runs LDK in the suspended app.
+    func testResetWhilePaused_stillRefusesAStartUntilForeground() async throws {
+        let coordinator = makeCoordinator()
+        coordinator.pause()
+
+        coordinator.reset()
+
+        XCTAssertTrue(coordinator.isPaused)
+        do {
+            _ = try await start(coordinator, results: [nil])
+            XCTFail("A start after reset while paused must end as cancelled")
+        } catch {
+            XCTAssertTrue(error is CancellationError, "\(error)")
+        }
+        XCTAssertEqual(startedURLs, [], "No LDK start while the app is suspended")
     }
 
     func testScheduleRetry_failureInsideRetryBacksOffFurther() async {

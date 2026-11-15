@@ -1255,12 +1255,14 @@ class AppState {
         }
     }
 
-    /// Retries connection to the network and node services after an offline condition.
-    func retryConnection() async {
-        guard !isRetryingConnection else { return }
+    /// Retries connection to the network and node services after an offline condition. Returns
+    /// false when turned away because another retry or node start is already in flight.
+    @discardableResult
+    func retryConnection() async -> Bool {
+        guard !isRetryingConnection else { return false }
         guard !nodeFlowInProgress, !nodeService.isStarting else {
             pendingOnlineRetry = true
-            return
+            return false
         }
         isRetryingConnection = true
         defer { isRetryingConnection = false }
@@ -1269,7 +1271,7 @@ class AppState {
 
         if !networkMonitor.isOnline {
             AuditService.log("RETRY_CONNECTION_STILL_OFFLINE", data: [:])
-            return
+            return true
         }
 
         let previousPhase = phase
@@ -1296,7 +1298,6 @@ class AppState {
                 AuditService.log("NODE_START_RETRY_PAUSED", data: [:])
                 if let schedule = nodeStartup.rescheduleIfResumed(
                     maxDelay: Constants.nodeStartRetryMaxDelay,
-                    maxRetries: Constants.nodeStartMaxRetries,
                     reason: "resumed after pause",
                     run: nodeStartRetryRun()
                 ) {
@@ -1319,6 +1320,7 @@ class AppState {
             await synchronizeActiveWalletState()
             mempoolWebSocketService.connect()
         }
+        return true
     }
 
     /// Classifies a failed node start for `NodeStartupPolicy`.
@@ -1400,9 +1402,9 @@ class AppState {
             // Re-probe providers so the retry doesn't start against the one that just stalled.
             probe: { [weak self] in await self?.chainSourceProbe.resolve() ?? Constants.primaryChainURL },
             start: { [weak self] url in
-                guard let self else { return }
+                guard let self else { return false }
                 self.chainURL = url
-                await self.retryConnection()
+                return await self.retryConnection()
             },
             stop: { [weak self] in self?.performBackgroundStop() }
         )
