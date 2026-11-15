@@ -63,7 +63,9 @@ pub async fn verify_push_registration(
         return false;
     }
     let message = crate::messages::register_push_signed_bytes(node_id, token, timestamp);
-    verify_node_signature(ldk, node_id, message, signature).await.unwrap_or(false)
+    verify_node_signature(ldk, node_id, message, signature)
+        .await
+        .unwrap_or(false)
 }
 
 /// Whether `signature` (zbase32, as a node's signMessage returns it) signs `message` with node_id's key; Err when LDK Server could not be asked.
