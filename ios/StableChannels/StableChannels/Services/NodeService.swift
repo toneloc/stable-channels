@@ -168,8 +168,53 @@ protocol NodeServiceProtocol {
     func syncWallets() throws
 }
 
+/// The node as AppState and the views reading `appState.nodeService` use it.
+protocol AppNodeService: NodeServiceProtocol, EmailRequestSigning, AnyObject {
+    var isStarting: Bool { get }
+    var databaseService: DatabaseService? { get set }
+    func clearSavedMnemonic()
+    func refreshChannels()
+    func balances() -> BalanceDetails?
+    func inboundOnchain() -> WalletInboundOnchain?
+    func spendableOnchainSats() -> UInt64
+    func lightningSyncAgeSecs() -> UInt64?
+    func newOnchainAddress() throws -> String
+    func signMessage(_ message: [UInt8]) throws -> String
+    func verifySignature(message: [UInt8], signature: String, pubkey: PublicKey) -> Bool
+    func connectAndOpenChannel(pubkey: String, address: String, amountSats: UInt64) async throws
+    func requestChannelClose(
+        userChannelId: UserChannelId,
+        counterpartyNodeId: PublicKey,
+        fundingOutpointTxid: String,
+        fundingOutpointVout: UInt32,
+        balanceSats: UInt64,
+        balanceUsd: Double?,
+        btcPrice: Double?,
+        counterparty: String?,
+        force: Bool
+    ) async throws
+    func spliceInWithAll(userChannelId: UserChannelId, counterpartyNodeId: PublicKey) throws
+    func spliceOut(
+        userChannelId: UserChannelId,
+        counterpartyNodeId: PublicKey,
+        address: String,
+        amountSats: UInt64
+    ) throws
+    func outboundPaymentStatus(paymentHash: PaymentHash) -> PaymentStatus?
+    func sendPayment(invoice: Bolt11Invoice) throws -> PaymentId
+    func sendPaymentUsingAmount(invoice: Bolt11Invoice, amountMsat: UInt64) throws -> PaymentId
+    func sendBolt12UsingAmount(offer: Offer, amountMsat: UInt64) throws -> PaymentId
+    func sendKeysendWithTLV(amountMsat: UInt64, to nodeId: PublicKey, tlvs: [CustomTlvRecord]) throws -> PaymentId
+    func sendStabilityPayment(amountMsat: UInt64, to nodeId: PublicKey, tlvs: [CustomTlvRecord]) throws -> PaymentId
+    func sendOnchain(address: String, amountSats: UInt64, feeRateSatVb: Double?) throws -> Txid
+    func sendAllOnchain(address: String, feeRateSatVb: Double?) throws -> Txid
+    func receivePayment(amountMsat: UInt64, description: String) throws -> Bolt11Invoice
+    func receiveVariablePayment(description: String) throws -> Bolt11Invoice
+    func receiveViaJitChannel(amountMsat: UInt64, description: String) throws -> Bolt11Invoice
+}
+
 @Observable
-class NodeService: NodeServiceProtocol {
+class NodeService: AppNodeService {
     static let shared = NodeService()
 
     private(set) var node: Node?

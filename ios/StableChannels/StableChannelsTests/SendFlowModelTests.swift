@@ -359,7 +359,7 @@ final class SendFlowModelTests: XCTestCase {
     func testCalculateMaxSendableSats_spliceOutDeductsSpliceFee() {
         let appState = AppState()
         appState.hasReadyChannel = true
-        appState.nodeService.channelsOverride = [readyChannel(outboundSats: 50_000)]
+        appState.concreteNodeService.channelsOverride = [readyChannel(outboundSats: 50_000)]
         appState.lightningBalanceSats = 50_000
         let model = SendFlowModel()
         model.inputText = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
@@ -569,7 +569,7 @@ final class SendFlowModelTests: XCTestCase {
         // A send to an address with a ready channel is a splice-out from that channel, so the
         // on-chain balance must not be counted as spendable for it.
         let appState = AppState()
-        appState.nodeService.channelsOverride = [readyChannel(outboundSats: 20_000)]
+        appState.concreteNodeService.channelsOverride = [readyChannel(outboundSats: 20_000)]
         appState.lightningBalanceSats = 20_000
         appState.spendableOnchainSats = 30_000
         appState.isSweeping = false
@@ -586,7 +586,7 @@ final class SendFlowModelTests: XCTestCase {
         XCTAssertTrue(model.isInsufficientBalance(appState: appState))
 
         // With no ready channel the on-chain balance is what is spendable.
-        appState.nodeService.channelsOverride = []
+        appState.concreteNodeService.channelsOverride = []
         model.feeRateSatVb = 10
         XCTAssertEqual(model.availableSpendableSats(appState: appState), 30_000)
     }
@@ -595,7 +595,7 @@ final class SendFlowModelTests: XCTestCase {
         // The ceiling is 1% + 50 sats, rounded up: max is the largest amount with
         // max + cap(max) <= available, and max + 1 + cap(max + 1) > available.
         let appState = AppState()
-        appState.nodeService.channelsOverride = [readyChannel(outboundSats: 10_000_000)]
+        appState.concreteNodeService.channelsOverride = [readyChannel(outboundSats: 10_000_000)]
         let model = SendFlowModel()
         model.destination = .lightningAddress(
             handle: "alice",
@@ -637,7 +637,7 @@ final class SendFlowModelTests: XCTestCase {
 
     func testLightningFee_isTheRoutingFeeCeilingRegardlessOfChannelPolicy() throws {
         let appState = AppState()
-        appState.nodeService.channelsOverride = [readyChannel(outboundSats: 10_000_000)]
+        appState.concreteNodeService.channelsOverride = [readyChannel(outboundSats: 10_000_000)]
         let model = SendFlowModel()
         model.destination = .lightningAddress(
             handle: "alice",
@@ -925,7 +925,7 @@ final class SendFlowModelTests: XCTestCase {
         await service.setStubbedQuotes([lnurlQuote(.direct)])
         let (model, appState) = try lnurlAmountStepModel(service: service)
         var paid: [(Bolt11Invoice, UInt64)] = []
-        appState.nodeService.sendPaymentUsingAmountOverride = { invoice, amountMsat in
+        appState.concreteNodeService.sendPaymentUsingAmountOverride = { invoice, amountMsat in
             paid.append((invoice, amountMsat))
             // Settled before the executor records it, so settlement resolves without waiting.
             try self.seedPayment(XCTUnwrap(appState.databaseService), id: "lnurl-pid", status: "completed")
@@ -950,7 +950,7 @@ final class SendFlowModelTests: XCTestCase {
         await service.setStubbedQuotes([lnurlQuote()])
         let (model, appState) = try lnurlAmountStepModel(service: service)
         var paymentAttempts = 0
-        appState.nodeService.sendPaymentUsingAmountOverride = { _, _ in
+        appState.concreteNodeService.sendPaymentUsingAmountOverride = { _, _ in
             paymentAttempts += 1
             throw NodeServiceError.notRunning
         }
@@ -1140,12 +1140,12 @@ final class SendFlowModelTests: XCTestCase {
         let amount: UInt64 = 40000
         let fee = PaymentFeeEstimator.estimateSpliceOutFee(feeRateSatVb: 5)
         // The smaller channel covers the amount but is one sat short of amount + fee.
-        appState.nodeService.channelsOverride = [
+        appState.concreteNodeService.channelsOverride = [
             readyChannel(outboundSats: amount + fee - 1, id: "short"),
             readyChannel(outboundSats: amount + fee + 10000, id: "large")
         ]
         var splicedChannels: [String] = []
-        appState.nodeService.spliceOutOverride = { userChannelId, _, _, _ in
+        appState.concreteNodeService.spliceOutOverride = { userChannelId, _, _, _ in
             splicedChannels.append(userChannelId)
         }
 
@@ -1291,7 +1291,7 @@ final class SendFlowModelTests: XCTestCase {
     func testMaxAmount_spliceOutFollowsSelectedFeeTier() {
         let appState = AppState()
         appState.hasReadyChannel = true
-        appState.nodeService.channelsOverride = [readyChannel(outboundSats: 50000)]
+        appState.concreteNodeService.channelsOverride = [readyChannel(outboundSats: 50000)]
         appState.lightningBalanceSats = 50000
         let model = SendFlowModel()
         model.inputText = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
@@ -1364,7 +1364,7 @@ final class SendFlowModelTests: XCTestCase {
     func testOnchainWalletSendAll_withReadyChannelEmptiesWalletInsteadOfSplicing() {
         let appState = AppState()
         appState.hasReadyChannel = true
-        appState.nodeService.channelsOverride = [readyChannel(outboundSats: 50000)]
+        appState.concreteNodeService.channelsOverride = [readyChannel(outboundSats: 50000)]
         appState.lightningBalanceSats = 50000
         appState.spendableOnchainSats = 100_000
         appState.isSweeping = false
@@ -1391,7 +1391,7 @@ final class SendFlowModelTests: XCTestCase {
     func testIsSpliceOut_falseWhileSweepingEvenWithReadyChannel() {
         let appState = AppState()
         appState.hasReadyChannel = true
-        appState.nodeService.channelsOverride = [readyChannel(outboundSats: 50000)]
+        appState.concreteNodeService.channelsOverride = [readyChannel(outboundSats: 50000)]
         appState.isSweeping = true
         let model = SendFlowModel()
 

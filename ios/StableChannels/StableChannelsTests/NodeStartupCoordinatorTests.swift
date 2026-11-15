@@ -693,6 +693,30 @@ final class NodeStartupCoordinatorTests: XCTestCase {
         XCTAssertEqual(appState.stableChannel.backingSats, 150_000)
     }
 
+    /// AppState runs on any node service and opens the wallet database through the injected factory.
+    func testStart_opensTheDatabaseThroughTheInjectedFactory() async {
+        NodeDirLock.shared.release()
+        var openedDirs: [URL] = []
+        let node = FakeNodeService()
+        let appState = AppState(
+            nodeService: node,
+            networkMonitor: MockNetworkMonitor(initialStatus: .online),
+            nodeStartup: heldRetries(),
+            chainSourceProbe: ChainSourceProbe(isReachable: { _ in true }, log: { _, _ in }),
+            makeDatabase: { dir in
+                openedDirs.append(dir)
+                throw TestError.database
+            }
+        )
+
+        await appState.start()
+
+        XCTAssertEqual(openedDirs, [Constants.userDataDir])
+        XCTAssertEqual(appState.phase, .error("Database init failed: \(TestError.database.localizedDescription)"))
+        XCTAssertNil(node.databaseService)
+        XCTAssertFalse(NodeDirLock.shared.isHeld, "A failed database open hands the wallet dir back")
+    }
+
     /// A scheduled retry runs `retryConnection` with the syncing screen up; when that start fails
     /// again it must schedule the next retry instead of leaving the syncing screen up for good.
     func testFailedStartInsideARetry_schedulesTheNextRetry() async {
@@ -1266,5 +1290,103 @@ private final class LeaseMirroringNodeService: PrimaryStallingNodeService {
             }
             throw error
         }
+    }
+}
+
+extension AppState {
+    /// The default node, for tests that drive its DEBUG overrides.
+    var concreteNodeService: NodeService {
+        guard let node = nodeService as? NodeService else { fatalError("AppState was built with a fake node") }
+        return node
+    }
+}
+
+/// A node service with no LDK node behind it: AppState must run on the protocol alone.
+private final class FakeNodeService: AppNodeService {
+    var node: Node? { nil }
+    var isRunning = false
+    var isStarting = false
+    var nodeId = ""
+    var activeNetwork: Network?
+    var channels: [ChannelDetails] = []
+    var savedMnemonic: String?
+    var databaseService: DatabaseService?
+
+    func start(network _: Network, esploraURL _: String, mnemonic _: String, lspConfig _: LSPConfig) async throws {
+        throw NodeServiceError.notRunning
+    }
+
+    func stop() {}
+    func syncWallets() throws {}
+    func clearSavedMnemonic() {}
+    func refreshChannels() {}
+    func balances() -> BalanceDetails? { nil }
+    func inboundOnchain() -> WalletInboundOnchain? { nil }
+    func spendableOnchainSats() -> UInt64 { 0 }
+    func lightningSyncAgeSecs() -> UInt64? { nil }
+    func newOnchainAddress() throws -> String { throw NodeServiceError.notRunning }
+    func signMessage(_: [UInt8]) throws -> String { throw NodeServiceError.notRunning }
+    func verifySignature(message _: [UInt8], signature _: String, pubkey _: PublicKey) -> Bool { false }
+    func connectAndOpenChannel(pubkey _: String, address _: String, amountSats _: UInt64) async throws {
+        throw NodeServiceError.notRunning
+    }
+
+    func requestChannelClose(
+        userChannelId _: UserChannelId,
+        counterpartyNodeId _: PublicKey,
+        fundingOutpointTxid _: String,
+        fundingOutpointVout _: UInt32,
+        balanceSats _: UInt64,
+        balanceUsd _: Double?,
+        btcPrice _: Double?,
+        counterparty _: String?,
+        force _: Bool
+    ) async throws {
+        throw NodeServiceError.notRunning
+    }
+
+    func spliceInWithAll(userChannelId _: UserChannelId, counterpartyNodeId _: PublicKey) throws {
+        throw NodeServiceError.notRunning
+    }
+
+    func spliceOut(
+        userChannelId _: UserChannelId,
+        counterpartyNodeId _: PublicKey,
+        address _: String,
+        amountSats _: UInt64
+    ) throws {
+        throw NodeServiceError.notRunning
+    }
+
+    func outboundPaymentStatus(paymentHash _: PaymentHash) -> PaymentStatus? { nil }
+    func sendPayment(invoice _: Bolt11Invoice) throws -> PaymentId { throw NodeServiceError.notRunning }
+    func sendPaymentUsingAmount(invoice _: Bolt11Invoice, amountMsat _: UInt64) throws -> PaymentId {
+        throw NodeServiceError.notRunning
+    }
+
+    func sendBolt12UsingAmount(offer _: Offer, amountMsat _: UInt64) throws -> PaymentId {
+        throw NodeServiceError.notRunning
+    }
+
+    func sendKeysendWithTLV(amountMsat _: UInt64, to _: PublicKey, tlvs _: [CustomTlvRecord]) throws -> PaymentId {
+        throw NodeServiceError.notRunning
+    }
+
+    func sendStabilityPayment(amountMsat _: UInt64, to _: PublicKey, tlvs _: [CustomTlvRecord]) throws -> PaymentId {
+        throw NodeServiceError.notRunning
+    }
+
+    func sendOnchain(address _: String, amountSats _: UInt64, feeRateSatVb _: Double?) throws -> Txid {
+        throw NodeServiceError.notRunning
+    }
+
+    func sendAllOnchain(address _: String, feeRateSatVb _: Double?) throws -> Txid { throw NodeServiceError.notRunning }
+    func receivePayment(amountMsat _: UInt64, description _: String) throws -> Bolt11Invoice {
+        throw NodeServiceError.notRunning
+    }
+
+    func receiveVariablePayment(description _: String) throws -> Bolt11Invoice { throw NodeServiceError.notRunning }
+    func receiveViaJitChannel(amountMsat _: UInt64, description _: String) throws -> Bolt11Invoice {
+        throw NodeServiceError.notRunning
     }
 }
