@@ -113,6 +113,28 @@ final class LspSplicePushTests: XCTestCase {
         XCTAssertTrue(wait.isDone(at: at(20)), "the deadline ends it")
     }
 
+    func testASpliceThatLockedBeforeTheWaitBeganIsTheLockOnceItsNegotiationIsSeen() {
+        // The channel already lists the new funding, and both events are still queued.
+        var wait = wait(startFunding: "new")
+        wait.see(negotiated("new"), at: at(1), liveFunding: noLiveFunding)
+        wait.see(ready("new"), at: at(1), liveFunding: noLiveFunding)
+        XCTAssertEqual(wait.outcome, .locked)
+        XCTAssertTrue(wait.isDone(at: at(4)))
+
+        var unknownStart = self.wait(startFunding: nil)
+        unknownStart.see(negotiated("new"), at: at(1), liveFunding: noLiveFunding)
+        unknownStart.see(ready("new"), at: at(2), liveFunding: noLiveFunding)
+        XCTAssertEqual(unknownStart.outcome, .locked)
+    }
+
+    func testAReadyOnAnotherNegotiationsFundingIsNotTheLock() {
+        var wait = wait(startFunding: "new")
+        wait.see(negotiated("other"), at: at(1), liveFunding: noLiveFunding)
+        wait.see(ready("new"), at: at(2), liveFunding: noLiveFunding)
+        XCTAssertEqual(wait.outcome, .negotiated)
+        XCTAssertFalse(wait.isDone(at: at(10)))
+    }
+
     func testAReadyWithoutFundingIsJudgedByTheLiveChannel() {
         var stale = wait()
         stale.see(ready(nil), at: at(1)) { _ in "old" }
