@@ -119,6 +119,12 @@ fun SettingsHub(appState: AppState, navController: NavController) {
         // Support section
         SettingsSectionHeader(title = "Support", color = Color(0xFF10B981))
         SettingsNavLink(
+            icon = Icons.Default.Email,
+            iconBackground = Color(0xFF3B82F6),
+            label = "Email",
+            onClick = { navController.navigate(SettingsRoute.Email.route) },
+        )
+        SettingsNavLink(
             icon = Icons.Default.MedicalServices,
             iconBackground = Color(0xFF10B981),
             label = "Logs & Diagnostics",

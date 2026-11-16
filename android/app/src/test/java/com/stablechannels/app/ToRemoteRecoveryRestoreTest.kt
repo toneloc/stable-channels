@@ -1,9 +1,14 @@
 package com.stablechannels.app
 
+import com.stablechannels.app.domain.EmailAddress
+import com.stablechannels.app.services.EmailPromptStore
+import com.stablechannels.app.services.LdkNodeOwner
 import com.stablechannels.app.services.NodeService
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -40,5 +45,28 @@ class ToRemoteRecoveryRestoreTest {
 
         markNodeRunning(state)
         assertNotNull(toRemoteKeys(state))
+    }
+
+    /**
+     * The restored node start wipes the old wallet files before it can fail, so the old wallet's
+     * email and prompt answers are forgotten before the start, not after it.
+     */
+    @Test
+    fun aFailedRestoreStillForgetsTheOldEmail() {
+        val context = RuntimeEnvironment.getApplication()
+        val state = AppState(context)
+        val store = EmailPromptStore.get(context)
+        store.savedEmail = EmailAddress.parse("old@example.com")
+        // Another owner holds the node data, so the start throws.
+        assertTrue(LdkNodeOwner.tryAcquire(LdkNodeOwner.STABILITY_SERVICE))
+        try {
+            runBlocking {
+                runCatching { state.startRestoredNode("abandon ".repeat(11) + "about", false) }
+            }
+        } finally {
+            LdkNodeOwner.release(LdkNodeOwner.STABILITY_SERVICE)
+        }
+
+        assertNull(store.savedEmail)
     }
 }

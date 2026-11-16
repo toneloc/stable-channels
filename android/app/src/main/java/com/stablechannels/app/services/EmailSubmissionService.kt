@@ -1,0 +1,94 @@
+package com.stablechannels.app.services
+
+import com.stablechannels.app.domain.EmailAddress
+import com.stablechannels.app.domain.EmailRegistration
+import com.stablechannels.app.domain.EmailSaveException
+import com.stablechannels.app.domain.EmailSaveFailure
+import com.stablechannels.app.domain.NodeMessageSigner
+import com.stablechannels.app.domain.SigningTimestampStoring
+import com.stablechannels.app.util.Constants
+import java.io.IOException
+import java.net.HttpURLConnection.HTTP_UNAUTHORIZED
+import java.net.HttpURLConnection.HTTP_UNAVAILABLE
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+
+/** Saves the email the user chose to share on the Stable Channels server; null removes it. */
+fun interface EmailSubmitter {
+    /** Throws [EmailSaveException] when the server did not save the change. */
+    suspend fun submit(email: EmailAddress?)
+}
+
+/** Whether the server's reply body says `"ok": true`; anything else is a refusal. */
+private fun isOkReply(body: String): Boolean =
+    runCatching { Json.parseToJsonElement(body).jsonObject["ok"]?.jsonPrimitive?.booleanOrNull }
+        .getOrNull() == true
+
+/** Signs with the running node; not ready until the node has started. */
+class NodeServiceSigner(private val nodeService: NodeService) : NodeMessageSigner {
+    override val readyNodeId: String?
+        get() = nodeService.nodeId.takeIf { nodeService.isRunning && it.isNotEmpty() }
+
+    override fun sign(message: ByteArray): String = nodeService.signMessage(message)
+}
+
+class EmailSubmissionService(
+    private val signer: NodeMessageSigner,
+    private val timestamps: SigningTimestampStoring,
+    private val endpoint: String = Constants.EMAIL_SUBMIT_URL,
+    private val client: OkHttpClient = sharedClient,
+    private val nowSecs: () -> Long = { System.currentTimeMillis() / 1_000 },
+) : EmailSubmitter {
+    override suspend fun submit(email: EmailAddress?) =
+        withContext(Dispatchers.IO) {
+            val body = signedEnvelope(email).toRequestBody("application/json".toMediaType())
+            val request = Request.Builder().url(endpoint).post(body).build()
+            val refusal =
+                try {
+                    client.newCall(request).execute().use {
+                        when {
+                            it.code == HTTP_UNAUTHORIZED -> EmailSaveFailure.SIGNATURE_REFUSED
+                            it.code == HTTP_UNAVAILABLE -> EmailSaveFailure.UNAVAILABLE
+                            it.isSuccessful && isOkReply(it.body?.string().orEmpty()) -> null
+                            else -> EmailSaveFailure.REJECTED
+                        }
+                    }
+                } catch (e: IOException) {
+                    throw EmailSaveException(EmailSaveFailure.NETWORK, e)
+                }
+            if (refusal != null) throw EmailSaveException(refusal)
+        }
+
+    private fun signedEnvelope(email: EmailAddress?): String {
+        val nodeId =
+            signer.readyNodeId ?: throw EmailSaveException(EmailSaveFailure.WALLET_NOT_READY)
+        val ts = EmailRegistration.nextTimestamp(nowSecs(), timestamps.lastSignedTs)
+        val payload = EmailRegistration.payload(email, nodeId, ts)
+        val signature =
+            try {
+                signer.sign(payload.toByteArray(Charsets.UTF_8))
+            } catch (e: Exception) {
+                throw EmailSaveException(EmailSaveFailure.WALLET_NOT_READY, e)
+            }
+        timestamps.lastSignedTs = ts
+        return EmailRegistration.envelope(payload, signature)
+    }
+
+    private companion object {
+        // One connection pool for every model that builds a service.
+        val sharedClient: OkHttpClient by lazy {
+            OkHttpClient.Builder()
+                .callTimeout(Constants.EMAIL_SUBMIT_TIMEOUT_SECS, TimeUnit.SECONDS)
+                .build()
+        }
+    }
+}
