@@ -1574,6 +1574,7 @@ class AppState {
     /// isStarting. performBackgroundStop must not release the wallet-dir lock
     /// out from under such a flow.
     private var nodeFlowInProgress = false
+    var isNodeFlowInProgress: Bool { nodeFlowInProgress }
     private var pendingOnlineRetry = false
     /// Node-start failover and automatic retry after transient chain-source failures.
     let nodeStartup: NodeStartupCoordinator
@@ -1717,7 +1718,11 @@ class AppState {
             timeout: Constants.nodeDirLockTimeoutSecs,
             caller: "restartNodeFromForeground",
             log: AuditService.log
-        ).held else { return }
+        ).held else {
+            // No lock means no save, but still show what the extension wrote meanwhile.
+            reloadStateWrittenWhileSuspended()
+            return
+        }
         reloadStateWrittenWhileSuspended()
         restoreGossipToDB()
         do {
