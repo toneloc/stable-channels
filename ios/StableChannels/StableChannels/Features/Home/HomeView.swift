@@ -12,7 +12,7 @@ struct HomeView: View {
     @State private var showSellSheet = false
     @State private var prefillTradeAmount: Double = 0
     @State private var tradeRequest: TradeRequest?
-    @State private var showEmailPrompt = false
+    @State private var emailPrompt: EmailSettingsModel?
     private let emailPromptStore: EmailPromptStoring & SavedEmailStoring
 
     init(emailPromptStore: EmailPromptStoring & SavedEmailStoring = EmailPromptStore.shared) {
@@ -87,9 +87,10 @@ struct HomeView: View {
             }
         }
         .task(id: pendingOnchainReloadKey) { loadPendingOnchain() }
+        .task { await presentEmailPromptIfDue() }
         .onAppear {
             checkNotifications()
-            presentEmailPromptIfDue()
+            emailPromptStore.recordLaunchOnce()
             Task.detached { [appState] in appState.ensureLSPConnected() }
         }
         .onChange(of: scenePhase) {
@@ -99,9 +100,7 @@ struct HomeView: View {
             }
         }
         .sheet(isPresented: $showSendSheet) { SendView() }
-        .sheet(isPresented: $showEmailPrompt) {
-            EmailPromptSheet(service: EmailSubmissionService(signer: appState.nodeService), store: emailPromptStore)
-        }
+        .sheet(item: $emailPrompt) { EmailPromptSheet(model: $0) }
         .sheet(isPresented: $showReceiveSheet) { ReceiveView() }
         .sheet(isPresented: $showBuySheet) { BuyView(prefillAmountUSD: prefillTradeAmount) }
         .sheet(isPresented: $showSellSheet) { SellView(prefillAmountUSD: prefillTradeAmount) }
@@ -126,23 +125,28 @@ struct HomeView: View {
 
     private var isShowingAnySheet: Bool {
         showSendSheet || showReceiveSheet || showBuySheet || showSellSheet || tradeRequest != nil
+            || paymentCoordinator.paymentId != nil
     }
 
-    private func presentEmailPromptIfDue() {
-        emailPromptStore.recordLaunchOnce()
-        Task {
-            // Wait so the prompt never covers the first look at the balance.
-            try? await Task.sleep(for: .seconds(Constants.emailPromptShowDelaySeconds))
-            guard !isShowingAnySheet, EmailPromptPolicy.shouldShow(
-                launches: emailPromptStore.launches,
-                timesShown: emailPromptStore.timesShown,
-                lastShownLaunch: emailPromptStore.lastShownLaunch,
-                hasResponded: emailPromptStore.hasResponded,
-                isAppLocked: !appState.isUnlocked && UserDefaults.standard.bool(forKey: Constants.appUnlockEnabledKey)
-            ) else { return }
-            emailPromptStore.recordShown()
-            showEmailPrompt = true
-        }
+    /// Runs as the Home `.task`, so leaving Home before the delay ends cancels it.
+    private func presentEmailPromptIfDue() async {
+        // Wait so the prompt never covers the first look at the balance.
+        guard await (try? Task.sleep(for: .seconds(Constants.emailPromptShowDelaySeconds))) != nil,
+              EmailPromptPolicy.shouldShow(
+                  launches: emailPromptStore.launches,
+                  timesShown: emailPromptStore.timesShown,
+                  lastShownLaunch: emailPromptStore.lastShownLaunch,
+                  hasResponded: emailPromptStore.hasResponded,
+                  isAppLocked: appState.isAppLocked,
+                  isOtherSheetShowing: isShowingAnySheet
+              ) else { return }
+        emailPromptStore.recordShown()
+        // Built once here, not in the sheet, so Home redraws never rebuild the form state.
+        emailPrompt = EmailSettingsModel(
+            service: EmailSubmissionService(signer: appState.nodeService),
+            store: emailPromptStore,
+            onSaved: emailPromptStore.markResponded
+        )
     }
 
     // MARK: - Balance Bar (Stable / Native)

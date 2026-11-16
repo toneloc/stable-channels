@@ -1,9 +1,10 @@
 import SwiftUI
 
 /// Form state for the optional email: validates the input, saves, changes or removes the address.
+/// Identified by instance, so a sheet presents one model for its whole life.
 @MainActor
 @Observable
-final class EmailSettingsModel {
+final class EmailSettingsModel: Identifiable {
     enum Status: Equatable {
         case idle
         case saving

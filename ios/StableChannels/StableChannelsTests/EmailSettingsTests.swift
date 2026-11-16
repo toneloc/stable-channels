@@ -1,3 +1,4 @@
+import SwiftUI
 import XCTest
 @testable import StableChannels
 
@@ -104,6 +105,7 @@ final class EmailRegistrationEnvelopeTests: XCTestCase {
     }
 }
 
+@MainActor
 final class EmailSubmissionServiceTests: XCTestCase {
     private let timestamp: TimeInterval = 1_762_790_000
 
@@ -120,13 +122,13 @@ final class EmailSubmissionServiceTests: XCTestCase {
 
     private func makeService(
         signer: FakeSigner,
-        timestamps: FakeTimestampStore = FakeTimestampStore()
+        timestamps: FakeTimestampStore? = nil
     ) -> EmailSubmissionService {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MockURLProtocol.self]
         return EmailSubmissionService(
             signer: signer,
-            timestamps: timestamps,
+            timestamps: timestamps ?? FakeTimestampStore(),
             configuration: configuration,
             now: { [timestamp] in Date(timeIntervalSince1970: timestamp) }
         )
@@ -289,10 +291,10 @@ final class EmailErrorLineTests: XCTestCase {
 final class EmailSettingsModelTests: XCTestCase {
     private func makeModel(
         stub: StubEmailSubmitter = StubEmailSubmitter(),
-        store: FakeSavedEmailStore = FakeSavedEmailStore(),
+        store: FakeSavedEmailStore? = nil,
         onSaved: @escaping () -> Void = {}
     ) -> EmailSettingsModel {
-        EmailSettingsModel(service: stub, store: store, onSaved: onSaved)
+        EmailSettingsModel(service: stub, store: store ?? FakeSavedEmailStore(), onSaved: onSaved)
     }
 
     func testSave_submitsNormalizedEmailAndRemembersIt() async {
@@ -421,20 +423,61 @@ final class EmailSettingsModelTests: XCTestCase {
     }
 }
 
+/// Counts how often the saved address is read; each form model reads it once when built.
+@MainActor
+private final class CountingEmailStore: EmailPromptStoring, SavedEmailStoring {
+    private(set) var savedEmailReads = 0
+    var savedEmail: EmailAddress? {
+        get { savedEmailReads += 1; return nil }
+        set {}
+    }
+
+    let launches = 0
+    let hasResponded = false
+    let timesShown = 0
+    let lastShownLaunch = 0
+    func recordLaunchOnce() {}
+    func recordShown() {}
+    func markResponded() {}
+}
+
+@MainActor
+final class EmailSettingsViewTests: XCTestCase {
+    // Settings rebuilds the page view on every redraw; the form state must be built once, not each time.
+    func testSettingsPage_buildsItsModelOnceAcrossParentRedraws() {
+        let store = CountingEmailStore()
+        let host = UIHostingController(rootView: EmailSettingsView(service: StubEmailSubmitter(), store: store))
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        addTeardownBlock { @MainActor in window.isHidden = true }
+
+        for _ in 0 ..< 3 {
+            host.rootView = EmailSettingsView(service: StubEmailSubmitter(), store: store)
+            host.view.layoutIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+
+        XCTAssertEqual(store.savedEmailReads, 1)
+    }
+}
+
 final class EmailPromptPolicyTests: XCTestCase {
     private func shows(
         _ launches: Int,
         shown: Int = 0,
         lastShown: Int = 0,
         responded: Bool = false,
-        locked: Bool = false
+        locked: Bool = false,
+        otherSheet: Bool = false
     ) -> Bool {
         EmailPromptPolicy.shouldShow(
             launches: launches,
             timesShown: shown,
             lastShownLaunch: lastShown,
             hasResponded: responded,
-            isAppLocked: locked
+            isAppLocked: locked,
+            isOtherSheetShowing: otherSheet
         )
     }
 
@@ -469,8 +512,15 @@ final class EmailPromptPolicyTests: XCTestCase {
         XCTAssertFalse(shows(3, locked: true))
         XCTAssertFalse(shows(9, shown: 1, lastShown: 3, locked: true))
     }
+
+    // Home sheets (send, receive, trade, payment details) would be covered or swapped out by the prompt.
+    func testNeverShows_overAnotherHomeSheet() {
+        XCTAssertFalse(shows(3, otherSheet: true))
+        XCTAssertFalse(shows(12, shown: 1, lastShown: 3, otherSheet: true))
+    }
 }
 
+@MainActor
 final class EmailPromptStoreTests: XCTestCase {
     private func makeDefaults() -> UserDefaults {
         let name = "EmailPromptStoreTests-\(UUID().uuidString)"

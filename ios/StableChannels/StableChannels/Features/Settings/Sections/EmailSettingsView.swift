@@ -1,12 +1,36 @@
 import SwiftUI
 
 struct EmailSettingsView: View {
-    @State private var model: EmailSettingsModel
-    @State private var confirmingRemove = false
+    private let service: EmailSubmitting
+    private let store: EmailPromptStoring & SavedEmailStoring
+    /// Built on first appear, not in init: Settings rebuilds this view value on every redraw.
+    @State private var model: EmailSettingsModel?
 
     init(service: EmailSubmitting, store: EmailPromptStoring & SavedEmailStoring = EmailPromptStore.shared) {
-        _model = State(initialValue: EmailSettingsModel(service: service, store: store, onSaved: store.markResponded))
+        self.service = service
+        self.store = store
     }
+
+    var body: some View {
+        Group {
+            if let model {
+                EmailSettingsForm(model: model)
+            } else {
+                Color(.systemGroupedBackground)
+            }
+        }
+        .navigationTitle(String(localized: "title_email", defaultValue: "Email"))
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            guard model == nil else { return }
+            model = EmailSettingsModel(service: service, store: store, onSaved: store.markResponded)
+        }
+    }
+}
+
+private struct EmailSettingsForm: View {
+    let model: EmailSettingsModel
+    @State private var confirmingRemove = false
 
     var body: some View {
         List {
@@ -16,8 +40,6 @@ struct EmailSettingsView: View {
                 entrySections
             }
         }
-        .navigationTitle(String(localized: "title_email", defaultValue: "Email"))
-        .navigationBarTitleDisplayMode(.inline)
         .alert(
             String(localized: "email_remove_title", defaultValue: "Remove your email?"),
             isPresented: $confirmingRemove

@@ -2,7 +2,8 @@ import Foundation
 
 /// Remembers how often the app launched, when the email prompt was shown, whether the user answered it,
 /// and the address last saved on the server.
-final class EmailPromptStore: EmailPromptStoring, SavedEmailStoring, EmailTimestampStoring, @unchecked Sendable {
+@MainActor
+final class EmailPromptStore: EmailPromptStoring, SavedEmailStoring, EmailTimestampStoring {
     static let shared = EmailPromptStore()
 
     private static let launchesKey = "emailPromptLaunchCount"

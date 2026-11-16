@@ -97,6 +97,8 @@ struct EmailSubmissionService: EmailSubmitting {
         self.now = now
     }
 
+    /// On the main actor, where the timestamp store lives; the network wait does not hold it.
+    @MainActor
     func submit(_ email: EmailAddress?) async throws {
         let nodeId = signer.nodeId
         guard signer.isRunning, !nodeId.isEmpty else { throw EmailSubmissionError.walletNotReady }
