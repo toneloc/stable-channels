@@ -1,10 +1,12 @@
 package com.stablechannels.app.domain
 
 import android.content.Context
+import com.stablechannels.app.R
 import com.stablechannels.app.services.EmailPromptStore
 import com.stablechannels.app.services.EmailSubmissionService
 import com.stablechannels.app.services.EmailSubmitter
 import com.stablechannels.app.ui.email.EmailSettingsModel
+import com.stablechannels.app.ui.email.message
 import java.util.concurrent.CountDownLatch
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -18,6 +20,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -182,6 +185,21 @@ class EmailSubmissionServiceTest {
             nowSecs = { TS },
         )
 
+    // Each Settings or Home model builds a service; they must reuse one connection pool.
+    @Test
+    fun services_shareOneDefaultClient() {
+        fun clientOf(service: EmailSubmissionService) =
+            EmailSubmissionService::class
+                .java
+                .getDeclaredField("client")
+                .apply { isAccessible = true }
+                .get(service)
+        val first = EmailSubmissionService(FakeSigner(), InMemorySigningTimestamp())
+        val second = EmailSubmissionService(FakeSigner(), InMemorySigningTimestamp())
+
+        assertSame(clientOf(first), clientOf(second))
+    }
+
     @Test
     fun submit_postsSignedEnvelopeOverExactPayload() = runTest {
         MockWebServer().use { server ->
@@ -240,12 +258,26 @@ class EmailSubmissionServiceTest {
         }
     }
 
+    // 401 means a bad signature or a timestamp outside the server's window, most often a wrong
+    // device clock; 503 means saving is switched off for now.
     @Test
-    fun submit_whenServerRejects_failsAsRejected() = runTest {
-        MockWebServer().use { server ->
-            server.enqueue(MockResponse().setResponseCode(401))
-            val failure = failureOf { service(server, FakeSigner()).submit(null) }
-            assertEquals(EmailSaveFailure.REJECTED, failure)
+    fun submit_mapsServerStatusToFailure() = runTest {
+        val expected =
+            mapOf(
+                400 to EmailSaveFailure.REJECTED,
+                401 to EmailSaveFailure.SIGNATURE_REFUSED,
+                500 to EmailSaveFailure.REJECTED,
+                503 to EmailSaveFailure.UNAVAILABLE,
+            )
+        for ((code, failure) in expected) {
+            MockWebServer().use { server ->
+                server.enqueue(MockResponse().setResponseCode(code))
+                assertEquals(
+                    "$code",
+                    failure,
+                    failureOf { service(server, FakeSigner()).submit(null) },
+                )
+            }
         }
     }
 
@@ -388,7 +420,8 @@ class EmailSettingsModelTest {
     fun remove_sendsNullAndClearsStore() = runTest {
         val stub = StubSubmitter()
         val store = InMemorySavedEmail(email("old@example.com"))
-        val model = EmailSettingsModel(stub, store)
+        var savedCount = 0
+        val model = EmailSettingsModel(stub, store, onSaved = { savedCount++ })
 
         model.remove()
 
@@ -396,6 +429,9 @@ class EmailSettingsModelTest {
         assertNull(store.savedEmail)
         assertNull(model.savedEmail)
         assertTrue(model.showsField)
+        // Removing is not an answer to the prompt, and the field it shows starts fresh.
+        assertEquals(EmailSettingsModel.Status.IDLE, model.status)
+        assertEquals(0, savedCount)
     }
 
     // Like the real service: a blocking request on IO that the server finishes even if the caller
@@ -442,6 +478,20 @@ class EmailSettingsModelTest {
         assertEquals(EmailSaveFailure.REJECTED, model.failure)
         assertEquals("old@example.com", store.savedEmail?.value)
         assertFalse(model.showsField)
+    }
+}
+
+class EmailSaveErrorMessageTest {
+    @Test
+    fun eachFailure_hasItsOwnMessage() {
+        assertEquals(
+            R.string.email_error_wallet_not_ready,
+            EmailSaveFailure.WALLET_NOT_READY.message,
+        )
+        assertEquals(R.string.email_error_network, EmailSaveFailure.NETWORK.message)
+        assertEquals(R.string.email_error_rejected, EmailSaveFailure.REJECTED.message)
+        assertEquals(R.string.email_error_check_clock, EmailSaveFailure.SIGNATURE_REFUSED.message)
+        assertEquals(R.string.email_error_unavailable, EmailSaveFailure.UNAVAILABLE.message)
     }
 }
 

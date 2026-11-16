@@ -13,6 +13,8 @@
     <string name="email_error_wallet_not_ready">Your wallet is still starting. Try again in a moment.</string>
     <string name="email_error_network">Couldn\'t reach Stable Channels. Check your connection and try again.</string>
     <string name="email_error_rejected">Couldn\'t save your email. Try again.</string>
+    <string name="email_error_check_clock">Couldn\'t save your email. Check your device\'s date and time, then try again.</string>
+    <string name="email_error_unavailable">Saving your email isn\'t available right now. Try again later.</string>
     <string name="email_settings_footer">The Stable Channels team may write to ask how the wallet is working for you or to tell you about important updates. No spam, and we will never ask for your recovery phrase.</string>
     <string name="email_settings_saved_header">Your email</string>
     <string name="email_settings_saved_label">Saved</string>

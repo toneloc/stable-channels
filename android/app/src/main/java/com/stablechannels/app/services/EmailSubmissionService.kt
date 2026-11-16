@@ -8,6 +8,8 @@ import com.stablechannels.app.domain.NodeMessageSigner
 import com.stablechannels.app.domain.SigningTimestampStoring
 import com.stablechannels.app.util.Constants
 import java.io.IOException
+import java.net.HttpURLConnection.HTTP_UNAUTHORIZED
+import java.net.HttpURLConnection.HTTP_UNAVAILABLE
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -43,25 +45,27 @@ class EmailSubmissionService(
     private val signer: NodeMessageSigner,
     private val timestamps: SigningTimestampStoring,
     private val endpoint: String = Constants.EMAIL_SUBMIT_URL,
-    private val client: OkHttpClient =
-        OkHttpClient.Builder()
-            .callTimeout(Constants.EMAIL_SUBMIT_TIMEOUT_SECS, TimeUnit.SECONDS)
-            .build(),
+    private val client: OkHttpClient = sharedClient,
     private val nowSecs: () -> Long = { System.currentTimeMillis() / 1_000 },
 ) : EmailSubmitter {
     override suspend fun submit(email: EmailAddress?) =
         withContext(Dispatchers.IO) {
             val body = signedEnvelope(email).toRequestBody("application/json".toMediaType())
             val request = Request.Builder().url(endpoint).post(body).build()
-            val accepted =
+            val refusal =
                 try {
                     client.newCall(request).execute().use {
-                        it.isSuccessful && isOkReply(it.body?.string().orEmpty())
+                        when {
+                            it.code == HTTP_UNAUTHORIZED -> EmailSaveFailure.SIGNATURE_REFUSED
+                            it.code == HTTP_UNAVAILABLE -> EmailSaveFailure.UNAVAILABLE
+                            it.isSuccessful && isOkReply(it.body?.string().orEmpty()) -> null
+                            else -> EmailSaveFailure.REJECTED
+                        }
                     }
                 } catch (e: IOException) {
                     throw EmailSaveException(EmailSaveFailure.NETWORK, e)
                 }
-            if (!accepted) throw EmailSaveException(EmailSaveFailure.REJECTED)
+            if (refusal != null) throw EmailSaveException(refusal)
         }
 
     private fun signedEnvelope(email: EmailAddress?): String {
@@ -77,5 +81,14 @@ class EmailSubmissionService(
             }
         timestamps.lastSignedTs = ts
         return EmailRegistration.envelope(payload, signature)
+    }
+
+    private companion object {
+        // One connection pool for every model that builds a service.
+        val sharedClient: OkHttpClient by lazy {
+            OkHttpClient.Builder()
+                .callTimeout(Constants.EMAIL_SUBMIT_TIMEOUT_SECS, TimeUnit.SECONDS)
+                .build()
+        }
     }
 }

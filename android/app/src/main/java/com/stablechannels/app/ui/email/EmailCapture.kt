@@ -1,5 +1,6 @@
 package com.stablechannels.app.ui.email
 
+import androidx.annotation.StringRes
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -136,9 +137,13 @@ class EmailSettingsModel(
             savedStore.savedEmail = email
             savedEmail = email
             isChanging = false
-            if (email == null) input = ""
-            status = Status.SAVED
-            onSaved()
+            if (email == null) {
+                input = ""
+                status = Status.IDLE
+            } else {
+                status = Status.SAVED
+                onSaved()
+            }
         }
     }
 
@@ -249,18 +254,24 @@ fun EmailField(model: EmailSettingsModel, onDone: () -> Unit, modifier: Modifier
     }
 }
 
-/** One red line explaining why the last save failed; nothing when it did not. */
-@Composable
-fun EmailSaveError(failure: EmailSaveFailure?, modifier: Modifier = Modifier) {
-    val message =
-        when (failure) {
+/** The line of copy shown for this failure. */
+val EmailSaveFailure.message: Int
+    @StringRes
+    get() =
+        when (this) {
             EmailSaveFailure.WALLET_NOT_READY -> R.string.email_error_wallet_not_ready
             EmailSaveFailure.NETWORK -> R.string.email_error_network
             EmailSaveFailure.REJECTED -> R.string.email_error_rejected
-            null -> return
+            EmailSaveFailure.SIGNATURE_REFUSED -> R.string.email_error_check_clock
+            EmailSaveFailure.UNAVAILABLE -> R.string.email_error_unavailable
         }
+
+/** One red line explaining why the last save failed; nothing when it did not. */
+@Composable
+fun EmailSaveError(failure: EmailSaveFailure?, modifier: Modifier = Modifier) {
+    if (failure == null) return
     Text(
-        stringResource(message),
+        stringResource(failure.message),
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.error,
         modifier = modifier,

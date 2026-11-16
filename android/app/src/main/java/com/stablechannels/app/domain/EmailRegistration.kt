@@ -63,6 +63,10 @@ enum class EmailSaveFailure {
     WALLET_NOT_READY,
     NETWORK,
     REJECTED,
+    /** Bad signature or a timestamp outside the server's window, most often a wrong clock. */
+    SIGNATURE_REFUSED,
+    /** The server is not taking emails right now. */
+    UNAVAILABLE,
 }
 
 /** Carries only the failure kind, so the address never reaches a log or crash report. */
