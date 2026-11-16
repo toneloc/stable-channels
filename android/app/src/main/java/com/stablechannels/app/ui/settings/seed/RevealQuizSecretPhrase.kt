@@ -21,7 +21,6 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -46,7 +45,6 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.SecureFlagPolicy
 import com.stablechannels.app.domain.seed.AppLifecyclePhase
-import com.stablechannels.app.ui.components.InkButton
 import com.stablechannels.app.ui.components.NeutralTextButton
 import com.stablechannels.app.util.ClipboardUtils
 import kotlinx.coroutines.delay
@@ -114,7 +112,7 @@ fun RevealQuizSecretPhrase(mnemonic: String, onDone: () -> Unit, modifier: Modif
                             contentDescription = null,
                             modifier = Modifier.size(18.dp),
                             tint =
-                                if (copiedSeed) RevealColors.copiedCheck
+                                if (copiedSeed) RevealColors.green
                                 else MaterialTheme.colorScheme.onSurface,
                         )
                         Text("Copy Seed", fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
@@ -132,19 +130,11 @@ fun RevealQuizSecretPhrase(mnemonic: String, onDone: () -> Unit, modifier: Modif
                 }
             }
         }
-        InkButton(
+        RevealCapsuleButton(
+            text = "Done",
             onClick = onDone,
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(bottom = 20.dp),
-            colors =
-                ButtonDefaults.buttonColors(
-                    containerColor = RevealColors.buttonFill,
-                    contentColor = RevealColors.buttonLabel,
-                ),
-            minHeight = 52.dp,
-            restingRadius = 26.dp,
-        ) {
-            Text("Done", fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-        }
+            modifier = Modifier.padding(horizontal = 24.dp).padding(bottom = 20.dp),
+        )
     }
 
     if (showCopyWarning) {
