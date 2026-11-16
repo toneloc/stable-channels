@@ -1,6 +1,5 @@
 import Foundation
 import LDKNode
-import SQLite3
 
 /// Protocol for starting an LDK node
 protocol NodeStarter {
@@ -52,7 +51,7 @@ final class DefaultNodeStarter: NodeStarter {
         // latest_lightning_wallet_sync_timestamp — so on strip runs the freshness gate must
         // wait for a new sync instead of inheriting the main app's recent one. Logged so the
         // pilot metrics can split immediate-send runs from forced-resync runs.
-        let nodeMetricsReset = Self.stripGossipFromDB(path: ldkDbPath.path)
+        let nodeMetricsReset = LdkDbMaintenance(dataDir: dataDir, log: logger.log).stripGossip()
         logger
             .log("stability_gate {\"event\":\"node_metrics_reset\",\"platform\":\"ios\",\"reset\":\(nodeMetricsReset)}")
 
@@ -142,33 +141,5 @@ final class DefaultNodeStarter: NodeStarter {
             address: Self.lspAddress,
             persist: true
         )
-    }
-
-    /// Returns true when the strip ran and deleted node_metrics (resetting LDK's persisted
-    /// Lightning-sync timestamp along with the graph and scorer).
-    private static func stripGossipFromDB(path: String) -> Bool {
-        var db: OpaquePointer?
-        guard sqlite3_open(path, &db) == SQLITE_OK else { return false }
-        defer { sqlite3_close(db) }
-
-        var stmt: OpaquePointer?
-        let sql = "SELECT LENGTH(value) FROM ldk_node_data WHERE key = 'network_graph'"
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return false }
-        let hasGraph: Bool
-        if sqlite3_step(stmt) == SQLITE_ROW {
-            let size = sqlite3_column_int64(stmt, 0)
-            hasGraph = size > 100_000
-        } else {
-            hasGraph = false
-        }
-        sqlite3_finalize(stmt)
-
-        if hasGraph {
-            sqlite3_exec(db, "DELETE FROM ldk_node_data WHERE key = 'network_graph'", nil, nil, nil)
-            sqlite3_exec(db, "DELETE FROM ldk_node_data WHERE key = 'scorer'", nil, nil, nil)
-            sqlite3_exec(db, "DELETE FROM ldk_node_data WHERE key = 'node_metrics'", nil, nil, nil)
-            sqlite3_exec(db, "VACUUM", nil, nil, nil)
-        }
-        return hasGraph
     }
 }
