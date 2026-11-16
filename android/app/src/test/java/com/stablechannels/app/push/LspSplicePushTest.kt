@@ -135,4 +135,16 @@ class LspSplicePushTest {
         assertTrue(lockedThenFailed.isDone(30_001))
         assertEquals(LspSpliceWait.Outcome.LOCKED, lockedThenFailed.outcome)
     }
+
+    @Test
+    fun `only the LSP channel moving to new funding counts as its splice locking`() {
+        assertTrue(lspSpliceLocked(fundingBeforeTxid = "aa", fundingNowTxid = "bb"))
+        // A replayed ready event, or one for another channel, leaves the funding as it was.
+        assertFalse(lspSpliceLocked(fundingBeforeTxid = "aa", fundingNowTxid = "aa"))
+        // No LSP channel to read now is no lock.
+        assertFalse(lspSpliceLocked(fundingBeforeTxid = "aa", fundingNowTxid = null))
+        assertFalse(lspSpliceLocked(fundingBeforeTxid = null, fundingNowTxid = null))
+        // A channel that had no funding to read when the hold began, and has now.
+        assertTrue(lspSpliceLocked(fundingBeforeTxid = null, fundingNowTxid = "bb"))
+    }
 }

@@ -11,6 +11,7 @@ import com.stablechannels.app.push.CpuHold
 import com.stablechannels.app.push.FCMService
 import com.stablechannels.app.push.LspSpliceHoldBridge
 import com.stablechannels.app.push.StabilityProcessingService
+import com.stablechannels.app.push.lspSpliceLocked
 import com.stablechannels.app.services.*
 import com.stablechannels.app.services.CloseTxidResolver
 import com.stablechannels.app.services.fees.FeeRateService
@@ -633,6 +634,9 @@ class AppState(private val context: Context) : ViewModel() {
      * is not. The app gets no LDK event before splice_init, so the push is its only warning.
      */
     @Volatile private var lspSpliceHoldUntilMs = 0L
+
+    /** The LSP channel's funding txid when the hold began, so only its splice locking ends it. */
+    @Volatile private var lspSpliceFundingBeforeTxid: String? = null
     private val isHoldingForLspSplice: Boolean
         get() = lspSpliceHoldUntilMs > System.currentTimeMillis()
 
@@ -1529,6 +1533,7 @@ class AppState(private val context: Context) : ViewModel() {
                 FCMService.flagPendingPayment(context)
                 return@launch
             }
+            lspSpliceFundingBeforeTxid = lspChannelFundingTxid()
             lspSpliceHoldUntilMs = System.currentTimeMillis() + LSP_SPLICE_HOLD_MS
             lspSpliceCpuHold.hold(LSP_SPLICE_HOLD_MS)
             AuditService.log(
@@ -1546,6 +1551,15 @@ class AppState(private val context: Context) : ViewModel() {
             }
             withContext(Dispatchers.IO) { ensureLSPConnected() }
         }
+    }
+
+    private fun lspChannelFundingTxid(): String? {
+        val lspPubkey = LspPreferencesManager.getLspPubkey(context)
+        return nodeService.node
+            ?.listChannels()
+            ?.firstOrNull { it.counterpartyNodeId == lspPubkey }
+            ?.fundingTxo
+            ?.txid
     }
 
     /**
@@ -2265,8 +2279,14 @@ class AppState(private val context: Context) : ViewModel() {
                 // durably attached, never a funding fallback.
                 resumePendingSpliceConfirmation()
                 AuditService.log("CHANNEL_READY", mapOf("channel_id" to event.channelId))
-                // During a hold, a ready channel is the LSP's splice locking on its new funding.
-                releaseLspSpliceHold("locked")
+                // Another channel opening, the user's own splice or a replayed event can also be
+                // ready during a hold; only the LSP's channel on new funding is its splice locking.
+                if (
+                    lspSpliceHoldUntilMs != 0L &&
+                        lspSpliceLocked(lspSpliceFundingBeforeTxid, lspChannelFundingTxid())
+                ) {
+                    releaseLspSpliceHold("locked")
+                }
             }
             is Event.PaymentReceived -> {
                 handlePaymentReceived(
