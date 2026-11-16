@@ -8236,6 +8236,7 @@ dependencies = [
  "tokio",
  "tokio-rustls 0.26.4",
  "toml 0.8.23",
+ "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",

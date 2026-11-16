@@ -39,6 +39,22 @@ final class NodeStartupFailoverTests: XCTestCase {
         }
     }
 
+    /// The reported failure: an online fee-rate timeout whose text says "timed out" must retry,
+    /// not land on the offline page.
+    func testOnlineFeeRateTimeout_retriesDespiteTimedOutText() {
+        let error = NodeError.FeerateEstimationUpdateTimeout(message: "Connection timed out")
+        let outcome = NodeStartupPolicy.failureOutcome(
+            isNetworkOffline: false,
+            looksOffline: NetworkReachabilityEvaluator.shouldPresentOfflineNotice(
+                error: error,
+                isNetworkOffline: false
+            ),
+            isRetryable: error.isRetryableNodeStartError
+        )
+
+        XCTAssertEqual(outcome, .retry)
+    }
+
     func testBridgedErrorsCarryingCaseNameTextAreNotRetryable() {
         // Only typed NodeError cases qualify. A foreign error whose description happens to
         // contain the case name must not trigger a provider retry.
@@ -60,6 +76,27 @@ final class NodeStartupFailoverTests: XCTestCase {
                 error.isRetryableEsploraStartupError,
                 "Non-NodeError '\(error)' must not be classified as retryable"
             )
+        }
+    }
+
+    /// Fee-rate failures fail over to another provider; wallet-sync failures only retry the start with backoff.
+    func testNodeStartRetriesCoverFeeRateAndSyncFailures_failoverOnlyFeeRate() {
+        let feeRate: [Error] = [
+            NodeError.FeerateEstimationUpdateFailed(message: "429"),
+            NodeError.FeerateEstimationUpdateTimeout(message: "timed out")
+        ]
+        let sync: [Error] = [NodeError.TxSyncFailed(message: "sync"), NodeError.TxSyncTimeout(message: "sync")]
+        let neither: [Error] = [NodeError.PersistenceFailed(message: "disk"), NodeServiceError.dataDirLocked]
+
+        for error in feeRate {
+            XCTAssertTrue(error.isRetryableNodeStartError, "\(error)")
+        }
+        for error in sync {
+            XCTAssertTrue(error.isRetryableNodeStartError, "\(error)")
+            XCTAssertFalse(error.isRetryableEsploraStartupError, "\(error)")
+        }
+        for error in neither {
+            XCTAssertFalse(error.isRetryableNodeStartError, "\(error)")
         }
     }
 
@@ -164,5 +201,72 @@ final class NodeStartupFailoverTests: XCTestCase {
         NodeDirLock.shared.release()
         NodeDirLock.shared.release()
         XCTAssertFalse(NodeDirLock.shared.isHeld, "Extra releases must stay harmless no-ops")
+    }
+
+    /// A paused node-start retry may be waiting on the NSE's lock; cancellation must end the
+    /// poll at once instead of spinning to the 35s deadline.
+    func testCancelledLockWait_returnsNotHeldPromptly() async {
+        let tempDir = makeTempDir()
+        // Another process's flock: a separate open file description conflicts even in-process.
+        let other = open(tempDir.appendingPathComponent(NodeDirLock.lockFilename).path, O_CREAT | O_RDWR, 0o644)
+        XCTAssertEqual(flock(other, LOCK_EX | LOCK_NB), 0)
+        defer {
+            close(other)
+            NodeDirLock.shared.release()
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+
+        let wait = Task { await NodeDirLock.shared.acquireReportingNew(dataDir: tempDir, timeout: 35) }
+        try? await Task.sleep(for: .milliseconds(300))
+        let cancelledAt = ContinuousClock.now
+        wait.cancel()
+        let lease = await wait.value
+
+        XCTAssertFalse(lease.held)
+        XCTAssertLessThan(ContinuousClock.now - cancelledAt, .seconds(1))
+    }
+
+    /// A failed body under an outer lease (restore's) leaves the lock with the lease's owner.
+    @MainActor
+    func testWithHeldLock_failureUnderAnOuterLeaseKeepsTheLock() async {
+        let tempDir = makeTempDir()
+        defer {
+            NodeDirLock.shared.release()
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+        XCTAssertTrue(NodeDirLock.shared.tryAcquire(dataDir: tempDir))
+
+        await failInsideHeldLock(dataDir: tempDir)
+
+        XCTAssertTrue(NodeDirLock.shared.isHeld, "Only the call that took the lock may release it")
+    }
+
+    /// A failed body that took the lock itself hands it back so a broken start never starves the NSE.
+    @MainActor
+    func testWithHeldLock_failureWithoutAnOuterLeaseReleasesTheLock() async {
+        let tempDir = makeTempDir()
+        defer {
+            NodeDirLock.shared.release()
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+        NodeDirLock.shared.release()
+
+        await failInsideHeldLock(dataDir: tempDir)
+
+        XCTAssertFalse(NodeDirLock.shared.isHeld)
+    }
+
+    @MainActor
+    private func failInsideHeldLock(dataDir: URL) async {
+        do {
+            try await NodeDirLock.shared.withHeldLock(
+                dataDir: dataDir,
+                timeout: 1,
+                caller: "test",
+                log: { _, _ in },
+                isNodeRunning: { false }
+            ) { () async throws in throw NodeServiceError.dataDirLocked }
+            XCTFail("The body's error must propagate")
+        } catch {}
     }
 }

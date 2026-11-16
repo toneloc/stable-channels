@@ -42,12 +42,15 @@ use ldk_server_grpc::endpoints::{
 };
 use ldk_server_grpc::error::{ErrorCode, ErrorResponse};
 use sc_protos::stable::{
-	EditStableChannelRequest, EditStableChannelResponse, GetPriceRequest, GetPriceResponse,
-	ListChannelLedgerEventsRequest, ListChannelLedgerEventsResponse, ListSettlementPaymentsRequest,
-	ListSettlementPaymentsResponse, ListStableChannelsRequest, ListStableChannelsResponse,
-	LogRequest, LogResponse, ReleaseStabilityPaymentRequest, ReleaseStabilityPaymentResponse,
-	AUDIT_LOG_PATH, EDIT_STABLE_CHANNEL_PATH, GET_PRICE_PATH, LDK_LOG_PATH,
-	LIST_CHANNEL_LEDGER_EVENTS_PATH, LIST_SETTLEMENT_PAYMENTS_PATH, LIST_STABLE_CHANNELS_PATH,
+	CancelQueuedSpliceRequest, CancelQueuedSpliceResponse, EditStableChannelRequest,
+	EditStableChannelResponse, GetPriceRequest, GetPriceResponse, ListChannelLedgerEventsRequest,
+	ListChannelLedgerEventsResponse, ListQueuedSplicesRequest, ListQueuedSplicesResponse,
+	ListSettlementPaymentsRequest, ListSettlementPaymentsResponse, ListStableChannelsRequest,
+	ListStableChannelsResponse, LogRequest, LogResponse, QueueSpliceInRequest,
+	QueueSpliceInResponse, ReleaseStabilityPaymentRequest, ReleaseStabilityPaymentResponse,
+	AUDIT_LOG_PATH, CANCEL_QUEUED_SPLICE_PATH, EDIT_STABLE_CHANNEL_PATH, GET_PRICE_PATH,
+	LDK_LOG_PATH, LIST_CHANNEL_LEDGER_EVENTS_PATH, LIST_QUEUED_SPLICES_PATH,
+	LIST_SETTLEMENT_PAYMENTS_PATH, LIST_STABLE_CHANNELS_PATH, QUEUE_SPLICE_IN_PATH,
 	RELEASE_STABILITY_PAYMENT_PATH,
 };
 use sc_protos::revenue::{
@@ -527,6 +530,30 @@ impl LspRestClient {
 		&self, request: ReleaseStabilityPaymentRequest,
 	) -> Result<ReleaseStabilityPaymentResponse, LspRestError> {
 		let url = self.build_url(RELEASE_STABILITY_PAYMENT_PATH);
+		self.post_request(&request, &url).await
+	}
+
+	/// Queues an LSP splice-in that the daemon finishes once the phone is online, waking it by push first.
+	pub async fn queue_splice_in(
+		&self, request: QueueSpliceInRequest,
+	) -> Result<QueueSpliceInResponse, LspRestError> {
+		let url = self.build_url(QUEUE_SPLICE_IN_PATH);
+		self.post_request(&request, &url).await
+	}
+
+	/// Every channel's queued splice-in and where it got to.
+	pub async fn list_queued_splices(
+		&self, request: ListQueuedSplicesRequest,
+	) -> Result<ListQueuedSplicesResponse, LspRestError> {
+		let url = self.build_url(LIST_QUEUED_SPLICES_PATH);
+		self.post_request(&request, &url).await
+	}
+
+	/// Cancels a queued splice-in that has not locked.
+	pub async fn cancel_queued_splice(
+		&self, request: CancelQueuedSpliceRequest,
+	) -> Result<CancelQueuedSpliceResponse, LspRestError> {
+		let url = self.build_url(CANCEL_QUEUED_SPLICE_PATH);
 		self.post_request(&request, &url).await
 	}
 

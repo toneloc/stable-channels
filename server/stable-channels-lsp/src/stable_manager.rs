@@ -4,16 +4,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ldk_server_client::client::LdkServerClient;
-use ldk_server_client::error::LdkServerError;
+use ldk_server_client::error::{LdkServerError, LdkServerErrorCode};
 use ldk_server_client::ldk_server_grpc::api::{
     GetBalancesRequest, GetBalancesResponse, GetForwardedPaymentTrackingModeRequest,
     GetForwardedPaymentTrackingModeResponse, GetNodeInfoRequest, GetNodeInfoResponse,
     GetPaymentDetailsRequest, GetPaymentDetailsResponse,
     ListChannelsRequest, ListChannelsResponse, ListForwardedPaymentsRequest,
     ListForwardedPaymentsResponse, ListPeersRequest, ListPeersResponse, ListPaymentsRequest,
-    ListPaymentsResponse, SignMessageRequest, SignMessageResponse, SpontaneousSendRequest,
-    SpontaneousSendResponse, VerifySignatureRequest, VerifySignatureResponse,
+    ListPaymentsResponse, SignMessageRequest, SignMessageResponse, SpliceInRequest,
+    SpliceInResponse, SpontaneousSendRequest, SpontaneousSendResponse, VerifySignatureRequest,
+    VerifySignatureResponse,
 };
 use ldk_server_client::ldk_server_grpc::events::ChannelStateChangeReason;
 use ldk_server_client::ldk_server_grpc::types::{Channel, CustomTlvRecord, PaymentStatus};
@@ -50,7 +50,7 @@ fn sync_retry_delay_secs(attempts: u64) -> u64 {
 /// Return each peer's own spendable-plus-reserve balance from the fields LDK exposes for that
 /// peer. `channel_value - local_balance` is not the remote balance: on outbound channels it also
 /// assigns the funder's current commitment fee to the remote peer.
-fn channel_peer_balances(channel: &Channel) -> (u64, u64) {
+pub(crate) fn channel_peer_balances(channel: &Channel) -> (u64, u64) {
     let local_sats = (channel.outbound_capacity_msat / 1000)
         .saturating_add(channel.unspendable_punishment_reserve.unwrap_or(0));
     let remote_sats = (channel.inbound_capacity_msat / 1000)
@@ -251,75 +251,85 @@ pub trait LdkServerCalls: Send + Sync {
     ) -> Result<GetNodeInfoResponse, LdkServerError> {
         Ok(GetNodeInfoResponse::default())
     }
+    /// Splice on-chain funds into a channel. The node answers once it has sent `splice_init`; the negotiation itself reports through events.
+    async fn splice_in(
+        &self,
+        _req: SpliceInRequest,
+    ) -> Result<SpliceInResponse, LdkServerError> {
+        Err(LdkServerError::new(LdkServerErrorCode::InternalError, "splice_in is not available on this node client"))
+    }
 }
 
 #[async_trait]
-impl LdkServerCalls for LdkServerClient {
+impl LdkServerCalls for crate::ldk_client::LdkClient {
     async fn list_channels(
         &self,
         req: ListChannelsRequest,
     ) -> Result<ListChannelsResponse, LdkServerError> {
-        LdkServerClient::list_channels(self, req).await
+        crate::ldk_client::LdkClient::list_channels(self, req).await
     }
     async fn spontaneous_send(
         &self,
         req: SpontaneousSendRequest,
     ) -> Result<SpontaneousSendResponse, LdkServerError> {
-        LdkServerClient::spontaneous_send(self, req).await
+        crate::ldk_client::LdkClient::spontaneous_send(self, req).await
     }
     async fn sign_message(
         &self,
         req: SignMessageRequest,
     ) -> Result<SignMessageResponse, LdkServerError> {
-        LdkServerClient::sign_message(self, req).await
+        crate::ldk_client::LdkClient::sign_message(self, req).await
     }
     async fn verify_signature(
         &self,
         req: VerifySignatureRequest,
     ) -> Result<VerifySignatureResponse, LdkServerError> {
-        LdkServerClient::verify_signature(self, req).await
+        crate::ldk_client::LdkClient::verify_signature(self, req).await
     }
     async fn get_node_info(
         &self,
         req: GetNodeInfoRequest,
     ) -> Result<GetNodeInfoResponse, LdkServerError> {
-        LdkServerClient::get_node_info(self, req).await
+        crate::ldk_client::LdkClient::get_node_info(self, req).await
     }
     async fn list_forwarded_payments(
         &self,
         req: ListForwardedPaymentsRequest,
     ) -> Result<ListForwardedPaymentsResponse, LdkServerError> {
-        LdkServerClient::list_forwarded_payments(self, req).await
+        crate::ldk_client::LdkClient::list_forwarded_payments(self, req).await
     }
     async fn get_balances(
         &self,
         req: GetBalancesRequest,
     ) -> Result<GetBalancesResponse, LdkServerError> {
-        LdkServerClient::get_balances(self, req).await
+        crate::ldk_client::LdkClient::get_balances(self, req).await
     }
     async fn list_peers(
         &self,
         req: ListPeersRequest,
     ) -> Result<ListPeersResponse, LdkServerError> {
-        LdkServerClient::list_peers(self, req).await
+        crate::ldk_client::LdkClient::list_peers(self, req).await
     }
     async fn list_payments(
         &self,
         req: ListPaymentsRequest,
     ) -> Result<ListPaymentsResponse, LdkServerError> {
-        LdkServerClient::list_payments(self, req).await
+        crate::ldk_client::LdkClient::list_payments(self, req).await
     }
     async fn get_payment_details(
         &self,
         req: GetPaymentDetailsRequest,
     ) -> Result<GetPaymentDetailsResponse, LdkServerError> {
-        LdkServerClient::get_payment_details(self, req).await
+        crate::ldk_client::LdkClient::get_payment_details(self, req).await
     }
     async fn get_forwarded_payment_tracking_mode(
         &self,
         req: GetForwardedPaymentTrackingModeRequest,
     ) -> Result<GetForwardedPaymentTrackingModeResponse, LdkServerError> {
-        LdkServerClient::get_forwarded_payment_tracking_mode(self, req).await
+        crate::ldk_client::LdkClient::get_forwarded_payment_tracking_mode(self, req).await
+    }
+    async fn splice_in(&self, req: SpliceInRequest) -> Result<SpliceInResponse, LdkServerError> {
+        crate::ldk_client::LdkClient::splice_in(self, req).await
     }
 }
 
@@ -388,6 +398,13 @@ pub enum TopUpSettlement {
     NotOnTheWay,
     Booked,
     ChannelMissing,
+}
+
+/// Whether a received payment is dealt with, or must be handled again because LDK Server didn't answer a call its decision needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Handled {
+    Done,
+    Retry,
 }
 
 /// A successfully dispatched wake notification and the channel snapshot that triggered it.
@@ -740,24 +757,25 @@ impl StableChannelManager {
     /// The identifier a client correlates a trade result by: the payment hash of its own keysend.
     /// ldk-node >= 0.8 gives inbound payments an id distinct from the hash (older versions used
     /// the hash itself), so the LDK id stays our internal key and the hash goes on the wire.
-    async fn correlation_payment_id(ldk: &dyn LdkServerCalls, inbound_payment_id: &str) -> String {
+    /// Fails only when LDK Server didn't answer, since the id it would fall back to is one the wallet can't match.
+    async fn correlation_payment_id(ldk: &dyn LdkServerCalls, inbound_payment_id: &str) -> Result<String, LdkServerError> {
         use ldk_server_client::ldk_server_grpc::types::payment_kind::Kind;
-        ldk.get_payment_details(GetPaymentDetailsRequest {
-            payment_id: inbound_payment_id.to_string(),
-        })
-        .await
-        .ok()
-        .and_then(|response| response.payment)
-        .and_then(|payment| payment.kind)
-        .and_then(|kind| kind.kind)
-        .and_then(|kind| match kind {
-            Kind::Bolt11(bolt11) => Some(bolt11.hash),
-            Kind::Spontaneous(spontaneous) => Some(spontaneous.hash),
-            Kind::Bolt12Offer(offer) => offer.hash,
-            _ => None,
-        })
-        .filter(|hash| stable_channels::trade::is_payment_id(hash))
-        .unwrap_or_else(|| inbound_payment_id.to_string())
+        let details = match ldk.get_payment_details(GetPaymentDetailsRequest { payment_id: inbound_payment_id.to_string() }).await {
+            Err(e) if crate::ldk_client::unanswered(&e) => return Err(e),
+            details => details.ok(),
+        };
+        Ok(details
+            .and_then(|response| response.payment)
+            .and_then(|payment| payment.kind)
+            .and_then(|kind| kind.kind)
+            .and_then(|kind| match kind {
+                Kind::Bolt11(bolt11) => Some(bolt11.hash),
+                Kind::Spontaneous(spontaneous) => Some(spontaneous.hash),
+                Kind::Bolt12Offer(offer) => offer.hash,
+                _ => None,
+            })
+            .filter(|hash| stable_channels::trade::is_payment_id(hash))
+            .unwrap_or_else(|| inbound_payment_id.to_string()))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -772,7 +790,7 @@ impl StableChannelManager {
         user_channel_id: &str,
         counterparty: &str,
         reason: TradeRejectionReason,
-    ) {
+    ) -> Handled {
         let decided_at = Self::unix_time_secs();
         let payload = crate::messages::build_trade_rejected_payload(
             channel_id,
@@ -798,7 +816,8 @@ impl StableChannelManager {
                         "error": error.to_string(),
                     }),
                 );
-                return;
+                // Nothing is decided yet, so the request can be handled again once LDK Server answers.
+                return if crate::ldk_client::unanswered(&error) { Handled::Retry } else { Handled::Done };
             }
         };
         let envelope = crate::messages::build_envelope(payload, signature);
@@ -835,6 +854,7 @@ impl StableChannelManager {
                 }),
             ),
         }
+        Handled::Done
     }
 
     /// Book a claimed top-up: the database marks it settled and adds its sats in one transaction, then the cache follows.
@@ -2162,7 +2182,7 @@ impl StableChannelManager {
         amount_msat: Option<u64>,
         ldk: &dyn LdkServerCalls,
         btc_price: f64,
-    ) {
+    ) -> Handled {
         if let Some(record) = custom_records
             .iter()
             .find(|record| record.type_num == SIGNED_STABILITY_TLV_TYPE)
@@ -2177,7 +2197,7 @@ impl StableChannelManager {
             .await;
             // A malformed signed record must never downgrade to the unsigned marker included for
             // older mobile clients.
-            return;
+            return Handled::Done;
         }
 
         for rec in &custom_records {
@@ -2189,14 +2209,14 @@ impl StableChannelManager {
                     "TRADE_PARSE_SIGNED_FAILED",
                     serde_json::json!({ "reason": "oversize", "len": rec.value.len() }),
                 );
-                return;
+                return Handled::Done;
             }
             let Ok(raw) = std::str::from_utf8(rec.value.as_ref()) else {
                 stable_channels::audit::audit_event(
                     "TRADE_PARSE_SIGNED_FAILED",
                     serde_json::json!({ "reason": "utf8" }),
                 );
-                return;
+                return Handled::Done;
             };
             stable_channels::audit::audit_event(
                 "MESSAGE_RECEIVED",
@@ -2209,13 +2229,8 @@ impl StableChannelManager {
                 // stability payment. The trade settlement is recorded INSIDE the handler, only
                 // after the signature verifies — a forged or unsigned envelope from any peer no
                 // longer writes a settlement row before it is authenticated.
-                self.handle_trade_payment(
-                    &raw,
-                    payment_id.as_deref(),
-                    amount_msat,
-                    ldk,
-                    btc_price,
-                )
+                return self
+                    .handle_trade_payment(&raw, payment_id.as_deref(), amount_msat, ldk, btc_price)
                     .await;
             } else if rec.value.as_ref() == [1u8] {
                 if let Some(pid) = payment_id.as_deref() {
@@ -2243,13 +2258,14 @@ impl StableChannelManager {
                     }),
                 );
             }
-            return;
+            return Handled::Done;
         }
         // No stable TLV: plain receipt — emit audit so it's visible in the log.
         stable_channels::audit::audit_event(
             "PAYMENT_RECEIVED",
             serde_json::json!({ "payment_id": payment_id, "amount_msat": amount_msat }),
         );
+        Handled::Done
     }
 
     async fn handle_signed_stability_payment(
@@ -3884,6 +3900,21 @@ impl StableChannelManager {
         amount_msat: Option<u64>,
         ldk: &dyn LdkServerCalls,
         btc_price: f64,
+    ) -> Handled {
+        let mut handled = Handled::Done;
+        self.decide_trade(raw, inbound_payment_id, amount_msat, ldk, btc_price, &mut handled).await;
+        handled
+    }
+
+    /// Sets `handled` to Retry, deciding nothing, when LDK Server didn't answer a read the decision needs.
+    async fn decide_trade(
+        &mut self,
+        raw: &str,
+        inbound_payment_id: Option<&str>,
+        amount_msat: Option<u64>,
+        ldk: &dyn LdkServerCalls,
+        btc_price: f64,
+        handled: &mut Handled,
     ) {
         let Some(envelope) = crate::messages::parse_envelope(raw) else {
             stable_channels::audit::audit_event("TRADE_PARSE_SIGNED_FAILED", serde_json::json!({}));
@@ -3927,6 +3958,9 @@ impl StableChannelManager {
                     "LDK_CALL_FAILED",
                     serde_json::json!({ "op": "list_channels", "context": "handle_trade_message", "user_channel_id": payload.user_channel_id.clone(), "channel_id": payload.channel_id.clone(), "error": e.to_string() }),
                 );
+                if crate::ldk_client::unanswered(&e) {
+                    *handled = Handled::Retry;
+                }
                 return;
             }
         };
@@ -3957,7 +3991,18 @@ impl StableChannelManager {
                 public_key: chan.counterparty_node_id.clone(),
             })
             .await;
-        let valid = matches!(verify, Ok(ref r) if r.valid);
+        let valid = match verify {
+            Ok(response) => response.valid,
+            Err(e) if crate::ldk_client::unanswered(&e) => {
+                stable_channels::audit::audit_event(
+                    "LDK_CALL_FAILED",
+                    serde_json::json!({ "op": "verify_signature", "context": "handle_trade_message", "user_channel_id": chan.user_channel_id.clone(), "channel_id": chan.channel_id.clone(), "error": e.to_string() }),
+                );
+                *handled = Handled::Retry;
+                return;
+            },
+            Err(_) => false,
+        };
         if !valid {
             stable_channels::audit::audit_event(
                 "TRADE_SIGNATURE_INVALID",
@@ -4024,8 +4069,17 @@ impl StableChannelManager {
             };
             let request_hash = stable_channels::trade::request_hash(envelope.payload.as_bytes());
             let now = Self::unix_time_secs();
-            let correlation_payment_id =
-                Self::correlation_payment_id(ldk, inbound_payment_id).await;
+            let correlation_payment_id = match Self::correlation_payment_id(ldk, inbound_payment_id).await {
+                Ok(id) => id,
+                Err(e) => {
+                    stable_channels::audit::audit_event(
+                        "LDK_CALL_FAILED",
+                        serde_json::json!({ "op": "get_payment_details", "context": "handle_trade_message", "payment_id": inbound_payment_id, "channel_id": chan.channel_id.clone(), "error": e.to_string() }),
+                    );
+                    *handled = Handled::Retry;
+                    return;
+                }
+            };
 
             match self.db.trade_decision_by_payment(inbound_payment_id) {
                 Ok(Some(decision)) => {
@@ -4041,7 +4095,7 @@ impl StableChannelManager {
                 }
                 Ok(None) => {}
                 Err(_) => {
-                    self.reject_correlated_trade(
+                    *handled = self.reject_correlated_trade(
                         ldk,
                         inbound_payment_id,
                         &correlation_payment_id,
@@ -4066,7 +4120,7 @@ impl StableChannelManager {
                 }
                 Ok(None) => {}
                 Err(_) => {
-                    self.reject_correlated_trade(
+                    *handled = self.reject_correlated_trade(
                         ldk,
                         inbound_payment_id,
                         &correlation_payment_id,
@@ -4084,7 +4138,7 @@ impl StableChannelManager {
 
             macro_rules! reject_correlated {
                 ($reason:expr) => {{
-                    self.reject_correlated_trade(
+                    *handled = self.reject_correlated_trade(
                         ldk,
                         inbound_payment_id,
                         &correlation_payment_id,
@@ -4221,6 +4275,14 @@ impl StableChannelManager {
                 .await
             {
                 Ok(response) => response.signature,
+                Err(e) if crate::ldk_client::unanswered(&e) => {
+                    stable_channels::audit::audit_event(
+                        "LDK_CALL_FAILED",
+                        serde_json::json!({ "op": "sign_message", "context": "handle_trade_message", "payment_id": inbound_payment_id, "channel_id": chan.channel_id.clone(), "error": e.to_string() }),
+                    );
+                    *handled = Handled::Retry;
+                    return;
+                },
                 Err(_) => reject_correlated!(TradeRejectionReason::InternalFailure),
             };
             let response_envelope =
@@ -4535,7 +4597,7 @@ impl StableChannelManager {
         amount_msat: Option<u64>,
         ldk: &dyn LdkServerCalls,
         btc_price: f64,
-    ) {
+    ) -> Handled {
         let synthetic_payment_id = stable_channels::trade::request_hash(raw.as_bytes());
         self.handle_trade_payment(
             raw,
@@ -4544,7 +4606,7 @@ impl StableChannelManager {
             ldk,
             btc_price,
         )
-        .await;
+        .await
     }
 }
 
@@ -4687,9 +4749,17 @@ pub(crate) mod tests {
 
     pub struct FakeLdkServer {
         pub channels: StdMutex<Vec<GrpcChannel>>,
+        /// What every listing after the next one returns: a change that lands between one listing and the next.
+        pub channels_after_listing: StdMutex<Option<Vec<GrpcChannel>>>,
         pub sends: StdMutex<Vec<SpontaneousSendRequest>>,
         pub send_should_fail: bool,
         pub verify_should_pass: bool,
+        /// What signature checks fail with, if anything.
+        pub verify_failure: StdMutex<Option<LdkServerErrorCode>>,
+        /// How many more signings fail.
+        pub sign_failures: AtomicUsize,
+        /// What a failing channel list, payment lookup or signing returns.
+        pub failure_code: StdMutex<LdkServerErrorCode>,
         pub signature: String,
         pub sign_calls: StdMutex<Vec<Vec<u8>>>,
         pub verify_calls: StdMutex<Vec<VerifySignatureRequest>>,
@@ -4724,6 +4794,14 @@ pub(crate) mod tests {
         pub sends_unanswered: AtomicUsize,
         /// How many more sends go out but the node fails to store their record, as LDK Node does when its store write fails after the dispatch.
         pub sends_unrecorded: AtomicUsize,
+        /// Every splice-in the node accepted.
+        pub splice_ins: StdMutex<Vec<SpliceInRequest>>,
+        /// The error the node answers every splice-in with, when set.
+        pub splice_in_error: StdMutex<Option<(LdkServerErrorCode, String)>>,
+        /// Confirmed on-chain sats the node reports as spendable.
+        pub spendable_onchain_sats: std::sync::atomic::AtomicU64,
+        /// Runs once inside the next balance read: something that happens while a caller is away from its tables.
+        pub balances_hook: StdMutex<Option<Box<dyn FnOnce() + Send>>>,
     }
 
     /// Use up one of a counter's remaining failures; false once none are left.
@@ -4735,9 +4813,13 @@ pub(crate) mod tests {
         pub fn new(channels: Vec<GrpcChannel>) -> Self {
             Self {
                 channels: StdMutex::new(channels),
+                channels_after_listing: StdMutex::new(None),
                 sends: StdMutex::new(Vec::new()),
                 send_should_fail: false,
                 verify_should_pass: true,
+                verify_failure: StdMutex::new(None),
+                sign_failures: AtomicUsize::new(0),
+                failure_code: StdMutex::new(LdkServerErrorCode::InternalServerError),
                 signature: "fake-sig".to_string(),
                 sign_calls: StdMutex::new(Vec::new()),
                 verify_calls: StdMutex::new(Vec::new()),
@@ -4761,6 +4843,10 @@ pub(crate) mod tests {
                 sends_refused: AtomicUsize::new(0),
                 sends_unanswered: AtomicUsize::new(0),
                 sends_unrecorded: AtomicUsize::new(0),
+                splice_ins: StdMutex::new(Vec::new()),
+                splice_in_error: StdMutex::new(None),
+                spendable_onchain_sats: std::sync::atomic::AtomicU64::new(0),
+                balances_hook: StdMutex::new(None),
             }
         }
         pub fn like_ldk_node(mut self) -> Self {
@@ -4797,11 +4883,20 @@ pub(crate) mod tests {
             _req: ListChannelsRequest,
         ) -> Result<ListChannelsResponse, LdkServerError> {
             if self.list_channels_fails.load(Ordering::SeqCst) {
-                return Err(LdkServerError::new(LdkServerErrorCode::InternalServerError, "node unavailable"));
+                return Err(LdkServerError::new(self.failure_code.lock().unwrap().clone(), "node unavailable"));
             }
-            Ok(ListChannelsResponse {
-                channels: self.channels.lock().unwrap().clone(),
-            })
+            let listed = self.channels.lock().unwrap().clone();
+            if let Some(next) = self.channels_after_listing.lock().unwrap().take() {
+                *self.channels.lock().unwrap() = next;
+            }
+            Ok(ListChannelsResponse { channels: listed })
+        }
+        async fn splice_in(&self, req: SpliceInRequest) -> Result<SpliceInResponse, LdkServerError> {
+            if let Some((code, message)) = self.splice_in_error.lock().unwrap().clone() {
+                return Err(LdkServerError::new(code, message));
+            }
+            self.splice_ins.lock().unwrap().push(req);
+            Ok(SpliceInResponse {})
         }
         async fn spontaneous_send(
             &self,
@@ -4860,6 +4955,9 @@ pub(crate) mod tests {
             req: SignMessageRequest,
         ) -> Result<SignMessageResponse, LdkServerError> {
             self.sign_calls.lock().unwrap().push(req.message.to_vec());
+            if take_one(&self.sign_failures) {
+                return Err(LdkServerError::new(self.failure_code.lock().unwrap().clone(), "signing failed"));
+            }
             Ok(SignMessageResponse {
                 signature: self.signature.clone(),
             })
@@ -4869,6 +4967,9 @@ pub(crate) mod tests {
             req: VerifySignatureRequest,
         ) -> Result<VerifySignatureResponse, LdkServerError> {
             self.verify_calls.lock().unwrap().push(req);
+            if let Some(code) = self.verify_failure.lock().unwrap().clone() {
+                return Err(LdkServerError::new(code, "signature check failed"));
+            }
             Ok(VerifySignatureResponse {
                 valid: self.verify_should_pass,
             })
@@ -4886,6 +4987,9 @@ pub(crate) mod tests {
             if self.balances_fail.load(Ordering::SeqCst) {
                 return Err(LdkServerError::new(LdkServerErrorCode::InternalServerError, "node unavailable"));
             }
+            if let Some(hook) = self.balances_hook.lock().unwrap().take() {
+                hook();
+            }
             use ldk_server_client::ldk_server_grpc::types::{lightning_balance::BalanceType, ClaimableOnChannelClose};
             let mut lightning_balances = self.lightning_balances.lock().unwrap().clone();
             if !self.balances_incomplete.load(Ordering::SeqCst) {
@@ -4902,6 +5006,7 @@ pub(crate) mod tests {
             Ok(GetBalancesResponse {
                 pending_balances_from_channel_closures: self.sweeps.lock().unwrap().clone(),
                 lightning_balances,
+                spendable_onchain_balance_sats: self.spendable_onchain_sats.load(Ordering::SeqCst),
                 ..Default::default()
             })
         }
@@ -4925,7 +5030,7 @@ pub(crate) mod tests {
             -> Result<GetPaymentDetailsResponse, LdkServerError> {
             if self.payment_lookup_failures.load(Ordering::SeqCst) > 0 {
                 self.payment_lookup_failures.fetch_sub(1, Ordering::SeqCst);
-                return Err(LdkServerError::new(LdkServerErrorCode::InternalServerError, "payment lookup unavailable"));
+                return Err(LdkServerError::new(self.failure_code.lock().unwrap().clone(), "payment lookup unavailable"));
             }
             Ok(GetPaymentDetailsResponse {
                 payment: self
@@ -7124,8 +7229,8 @@ pub(crate) mod tests {
              BEGIN SELECT RAISE(ABORT, 'forced claim failure'); END;",
         ).unwrap();
 
-        // The live event reports the failed write, so the stream reconnects instead of treating it as handled.
-        assert_eq!(dispatch_sync_outcome(&mut mgr, &ldk, "fake-payment-id", true).await, crate::event_loop::DispatchOutcome::Reconnect);
+        // The live event reports the failed write, so the event loop reconciles before the next event instead of treating it as handled.
+        assert_eq!(dispatch_sync_outcome(&mut mgr, &ldk, "fake-payment-id", true).await, crate::event_loop::DispatchOutcome::Reconcile);
         tick_past_cooldown(&mut mgr, &ldk, &push, 3).await;
         assert_eq!(top_up_sats_sent(&ldk), [12_500], "a claim that could not be written must not be paid again");
         assert_channel_books(&mgr, 50.0, 50_000);
@@ -8664,7 +8769,7 @@ pub(crate) mod tests {
             .expect("the retained event should resume after the database recovers");
         if let Some(mut receiver) = buffered_burst {
             for n in 0..2048 {
-                let event = receiver.recv().await.unwrap().unwrap();
+                let event = receiver.recv().await.unwrap().event().unwrap();
                 let Some(ldk_server_client::ldk_server_grpc::events::event_envelope::Event::ChannelStateChanged(channel)) = event.event else {
                     panic!("unexpected buffered event");
                 };
@@ -9977,7 +10082,7 @@ pub(crate) mod tests {
         conn.execute_batch("CREATE TRIGGER fail_sync_outcome BEFORE UPDATE OF outcome ON settlement_payments
             BEGIN SELECT RAISE(FAIL, 'injected outcome failure'); END;").unwrap();
         assert_eq!(dispatch_sync_outcome(&mut mgr, &fake, "fake-payment-id", false).await,
-            crate::event_loop::DispatchOutcome::Reconnect);
+            crate::event_loop::DispatchOutcome::Reconcile);
         assert_eq!(mgr.db.list_pending_settlements().unwrap().len(), 1);
         assert!(mgr.db.list_failed_sync_channels().unwrap().is_empty());
         conn.execute_batch("DROP TRIGGER fail_sync_outcome;").unwrap();
@@ -10875,6 +10980,54 @@ pub(crate) mod tests {
             .unwrap()
             .is_empty());
         assert_eq!(fake.sends.lock().unwrap().len(), 1);
+    }
+
+    /// A tracked channel and a signed request to trade on it: the node, the request and its fee.
+    pub(crate) fn trade_request(mgr: &mut StableChannelManager) -> (FakeLdkServer, String, u64) {
+        let fake = FakeLdkServer::new(vec![make_channel(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 300_000, 100_000, true)]);
+        let uid = USER_CHANNEL_ID_DECIMAL.parse::<u128>().unwrap();
+        seed_channel(mgr, uid, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 50.0, 50_000, 50_000, 100_000, 100_000.0);
+        mgr.db.save_channel(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 50.0, 50_000, 50_000, None).unwrap();
+        let request = correlated_trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, &"b".repeat(64), 60.0, 100_000.0);
+        (fake, request, expected_trade_fee_msat(50.0, 60.0, 100_000.0).unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_trade_request_waits_while_ldk_server_does_not_answer_a_read_it_needs() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut mgr = make_manager();
+        let (fake, request, fee) = trade_request(&mut mgr);
+        let (payment_id, underpaid) = ("c".repeat(64), "e".repeat(64));
+        let no_answer = LdkServerErrorCode::InternalError;
+        let refused = LdkServerErrorCode::InvalidRequestError;
+        // Each read the decision needs, with no answer, keeps the request; a refusal is an answer, so it settles it as before.
+        for (code, expected) in [(no_answer.clone(), Handled::Retry), (refused.clone(), Handled::Done)] {
+            *fake.failure_code.lock().unwrap() = code.clone();
+            fake.list_channels_fails.store(true, Ordering::SeqCst);
+            assert_eq!(mgr.handle_trade_payment(&request, Some(&payment_id), Some(fee), &fake, 100_000.0).await, expected, "channel list");
+            fake.list_channels_fails.store(false, Ordering::SeqCst);
+            *fake.verify_failure.lock().unwrap() = Some(code.clone());
+            assert_eq!(mgr.handle_trade_payment(&request, Some(&payment_id), Some(fee), &fake, 100_000.0).await, expected, "signature check");
+            *fake.verify_failure.lock().unwrap() = None;
+            // The request that underpays its fee is rejected, and the rejection is signed.
+            fake.sign_failures.store(1, Ordering::SeqCst);
+            assert_eq!(mgr.handle_trade_payment(&request, Some(&underpaid), Some(1), &fake, 100_000.0).await, expected, "rejection signature");
+        }
+        *fake.failure_code.lock().unwrap() = no_answer;
+        fake.payment_lookup_failures.store(1, Ordering::SeqCst);
+        assert_eq!(mgr.handle_trade_payment(&request, Some(&payment_id), Some(fee), &fake, 100_000.0).await, Handled::Retry, "payment lookup");
+        // Only the acceptance's signing gets no answer, so rejecting instead would go through and settle a valid request.
+        fake.sign_failures.store(1, Ordering::SeqCst);
+        assert_eq!(mgr.handle_trade_payment(&request, Some(&payment_id), Some(fee), &fake, 100_000.0).await, Handled::Retry, "acceptance signature");
+        for id in [&payment_id, &underpaid] {
+            assert!(mgr.db.trade_decision_by_payment(id).unwrap().is_none(), "nothing is decided without those answers");
+        }
+        assert!(fake.sends.lock().unwrap().is_empty());
+        // A refused lookup is an answer too: the reply falls back to the inbound id, as before.
+        *fake.failure_code.lock().unwrap() = refused;
+        fake.payment_lookup_failures.store(1, Ordering::SeqCst);
+        assert_eq!(mgr.handle_trade_payment(&request, Some(&payment_id), Some(fee), &fake, 100_000.0).await, Handled::Done);
+        assert!(mgr.db.trade_decision_by_payment(&payment_id).unwrap().is_some(), "decided once LDK Server answers");
     }
 
     #[tokio::test]

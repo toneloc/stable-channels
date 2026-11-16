@@ -13,16 +13,16 @@ extension NodeStarter {
         // Prefer the URL the main app last started a node against (written on every
         // successful start, including failover) so the NSE doesn't pay a degraded
         // primary's failure before falling over itself.
-        let stored = UserDefaults(suiteName: Constants.appGroup)?.string(forKey: "esplora_chain_url")
-        let primary = stored ?? Constants.primaryChainURL
-        let fallback = (primary == Constants.primaryChainURL)
-            ? Constants.fallbackChainURL
-            : Constants.primaryChainURL
+        let stored = UserDefaultsChainURLStore(defaults: UserDefaults(suiteName: Constants.appGroup)).load()
+        let providers = NodeStartupPolicy.extensionProviders(
+            preferred: stored ?? Constants.primaryChainURL,
+            providers: Constants.esploraChainURLs
+        )
         return try buildNode(
             dataDir: dataDir,
             logger: logger,
-            primaryURL: primary,
-            fallbackURL: fallback
+            primaryURL: providers[0],
+            fallbackURL: providers[1]
         )
     }
 }
@@ -86,20 +86,7 @@ final class DefaultNodeStarter: NodeStarter {
         // latest_lightning_wallet_sync_timestamp, and the NSE gets essentially one sync
         // attempt per run (600s interval), which the chain-freshness gate depends on for
         // long-offline wallets.
-        let syncConfig = EsploraSyncConfig(
-            backgroundSyncConfig: BackgroundSyncConfig(
-                onchainWalletSyncIntervalSecs: 600,
-                lightningWalletSyncIntervalSecs: 600,
-                feeRateCacheUpdateIntervalSecs: 3600
-            ),
-            timeoutsConfig: SyncTimeoutsConfig(
-                onchainWalletSyncTimeoutSecs: 60,
-                lightningWalletSyncTimeoutSecs: 60,
-                feeRateCacheUpdateTimeoutSecs: 6,
-                txBroadcastTimeoutSecs: 30,
-                perRequestTimeoutSecs: 15
-            )
-        )
+        let syncConfig = Constants.esploraSyncConfig
 
         do {
             let builder = LDKNode.Builder.fromConfig(config: config)
@@ -183,24 +170,5 @@ final class DefaultNodeStarter: NodeStarter {
             sqlite3_exec(db, "VACUUM", nil, nil, nil)
         }
         return hasGraph
-    }
-}
-
-// Keep in sync with StableChannels/Services/NodeService.swift.
-extension Error {
-    /// Determines whether a startup error is an Esplora feerate estimation failure or timeout
-    /// eligible for provider failover. Non-Esplora errors (database, storage, lock, entropy)
-    /// return false and should not be retried.
-    var isRetryableEsploraStartupError: Bool {
-        // Typed match only: NodeError's description is a human sentence ("Failed to
-        // update fee rate estimates."), so string-matching case names never fires for
-        // real errors and could false-positive on a bridged error carrying the text.
-        guard let nodeError = self as? NodeError else { return false }
-        switch nodeError {
-        case .FeerateEstimationUpdateFailed, .FeerateEstimationUpdateTimeout:
-            return true
-        default:
-            return false
-        }
     }
 }
