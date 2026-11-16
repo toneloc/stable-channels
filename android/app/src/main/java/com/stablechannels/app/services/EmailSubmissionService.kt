@@ -1,9 +1,11 @@
 package com.stablechannels.app.services
 
 import com.stablechannels.app.domain.EmailAddress
+import com.stablechannels.app.domain.EmailRegistration
 import com.stablechannels.app.domain.EmailSaveException
 import com.stablechannels.app.domain.EmailSaveFailure
 import com.stablechannels.app.domain.NodeMessageSigner
+import com.stablechannels.app.domain.SigningTimestampStoring
 import com.stablechannels.app.util.Constants
 import java.io.IOException
 import java.util.concurrent.TimeUnit
@@ -11,10 +13,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.booleanOrNull
-import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -24,27 +24,6 @@ import okhttp3.RequestBody.Companion.toRequestBody
 fun interface EmailSubmitter {
     /** Throws [EmailSaveException] when the server did not save the change. */
     suspend fun submit(email: EmailAddress?)
-}
-
-/** The signed REGISTER_EMAIL_V1 request; a null email asks the server to remove the saved one. */
-object EmailRegistration {
-    const val MESSAGE_TYPE = "REGISTER_EMAIL_V1"
-
-    // Keys in sorted order so the bytes match the iOS client for the same inputs.
-    fun payload(email: EmailAddress?, nodeId: String, timestampSecs: Long): String =
-        buildJsonObject {
-            put("email", email?.value.orEmpty())
-            put("node_id", nodeId)
-            put("ts", timestampSecs)
-            put("type", MESSAGE_TYPE)
-        }
-        .toString()
-
-    fun envelope(payload: String, signature: String): String = buildJsonObject {
-        put("payload", payload)
-        put("signature", signature)
-    }
-        .toString()
 }
 
 /** Whether the server's reply body says `"ok": true`; anything else is a refusal. */
@@ -62,6 +41,7 @@ class NodeServiceSigner(private val nodeService: NodeService) : NodeMessageSigne
 
 class EmailSubmissionService(
     private val signer: NodeMessageSigner,
+    private val timestamps: SigningTimestampStoring,
     private val endpoint: String = Constants.EMAIL_SUBMIT_URL,
     private val client: OkHttpClient =
         OkHttpClient.Builder()
@@ -87,13 +67,15 @@ class EmailSubmissionService(
     private fun signedEnvelope(email: EmailAddress?): String {
         val nodeId =
             signer.readyNodeId ?: throw EmailSaveException(EmailSaveFailure.WALLET_NOT_READY)
-        val payload = EmailRegistration.payload(email, nodeId, nowSecs())
+        val ts = EmailRegistration.nextTimestamp(nowSecs(), timestamps.lastSignedTs)
+        val payload = EmailRegistration.payload(email, nodeId, ts)
         val signature =
             try {
                 signer.sign(payload.toByteArray(Charsets.UTF_8))
             } catch (e: Exception) {
                 throw EmailSaveException(EmailSaveFailure.WALLET_NOT_READY, e)
             }
+        timestamps.lastSignedTs = ts
         return EmailRegistration.envelope(payload, signature)
     }
 }

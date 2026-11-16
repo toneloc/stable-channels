@@ -5,13 +5,14 @@ import android.content.SharedPreferences
 import com.stablechannels.app.domain.EmailAddress
 import com.stablechannels.app.domain.EmailPromptStoring
 import com.stablechannels.app.domain.SavedEmailStoring
+import com.stablechannels.app.domain.SigningTimestampStoring
 
 /**
  * Remembers how often the app launched, when the email prompt was shown, whether the user answered
  * it, and the last email address the server saved.
  */
 class EmailPromptStore(private val prefs: SharedPreferences) :
-    EmailPromptStoring, SavedEmailStoring {
+    EmailPromptStoring, SavedEmailStoring, SigningTimestampStoring {
     private var recordedThisProcess = false
 
     override val launches: Int
@@ -38,6 +39,12 @@ class EmailPromptStore(private val prefs: SharedPreferences) :
                 .apply()
         }
 
+    override var lastSignedTs: Long
+        get() = prefs.getLong(KEY_LAST_SIGNED_TS, 0)
+        set(value) {
+            prefs.edit().putLong(KEY_LAST_SIGNED_TS, value).apply()
+        }
+
     /** Counts this process once, however many times Home appears. */
     override fun recordLaunchOnce() {
         if (recordedThisProcess) return
@@ -54,8 +61,8 @@ class EmailPromptStore(private val prefs: SharedPreferences) :
     }
 
     /**
-     * Forgets the prompt state and the saved address, for a restore that brings in a different
-     * wallet.
+     * Forgets the prompt state, the saved address and the last signing timestamp, for a restore
+     * that brings in a different wallet.
      */
     fun reset() {
         recordedThisProcess = false
@@ -66,6 +73,7 @@ class EmailPromptStore(private val prefs: SharedPreferences) :
             .remove(KEY_TIMES_SHOWN)
             .remove(KEY_LAST_SHOWN_LAUNCH)
             .remove(KEY_SAVED_EMAIL)
+            .remove(KEY_LAST_SIGNED_TS)
             .apply()
     }
 
@@ -80,6 +88,7 @@ class EmailPromptStore(private val prefs: SharedPreferences) :
         private const val KEY_TIMES_SHOWN = "times_shown"
         private const val KEY_LAST_SHOWN_LAUNCH = "last_shown_launch"
         private const val KEY_SAVED_EMAIL = "saved_email"
+        private const val KEY_LAST_SIGNED_TS = "last_signed_ts"
 
         @Volatile private var shared: EmailPromptStore? = null
 

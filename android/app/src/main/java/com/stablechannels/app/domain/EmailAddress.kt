@@ -14,6 +14,7 @@ class EmailAddress private constructor(val value: String) {
     companion object {
         const val MAX_LENGTH = 254
         const val MAX_LOCAL_PART_LENGTH = 64
+        const val MAX_DOMAIN_LABEL_LENGTH = 63
         /**
          * Characters the local part may use besides letters and digits; the server accepts the same
          * set.
@@ -22,8 +23,8 @@ class EmailAddress private constructor(val value: String) {
 
         /**
          * Returns null unless [raw] is a dot-separated local part of plain address characters, one
-         * `@`, and a dotted ASCII domain whose last label has two or more characters, the same rule
-         * the server applies.
+         * `@`, and a dotted ASCII domain whose labels have at most [MAX_DOMAIN_LABEL_LENGTH]
+         * characters and whose last label has two or more, the same rule the server applies.
          */
         fun parse(raw: String): EmailAddress? {
             val trimmed = raw.trim().lowercase()
@@ -50,6 +51,7 @@ class EmailAddress private constructor(val value: String) {
 
         private fun isDomainLabel(label: String) =
             label.isNotEmpty() &&
+                label.length <= MAX_DOMAIN_LABEL_LENGTH &&
                 !label.startsWith('-') &&
                 !label.endsWith('-') &&
                 label.all { isAlphanumeric(it) || it == '-' }

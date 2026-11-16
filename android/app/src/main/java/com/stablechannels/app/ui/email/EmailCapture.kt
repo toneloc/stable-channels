@@ -154,7 +154,7 @@ fun rememberEmailSettingsModel(nodeService: NodeService): EmailSettingsModel {
     val store = EmailPromptStore.get(LocalContext.current)
     return remember(nodeService, store) {
         EmailSettingsModel(
-            service = EmailSubmissionService(NodeServiceSigner(nodeService)),
+            service = EmailSubmissionService(NodeServiceSigner(nodeService), store),
             savedStore = store,
             onSaved = store::markResponded,
         )

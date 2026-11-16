@@ -2,7 +2,6 @@ package com.stablechannels.app.domain
 
 import android.content.Context
 import com.stablechannels.app.services.EmailPromptStore
-import com.stablechannels.app.services.EmailRegistration
 import com.stablechannels.app.services.EmailSubmissionService
 import com.stablechannels.app.services.EmailSubmitter
 import com.stablechannels.app.ui.email.EmailSettingsModel
@@ -43,6 +42,9 @@ private class FakeSigner(
         return "sig"
     }
 }
+
+private class InMemorySigningTimestamp(override var lastSignedTs: Long = 0) :
+    SigningTimestampStoring
 
 private class InMemorySavedEmail(override var savedEmail: EmailAddress? = null) : SavedEmailStoring
 
@@ -116,13 +118,34 @@ class EmailAddressTest {
 
     @Test
     fun longestAllowedAddress_isAccepted() {
-        val raw = "a@" + "b".repeat(EmailAddress.MAX_LENGTH - 6) + ".com"
+        val label = EmailAddress.MAX_DOMAIN_LABEL_LENGTH
+        val raw = "a@" + listOf(label, label, label, 60).joinToString(".") { "b".repeat(it) }
         assertEquals(EmailAddress.MAX_LENGTH, raw.length)
         assertNotNull(EmailAddress.parse(raw))
+    }
+
+    // The server refuses a domain label over 63 characters, so the app does too.
+    @Test
+    fun domainLabelOver63Characters_isRejected() {
+        assertNotNull(EmailAddress.parse("a@" + "b".repeat(63) + ".com"))
+        assertNull(EmailAddress.parse("a@" + "b".repeat(64) + ".com"))
+        assertNull(EmailAddress.parse("a@example." + "c".repeat(64)))
     }
 }
 
 class EmailRegistrationTest {
+    @Test
+    fun nextTimestamp_afterARecentFutureSignature_signsAfterIt() {
+        assertEquals(TS + 11, EmailRegistration.nextTimestamp(TS, lastSent = TS + 10))
+        assertEquals(TS, EmailRegistration.nextTimestamp(TS, lastSent = TS - 5))
+    }
+
+    // A clock that was once far ahead must not hold every later save outside the server window.
+    @Test
+    fun nextTimestamp_ignoresASignatureBeyondTheServerWindow() {
+        assertEquals(TS, EmailRegistration.nextTimestamp(TS, lastSent = TS + 3600))
+    }
+
     @Test
     fun payload_hasSortedKeysAndNoWhitespace_matchingIos() {
         assertEquals(
@@ -147,9 +170,14 @@ class EmailRegistrationTest {
 }
 
 class EmailSubmissionServiceTest {
-    private fun service(server: MockWebServer, signer: NodeMessageSigner) =
+    private fun service(
+        server: MockWebServer,
+        signer: NodeMessageSigner,
+        timestamps: SigningTimestampStoring = InMemorySigningTimestamp(),
+    ) =
         EmailSubmissionService(
             signer = signer,
+            timestamps = timestamps,
             endpoint = server.url("/api/register-email").toString(),
             nowSecs = { TS },
         )
@@ -171,6 +199,43 @@ class EmailSubmissionServiceTest {
             assertEquals(
                 """{"payload":"${payload.replace("\"", "\\\"")}","signature":"sig"}""",
                 request.body.readUtf8(),
+            )
+        }
+    }
+
+    // The server refuses a timestamp that is not newer than the last one it saw for the node.
+    @Test
+    fun submit_twiceInTheSameSecond_signsStrictlyIncreasingTimestamps() = runTest {
+        MockWebServer().use { server ->
+            repeat(2) {
+                server.enqueue(MockResponse().setResponseCode(200).setBody("""{"ok":true}"""))
+            }
+            val signer = FakeSigner()
+            val timestamps = InMemorySigningTimestamp()
+            val service = service(server, signer, timestamps)
+
+            service.submit(email("a@b.co"))
+            service.submit(null)
+
+            assertEquals(
+                listOf(TS, TS + 1),
+                signer.signed.map { Regex("\"ts\":(\\d+)").find(it)!!.groupValues[1].toLong() },
+            )
+            assertEquals(TS + 1, timestamps.lastSignedTs)
+        }
+    }
+
+    @Test
+    fun submit_afterAFutureTimestamp_signsAfterIt() = runTest {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(200).setBody("""{"ok":true}"""))
+            val signer = FakeSigner()
+
+            service(server, signer, InMemorySigningTimestamp(TS + 10)).submit(null)
+
+            assertTrue(
+                signer.signed.single(),
+                signer.signed.single().contains("\"ts\":${TS + 11},"),
             )
         }
     }
@@ -469,6 +534,7 @@ class EmailPromptStoreTest {
         store.recordShown()
         store.markResponded()
         store.savedEmail = email("user@example.com")
+        store.lastSignedTs = TS
 
         store.reset()
 
@@ -478,6 +544,14 @@ class EmailPromptStoreTest {
         assertEquals(0, reopened.lastShownLaunch)
         assertFalse(reopened.hasResponded)
         assertNull(reopened.savedEmail)
+        assertEquals(0L, reopened.lastSignedTs)
+    }
+
+    @Test
+    fun lastSignedTs_persists() {
+        val prefs = prefs()
+        EmailPromptStore(prefs).lastSignedTs = TS
+        assertEquals(TS, EmailPromptStore(prefs).lastSignedTs)
     }
 
     @Test
