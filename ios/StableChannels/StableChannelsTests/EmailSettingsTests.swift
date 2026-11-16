@@ -231,13 +231,23 @@ final class EmailSubmissionServiceTests: XCTestCase {
         XCTAssertEqual(MockURLProtocol.callCount, 0)
     }
 
-    func testSubmit_non2xx_isRejected() async {
-        MockURLProtocol.requestHandler = { Self.response($0, status: 401) }
-        do {
-            try await makeService(signer: FakeSigner()).submit(EmailAddress("a@b.com"))
-            XCTFail("expected rejected")
-        } catch {
-            XCTAssertEqual(error as? EmailSubmissionError, .rejected(statusCode: 401))
+    // 401 means a bad signature or a ts outside the server's window, usually a wrong device clock; 503 means the
+    // server cannot take emails right now. Each gets its own message.
+    func testSubmit_non2xx_mapsStatusToReason() async {
+        let expected: [Int: EmailSubmissionError] = [
+            401: .signatureRefused,
+            503: .unavailable,
+            400: .rejected(statusCode: 400),
+            500: .rejected(statusCode: 500)
+        ]
+        for (status, reason) in expected {
+            MockURLProtocol.requestHandler = { Self.response($0, status: status) }
+            do {
+                try await makeService(signer: FakeSigner()).submit(EmailAddress("a@b.com"))
+                XCTFail("expected \(reason) for \(status)")
+            } catch {
+                XCTAssertEqual(error as? EmailSubmissionError, reason, "\(status)")
+            }
         }
     }
 
@@ -262,6 +272,16 @@ final class EmailSubmissionServiceTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? EmailSubmissionError, .unreachable)
         }
+    }
+}
+
+final class EmailErrorLineTests: XCTestCase {
+    func testEachFailure_hasItsOwnMessage() {
+        let errors: [EmailSubmissionError] = [
+            .walletNotReady, .unreachable, .signatureRefused, .unavailable, .rejected(statusCode: 400)
+        ]
+        let messages = Set(errors.map(EmailErrorLine.message(for:)))
+        XCTAssertEqual(messages.count, errors.count)
     }
 }
 

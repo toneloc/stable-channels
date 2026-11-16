@@ -9,7 +9,20 @@ protocol EmailSubmitting {
 enum EmailSubmissionError: Error, Equatable {
     case walletNotReady
     case unreachable
+    /// 401: bad signature or a timestamp outside the server's window, most often a wrong device clock.
+    case signatureRefused
+    /// 503: the server is not taking emails right now.
+    case unavailable
     case rejected(statusCode: Int)
+
+    /// Why the server refused a change, from its reply status.
+    init(refusedWith statusCode: Int) {
+        switch statusCode {
+        case 401: self = .signatureRefused
+        case 503: self = .unavailable
+        default: self = .rejected(statusCode: statusCode)
+        }
+    }
 }
 
 /// Signs email requests with the wallet's Lightning node key so the server knows which node sent them.
@@ -121,7 +134,7 @@ struct EmailSubmissionService: EmailSubmitting {
 
         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200 ..< 300).contains(statusCode), EmailRegistrationEnvelope.isAccepted(data) else {
-            throw EmailSubmissionError.rejected(statusCode: statusCode)
+            throw EmailSubmissionError(refusedWith: statusCode)
         }
     }
 }

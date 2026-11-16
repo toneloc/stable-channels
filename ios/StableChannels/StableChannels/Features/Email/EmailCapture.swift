@@ -159,12 +159,12 @@ struct EmailErrorLine: View {
     let error: EmailSubmissionError
 
     var body: some View {
-        Text(message)
+        Text(Self.message(for: error))
             .font(.caption)
             .foregroundStyle(.red)
     }
 
-    private var message: String {
+    static func message(for error: EmailSubmissionError) -> String {
         switch error {
         case .walletNotReady:
             String(
@@ -175,6 +175,16 @@ struct EmailErrorLine: View {
             String(
                 localized: "email_error_unreachable",
                 defaultValue: "Couldn't reach Stable Channels. Check your connection and try again."
+            )
+        case .signatureRefused:
+            String(
+                localized: "email_error_signature_refused",
+                defaultValue: "Couldn't save your email. Check your device's date and time, then try again."
+            )
+        case .unavailable:
+            String(
+                localized: "email_error_unavailable",
+                defaultValue: "Saving your email isn't available right now. Try again later."
             )
         case .rejected:
             String(localized: "email_error_rejected", defaultValue: "Couldn't save your email. Try again.")
