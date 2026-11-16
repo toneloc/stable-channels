@@ -324,6 +324,9 @@ class AppState {
         return ud?.bool(forKey: BalanceCacheKey.hasReadyChannel) ?? false
     }()
 
+    /// A channel Move can splice into (`moveChannel(in:)`).
+    var canMoveToChannel = false
+
     var pendingOutboundSend: BalanceCalculator.PendingOutboundSend = {
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
         return AppState.loadCachedPendingOutboundSend(from: ud)
@@ -956,6 +959,7 @@ class AppState {
         lightningBalanceSats = 0
         onchainBalanceSats = 0
         hasReadyChannel = false
+        canMoveToChannel = false
         spendableOnchainSats = 0
         pendingSweepBalanceSats = 0
         ldkClosedChannelFunds = nil
@@ -2985,6 +2989,13 @@ class AppState {
             data["counterparty_node_id"] = "\(counterpartyNodeId)"
         }
         AuditService.log("CHANNEL_CLOSED", data: data)
+        let spliceOfClosedChannel = try? databaseService?.spliceRepo.getPendingSpliceTxid(
+            userChannelId: "\(userChannelId)",
+            channelId: "\(channelId)"
+        )
+        if let txid = spliceOfClosedChannel {
+            checkSpliceOfClosedChannel(txid: txid, channelId: "\(channelId)", userChannelId: "\(userChannelId)")
+        }
 
         // Funding txid is NOT close txid; defer payments row to handleCloseTxidResolved
 
@@ -3212,6 +3223,20 @@ class AppState {
     }
 
     private var isCheckingSpliceFailures = false
+
+    /// A splice can't complete once its channel has closed. Queues the check that fails it if its
+    /// tx never reached the network, so it stops blocking Move and on-chain sends (#467).
+    func checkSpliceOfClosedChannel(txid: String, channelId: String, userChannelId: String) {
+        do {
+            try databaseService?.spliceRepo.deferFailureCheck(
+                txid: txid, channelId: channelId, userChannelId: userChannelId
+            )
+        } catch {
+            AuditService.log("SPLICE_FAILURE_QUEUE_FAILED", data: ["error": error.localizedDescription])
+            return
+        }
+        Task { [weak self] in await self?.retryPendingSpliceFailureChecks() }
+    }
 
     func retryPendingSpliceFailureChecks() async {
         guard !isCheckingSpliceFailures, let databaseService else { return }
@@ -3476,6 +3501,10 @@ class AppState {
         // before its txid has arrived.
         isSweeping = true
         guard let txid = (try? spliceRepo.getPendingSpliceTxid()) ?? nil else { return }
+        // No channel is left: the splice's channel closed, maybe while the app was not running.
+        if nodeService.isRunning, nodeService.channels.isEmpty {
+            checkSpliceOfClosedChannel(txid: txid, channelId: "", userChannelId: "")
+        }
         let alreadyMonitoring = Self.shouldSkipGenerationBumpOnResume(
             monitorActive: spliceConfirmationTask != nil,
             monitoredTxid: monitoredSpliceTxid,
@@ -4325,6 +4354,12 @@ class AppState {
         }
     }
 
+    /// The channel Move splices into: ready, with its funding confirmed. A zero-conf channel is ready
+    /// before its funding reaches the chain, and a splice of it could then never be broadcast (#467).
+    nonisolated static func moveChannel(in channels: [ChannelDetails]) -> ChannelDetails? {
+        channels.first { $0.isChannelReady && ($0.confirmations ?? 0) > 0 }
+    }
+
     func sweepToChannel() {
         guard !isSweeping else {
             statusMessage = "Sweep already in progress"
@@ -4334,8 +4369,10 @@ class AppState {
         statusMessage = "Starting move..."
 
         // No suspension before the row is saved: the stale-lock release frees a lock without one.
-        guard let channel = nodeService.channels.first(where: { $0.isChannelReady }) else {
-            statusMessage = "No ready channel"
+        guard let channel = Self.moveChannel(in: nodeService.channels) else {
+            statusMessage = nodeService.channels.contains { $0.isChannelReady }
+                ? "Move is available once the channel confirms"
+                : "No ready channel"
             isSweeping = false
             return
         }
@@ -4662,6 +4699,7 @@ class AppState {
         lightningBalanceSats = lightning
         onchainBalanceSats = onchain
         hasReadyChannel = nodeService.channels.contains { $0.isChannelReady }
+        canMoveToChannel = Self.moveChannel(in: nodeService.channels) != nil
         spendableOnchainSats = spendable
         ldkClosedChannelFunds = ClosedChannelFunds.from(
             lightningBalances: balances.lightningBalances,

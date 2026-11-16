@@ -258,6 +258,7 @@ struct HomeView: View {
             onchainBalanceSats: appState.onchainBalanceSats,
             spendableOnchainSats: appState.spendableOnchainSats,
             hasReadyChannel: appState.hasReadyChannel,
+            canMoveToChannel: appState.canMoveToChannel,
             isSweeping: appState.isSweeping,
             spliceTxid: appState.spliceTxid,
             pendingSplice: appState.pendingSplice,
