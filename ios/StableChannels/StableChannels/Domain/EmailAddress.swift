@@ -4,13 +4,14 @@ import Foundation
 struct EmailAddress: Equatable, Sendable {
     static let maxLength = 254
     static let maxLocalPartLength = 64
+    static let maxDomainLabelLength = 63
     /// Characters the local part may use besides letters and digits; the server accepts the same set.
     private static let localSymbols = Set("!#$%&'*+/=?^_`{|}~-")
 
     let value: String
 
     /// Returns nil unless `raw` is a dot-separated local part of plain address characters, one `@`, and a dotted
-    /// ASCII domain whose last label has two or more characters, the same rule the server applies.
+    /// ASCII domain of labels up to 63 characters whose last label has two or more, the same rule the server applies.
     init?(_ raw: String) {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard trimmed.count <= Self.maxLength else { return nil }
@@ -36,7 +37,7 @@ struct EmailAddress: Equatable, Sendable {
     }
 
     private static func isDomainLabel(_ label: Substring) -> Bool {
-        !label.isEmpty && label.first != "-" && label.last != "-"
+        !label.isEmpty && label.count <= maxDomainLabelLength && label.first != "-" && label.last != "-"
             && label.allSatisfy { isAlphanumeric($0) || $0 == "-" }
     }
 }

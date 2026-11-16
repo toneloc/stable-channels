@@ -49,7 +49,8 @@ final class EmailAddressTests: XCTestCase {
         let refused = [
             "a<b@example.com", "a>b@example.com", "\"a\"@example.com", "a@exa<mple.com", "a@example.com/x",
             "a@exa_mple.com", "a@-example.com", "a@example-.com", "a\\b@example.com", "ä@example.com",
-            "a@exämple.com", ".a@example.com", "a.@example.com", "a..b@example.com"
+            "a@exämple.com", ".a@example.com", "a.@example.com", "a..b@example.com",
+            "a@" + String(repeating: "b", count: 64) + ".com"
         ]
         for raw in refused {
             XCTAssertNil(EmailAddress(raw), raw)
@@ -60,7 +61,8 @@ final class EmailAddressTests: XCTestCase {
     }
 
     func testLongestAllowedAddress_isAccepted() {
-        let raw = "a@" + String(repeating: "b", count: EmailAddress.maxLength - 6) + ".com"
+        let label = String(repeating: "b", count: EmailAddress.maxDomainLabelLength)
+        let raw = "a@" + [label, label, label, String(repeating: "c", count: 56), "com"].joined(separator: ".")
         XCTAssertEqual(raw.count, EmailAddress.maxLength)
         XCTAssertNotNil(EmailAddress(raw))
     }
