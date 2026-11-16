@@ -52,6 +52,11 @@ class AppState {
     /// Reset to false on app termination (no persistence = no bypass on restart).
     private(set) var isUnlocked: Bool = false
 
+    /// True while App Access is on and this session has not passed it, so app content stays covered.
+    var isAppLocked: Bool {
+        !isUnlocked && seedAccessDefaults.bool(forKey: Constants.appUnlockEnabledKey)
+    }
+
     /// Prevents double-trigger of auth (onAppear + onChange both firing).
     var isAuthenticating: Bool = false
 
@@ -975,6 +980,7 @@ class AppState {
         shared?.set(false, forKey: BalanceCacheKey.hasReadyChannel)
         clearPendingOutboundSendCache(from: shared)
         shared?.set(false, forKey: "pending_push_payment")
+        EmailPromptStore.shared.reset()
     }
 
     private func dropDatabaseServices() {
