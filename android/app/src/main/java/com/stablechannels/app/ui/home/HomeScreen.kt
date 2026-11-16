@@ -22,13 +22,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.content.PermissionChecker
-import androidx.core.view.WindowCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -38,6 +36,7 @@ import com.stablechannels.app.domain.EmailPromptStoring
 import com.stablechannels.app.models.PaymentRecord
 import com.stablechannels.app.models.TradeRecord
 import com.stablechannels.app.services.EmailPromptStore
+import com.stablechannels.app.ui.components.DialogEdgeToEdgeEffect
 import com.stablechannels.app.ui.components.StatusCapsule
 import com.stablechannels.app.ui.email.rememberEmailSettingsModel
 import com.stablechannels.app.ui.history.OrderDetailBottomSheet
@@ -740,7 +739,7 @@ fun HomeScreen(
             containerColor = if (isDark) Color.Black else Color.White,
             contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) },
         ) {
-            SheetEdgeToEdgeEffect()
+            DialogEdgeToEdgeEffect()
             Box(modifier = Modifier.fillMaxHeight(0.9f)) {
                 SendScreen(appState) { showSend = false }
             }
@@ -753,7 +752,7 @@ fun HomeScreen(
             containerColor = if (isDark) Color.Black else Color.White,
             contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) },
         ) {
-            SheetEdgeToEdgeEffect()
+            DialogEdgeToEdgeEffect()
             Box(modifier = Modifier.fillMaxHeight(0.9f)) {
                 ReceiveScreen(appState) { showReceive = false }
             }
@@ -766,7 +765,7 @@ fun HomeScreen(
             containerColor = if (isDark) Color.Black else Color.White,
             contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) },
         ) {
-            SheetEdgeToEdgeEffect()
+            DialogEdgeToEdgeEffect()
             Box(modifier = Modifier.fillMaxHeight(0.9f)) {
                 BuyScreen(appState, prefillAmountUSD = prefillTradeAmount) {
                     showBuy = false
@@ -782,7 +781,7 @@ fun HomeScreen(
             containerColor = if (isDark) Color.Black else Color.White,
             contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) },
         ) {
-            SheetEdgeToEdgeEffect()
+            DialogEdgeToEdgeEffect()
             Box(modifier = Modifier.fillMaxHeight(0.9f)) {
                 SellScreen(appState, prefillAmountUSD = prefillTradeAmount) {
                     showSell = false
@@ -916,46 +915,5 @@ private fun PendingRow(
                 )
             }
         }
-    }
-}
-
-// Edge-to-edge for a ModalBottomSheet's dialog window. Android 15+ enforces
-// transparent system bars, so the (deprecated) color setters only run on older
-// versions, where they are still the only way to clear the bars.
-@Composable
-private fun SheetEdgeToEdgeEffect() {
-    val view = LocalView.current
-    val isDark = LocalDarkTheme.current
-    DisposableEffect(view, isDark) {
-        var context = view.context
-        var dialog: android.app.Dialog? = null
-        while (context is android.content.ContextWrapper) {
-            if (context is android.app.Dialog) {
-                dialog = context
-                break
-            }
-            context = context.baseContext
-        }
-        val window = dialog?.window
-        if (window != null) {
-            WindowCompat.setDecorFitsSystemWindows(window, false)
-            val insetsController = WindowCompat.getInsetsController(window, view)
-            insetsController.isAppearanceLightStatusBars = !isDark
-            insetsController.isAppearanceLightNavigationBars = !isDark
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.VANILLA_ICE_CREAM) {
-                @Suppress("DEPRECATION")
-                window.navigationBarColor = android.graphics.Color.TRANSPARENT
-                @Suppress("DEPRECATION")
-                window.statusBarColor = android.graphics.Color.TRANSPARENT
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                window.isNavigationBarContrastEnforced = false
-            }
-            window.setLayout(
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-            )
-        }
-        onDispose {}
     }
 }
