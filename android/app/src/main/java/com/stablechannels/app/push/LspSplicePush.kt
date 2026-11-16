@@ -128,3 +128,10 @@ internal class LspSpliceWait(startMs: Long, waitMs: Long, private val settleMs: 
     fun isDone(nowMs: Long): Boolean =
         failed || nowMs >= deadlineMs || lockedAtMs?.let { nowMs >= it + settleMs } == true
 }
+
+/**
+ * The LSP's splice has locked once its channel is ready on new funding. A replayed ready event, or
+ * one for another channel, leaves the LSP channel's funding as it was.
+ */
+internal fun lspSpliceLocked(fundingBeforeTxid: String?, fundingNowTxid: String?): Boolean =
+    fundingNowTxid != null && fundingNowTxid != fundingBeforeTxid
