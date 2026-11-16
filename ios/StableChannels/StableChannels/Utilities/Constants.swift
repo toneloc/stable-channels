@@ -64,6 +64,8 @@ enum Constants {
     /// Optional email the user chooses to share; each request is signed with the node key.
     static let emailSubmitURL = "https://stablechannels.com/api/register-email"
     static let emailSubmitTimeoutSeconds: TimeInterval = 15
+    /// The server refuses a signed `ts` more than this many seconds from its own clock.
+    static let emailServerTimestampWindowSeconds: Int64 = 300
     /// The Home email prompt waits this long so it never covers the first look at the balance.
     static let emailPromptShowDelaySeconds: Double = 2
     static let emailPromptSavedDismissDelaySeconds: Double = 1.4

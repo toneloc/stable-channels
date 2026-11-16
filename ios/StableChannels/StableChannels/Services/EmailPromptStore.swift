@@ -2,7 +2,7 @@ import Foundation
 
 /// Remembers how often the app launched, when the email prompt was shown, whether the user answered it,
 /// and the address last saved on the server.
-final class EmailPromptStore: EmailPromptStoring, SavedEmailStoring, @unchecked Sendable {
+final class EmailPromptStore: EmailPromptStoring, SavedEmailStoring, EmailTimestampStoring, @unchecked Sendable {
     static let shared = EmailPromptStore()
 
     private static let launchesKey = "emailPromptLaunchCount"
@@ -10,6 +10,7 @@ final class EmailPromptStore: EmailPromptStoring, SavedEmailStoring, @unchecked 
     private static let timesShownKey = "emailPromptTimesShown"
     private static let lastShownLaunchKey = "emailPromptLastShownLaunch"
     private static let savedEmailKey = "savedEmailAddress"
+    private static let lastSentTimestampKey = "emailLastSentTimestamp"
 
     private let defaults: UserDefaults
     private var recordedThisProcess = false
@@ -45,6 +46,11 @@ final class EmailPromptStore: EmailPromptStoring, SavedEmailStoring, @unchecked 
         }
     }
 
+    var lastSentTimestamp: Int64 {
+        get { Int64(defaults.integer(forKey: Self.lastSentTimestampKey)) }
+        set { defaults.set(newValue, forKey: Self.lastSentTimestampKey) }
+    }
+
     /// Counts this process once, however many times Home appears.
     func recordLaunchOnce() {
         guard !recordedThisProcess else { return }
@@ -65,7 +71,8 @@ final class EmailPromptStore: EmailPromptStoring, SavedEmailStoring, @unchecked 
             Self.respondedKey,
             Self.timesShownKey,
             Self.lastShownLaunchKey,
-            Self.savedEmailKey
+            Self.savedEmailKey,
+            Self.lastSentTimestampKey
         ] {
             defaults.removeObject(forKey: key)
         }

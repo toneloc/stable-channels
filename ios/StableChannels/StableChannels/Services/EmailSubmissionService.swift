@@ -28,6 +28,14 @@ enum EmailRegistrationEnvelope {
         (try? JSONSerialization.jsonObject(with: body) as? [String: Any])?["ok"] as? Bool == true
     }
 
+    /// The server refuses a `ts` not newer than the last one it stored for the node, so never reuse or go back.
+    /// A stored `ts` beyond the server window came from a clock that ran ahead; reusing it would lock saves out.
+    static func nextTimestamp(now: Date, lastSent: Int64) -> Int64 {
+        let current = Int64(now.timeIntervalSince1970)
+        guard lastSent + 1 <= current + Constants.emailServerTimestampWindowSeconds else { return current }
+        return max(current, lastSent + 1)
+    }
+
     /// Sorted-key JSON of the payload; an empty `email` asks the server to remove the saved address.
     static func payload(email: String, nodeId: String, timestamp: Int64) -> String? {
         let object: [String: Any] = [
@@ -54,6 +62,7 @@ enum EmailRegistrationEnvelope {
 
 struct EmailSubmissionService: EmailSubmitting {
     let signer: EmailRequestSigning
+    let timestamps: EmailTimestampStoring
     let endpoint: String
     let timeout: TimeInterval
     let configuration: URLSessionConfiguration
@@ -61,12 +70,14 @@ struct EmailSubmissionService: EmailSubmitting {
 
     init(
         signer: EmailRequestSigning,
+        timestamps: EmailTimestampStoring = EmailPromptStore.shared,
         endpoint: String = Constants.emailSubmitURL,
         timeout: TimeInterval = Constants.emailSubmitTimeoutSeconds,
         configuration: URLSessionConfiguration = .ephemeral,
         now: @escaping () -> Date = { Date() }
     ) {
         self.signer = signer
+        self.timestamps = timestamps
         self.endpoint = endpoint
         self.timeout = timeout
         self.configuration = configuration
@@ -76,11 +87,12 @@ struct EmailSubmissionService: EmailSubmitting {
     func submit(_ email: EmailAddress?) async throws {
         let nodeId = signer.nodeId
         guard signer.isRunning, !nodeId.isEmpty else { throw EmailSubmissionError.walletNotReady }
+        let timestamp = EmailRegistrationEnvelope.nextTimestamp(now: now(), lastSent: timestamps.lastSentTimestamp)
         guard let url = URL(string: endpoint),
               let payload = EmailRegistrationEnvelope.payload(
                   email: email?.value ?? "",
                   nodeId: nodeId,
-                  timestamp: Int64(now().timeIntervalSince1970)
+                  timestamp: timestamp
               ) else { throw EmailSubmissionError.unreachable }
 
         let signature: String
@@ -89,6 +101,8 @@ struct EmailSubmissionService: EmailSubmitting {
         } catch {
             throw EmailSubmissionError.walletNotReady
         }
+        // Stored before sending: the server may record it even when the reply never arrives.
+        timestamps.lastSentTimestamp = timestamp
 
         var request = URLRequest(url: url, timeoutInterval: timeout)
         request.httpMethod = "POST"

@@ -30,6 +30,11 @@ protocol EmailPromptStoring: AnyObject {
     func markResponded()
 }
 
+/// Where the app keeps the last timestamp it signed, so the next signed change is always newer.
+protocol EmailTimestampStoring: AnyObject {
+    var lastSentTimestamp: Int64 { get set }
+}
+
 /// Where the app keeps the address it last saved on the server, so Settings can show it.
 protocol SavedEmailStoring: AnyObject {
     var savedEmail: EmailAddress? { get set }

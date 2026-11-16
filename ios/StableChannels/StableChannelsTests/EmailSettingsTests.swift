@@ -16,6 +16,10 @@ private final class FakeSavedEmailStore: SavedEmailStoring {
     var savedEmail: EmailAddress?
 }
 
+private final class FakeTimestampStore: EmailTimestampStoring {
+    var lastSentTimestamp: Int64 = 0
+}
+
 private final class FakeSigner: EmailRequestSigning {
     var isRunning = true
     var nodeId = "02" + String(repeating: "ab", count: 32)
@@ -90,6 +94,14 @@ final class EmailRegistrationEnvelopeTests: XCTestCase {
         let body = try XCTUnwrap(EmailRegistrationEnvelope.body(payload: #"{"a":"b/c"}"#, signature: "sig"))
         XCTAssertEqual(String(data: body, encoding: .utf8), #"{"payload":"{\"a\":\"b/c\"}","signature":"sig"}"#)
     }
+
+    // A clock that once ran ahead must not keep every later save outside the server's window.
+    func testNextTimestamp_ignoresAStoredTimestampFarAhead() {
+        let now: Int64 = 1_762_790_000
+        let date = Date(timeIntervalSince1970: TimeInterval(now))
+        XCTAssertEqual(EmailRegistrationEnvelope.nextTimestamp(now: date, lastSent: now + 3600), now)
+        XCTAssertEqual(EmailRegistrationEnvelope.nextTimestamp(now: date, lastSent: now + 10), now + 11)
+    }
 }
 
 final class EmailSubmissionServiceTests: XCTestCase {
@@ -106,11 +118,15 @@ final class EmailSubmissionServiceTests: XCTestCase {
         super.tearDown()
     }
 
-    private func makeService(signer: FakeSigner) -> EmailSubmissionService {
+    private func makeService(
+        signer: FakeSigner,
+        timestamps: FakeTimestampStore = FakeTimestampStore()
+    ) -> EmailSubmissionService {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MockURLProtocol.self]
         return EmailSubmissionService(
             signer: signer,
+            timestamps: timestamps,
             configuration: configuration,
             now: { [timestamp] in Date(timeIntervalSince1970: timestamp) }
         )
@@ -177,6 +193,24 @@ final class EmailSubmissionServiceTests: XCTestCase {
 
         let payload = String(decoding: try XCTUnwrap(signer.signedMessages.first), as: UTF8.self)
         XCTAssertTrue(payload.hasPrefix(#"{"email":"","#), payload)
+    }
+
+    // The server refuses a ts that is not newer than the last one it stored for the node.
+    func testSubmit_twiceInOneSecond_signsIncreasingTimestamps() async throws {
+        let signer = FakeSigner()
+        let timestamps = FakeTimestampStore()
+        MockURLProtocol.requestHandler = { Self.response($0, status: 200) }
+        let service = makeService(signer: signer, timestamps: timestamps)
+
+        try await service.submit(EmailAddress("a@b.com"))
+        try await service.submit(nil)
+
+        let expected = [
+            EmailRegistrationEnvelope.payload(email: "a@b.com", nodeId: signer.nodeId, timestamp: Int64(timestamp)),
+            EmailRegistrationEnvelope.payload(email: "", nodeId: signer.nodeId, timestamp: Int64(timestamp) + 1)
+        ]
+        XCTAssertEqual(signer.signedMessages.map { String(decoding: $0, as: UTF8.self) }, expected.compactMap { $0 })
+        XCTAssertEqual(timestamps.lastSentTimestamp, Int64(timestamp) + 1)
     }
 
     func testSubmit_whenNodeNotReady_failsWithoutNetwork() async {
@@ -444,6 +478,7 @@ final class EmailPromptStoreTests: XCTestCase {
         store.recordShown()
         store.markResponded()
         store.savedEmail = EmailAddress("a@b.com")
+        store.lastSentTimestamp = 1_762_790_000
 
         store.reset()
 
@@ -453,6 +488,7 @@ final class EmailPromptStoreTests: XCTestCase {
         XCTAssertEqual(reopened.lastShownLaunch, 0)
         XCTAssertFalse(reopened.hasResponded)
         XCTAssertNil(reopened.savedEmail)
+        XCTAssertEqual(reopened.lastSentTimestamp, 0)
     }
 
     // The restored wallet's own launch counts even though this process already counted one.
@@ -479,6 +515,12 @@ final class EmailPromptStoreTests: XCTestCase {
         let defaults = makeDefaults()
         EmailPromptStore(defaults: defaults).markResponded()
         XCTAssertTrue(EmailPromptStore(defaults: defaults).hasResponded)
+    }
+
+    func testLastSentTimestamp_persists() {
+        let defaults = makeDefaults()
+        EmailPromptStore(defaults: defaults).lastSentTimestamp = 1_762_790_000
+        XCTAssertEqual(EmailPromptStore(defaults: defaults).lastSentTimestamp, 1_762_790_000)
     }
 
     func testSavedEmail_persistsAndClears() {
