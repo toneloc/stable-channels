@@ -105,6 +105,21 @@ final class LspSplicePushTests: XCTestCase {
         XCTAssertTrue(wait.isDone(at: at(8)))
     }
 
+    func testAReadyAfterTheLockDoesNotRestartTheSettleTime() {
+        var wait = wait()
+        wait.see(ready("new"), at: at(5), liveFunding: noLiveFunding)
+        wait.see(ready("newer"), at: at(7), liveFunding: noLiveFunding)
+        XCTAssertEqual(wait.lockedAt, at(5))
+        XCTAssertTrue(wait.isDone(at: at(8)), "settled 3 s after the first lock")
+    }
+
+    func testTheDeadlineCutsTheSettleTimeShort() {
+        var wait = wait(deadlineSecs: 20)
+        wait.see(ready("new"), at: at(19), liveFunding: noLiveFunding)
+        XCTAssertEqual(wait.outcome, .locked)
+        XCTAssertTrue(wait.isDone(at: at(20)))
+    }
+
     func testAReadyForTheFundingTheWaitStartedFromIsNotTheLock() {
         var wait = wait()
         wait.see(ready("old"), at: at(1), liveFunding: noLiveFunding)
