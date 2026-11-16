@@ -2,7 +2,6 @@
 //! Outside the auth layer like /api/channel-exists, but the node key signs the request: an outpoint ties a private channel on chain to the node.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
@@ -10,21 +9,19 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Response;
-use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::lightning::util::message_signing;
 use ldk_server_client::ldk_server_grpc::api::{GetNodeInfoRequest, ListChannelsRequest};
 use ldk_server_client::ldk_server_grpc::types::Channel;
 use serde_json::{json, Value};
 use stable_channels::db::{Database, LedgerChannelRow};
 
-use crate::handlers::channel_exists::is_valid_node_id;
+use crate::fixed_window::FixedWindow;
+use crate::handlers::{is_plausible_signature, parse_node_key};
 use crate::stable_manager::LdkServerCalls;
 use crate::state::AppState;
 
 /// Freshness window for the signed timestamp, in seconds (the same as RegisterPush).
 const SIG_WINDOW_SECS: u64 = 300;
-/// A zbase32 node signature is 104 characters; a much longer one is refused before any work.
-const MAX_SIGNATURE_CHARS: usize = 150;
 /// Lookups per window for each node that has channels with the LSP.
 const MAX_REQUESTS_PER_WINDOW: u32 = 10;
 const RATE_WINDOW_SECS: u64 = 60;
@@ -75,33 +72,19 @@ pub struct FundingOutpoint {
 
 /// Fixed-window request counter for one node.
 #[derive(Debug, Default)]
-struct RequestWindow {
-    started_at: u64,
-    count: u32,
-}
+struct RequestWindow(FixedWindow);
 
 impl RequestWindow {
-    /// Whether `now` (unix seconds) falls in this window; a clock stepped back does not, so it cannot lock a node out.
     fn current(&self, now: u64) -> bool {
-        now >= self.started_at && now - self.started_at < RATE_WINDOW_SECS
+        self.0.current(now, RATE_WINDOW_SECS)
     }
 
-    /// Whether this window's budget is spent at `now`, without counting a request.
     fn spent(&self, now: u64) -> bool {
-        self.current(now) && self.count >= MAX_REQUESTS_PER_WINDOW
+        self.0.spent(now, RATE_WINDOW_SECS, MAX_REQUESTS_PER_WINDOW)
     }
 
-    /// Count a request at `now`; false once this window's budget is spent.
     fn allow(&mut self, now: u64) -> bool {
-        if !self.current(now) {
-            self.started_at = now;
-            self.count = 0;
-        }
-        if self.count >= MAX_REQUESTS_PER_WINDOW {
-            return false;
-        }
-        self.count += 1;
-        true
+        self.0.allow(now, RATE_WINDOW_SECS, MAX_REQUESTS_PER_WINDOW)
     }
 }
 
@@ -459,14 +442,14 @@ pub async fn answer<L: LdkServerCalls + 'static>(
         Ok(req) => req,
         Err(e) => return refuse(StatusCode::BAD_REQUEST, &e.to_string()),
     };
-    let Some(public_key) = is_valid_node_id(&req.node_id).then(|| PublicKey::from_str(&req.node_id).ok()).flatten()
+    let Some(public_key) = parse_node_key(&req.node_id)
     else {
         return refuse(StatusCode::BAD_REQUEST, "invalid node_id");
     };
     if now.abs_diff(req.timestamp) > SIG_WINDOW_SECS {
         return refuse(StatusCode::UNAUTHORIZED, "stale timestamp");
     }
-    if req.signature.is_empty() || req.signature.len() > MAX_SIGNATURE_CHARS {
+    if !is_plausible_signature(&req.signature) {
         return refuse(StatusCode::UNAUTHORIZED, "invalid signature");
     }
     let Some(lsp_node_id) = route.lsp_node_id(ldk.as_ref(), now).await else {
@@ -541,7 +524,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use async_trait::async_trait;
-    use ldk_node::bitcoin::secp256k1::{Secp256k1, SecretKey};
+    use ldk_node::bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
     use ldk_server_client::error::{LdkServerError, LdkServerErrorCode};
     use ldk_server_client::ldk_server_grpc::api::{
         GetNodeInfoResponse, ListChannelsResponse, SignMessageRequest, SignMessageResponse,

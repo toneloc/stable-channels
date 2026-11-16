@@ -58,6 +58,7 @@ When the app is in the background or killed, the LSP sends APNs push notificatio
 6. NSE connects to LSP peer
 7. **`lsp_to_user`** (price dropped, LSP sends us sats): polls `node.nextEvent()` for up to 22 seconds waiting for `PaymentReceived`
 8. **`user_to_lsp`** (price rose, user owes LSP): reads channel state from SQLite (C API), fetches a quorum-backed BTC/USD price with a three-second per-feed deadline, calculates the stability payment, and sends a keysend with a TLV marker
+9. **`lsp_splice_in`** (the LSP is about to splice its own funds into the channel, sent by the LSP's queued splice job, not the stability loop): keeps the node up until the splice locks (plus 3 seconds for a stability payment that may follow), fails, or 24 seconds after the push arrived, recording splice events as the other directions do. A locked splice shows no notification; otherwise it asks the user to open the app
 9. Updates notification content with result ("Stability Payment Received" / "Stability Payment Sent") or falls back to "Payment Pending"
 10. If `serviceExtensionTimeWillExpire()` fires, flags `pending_push_payment` for main app to retry on next launch
 
