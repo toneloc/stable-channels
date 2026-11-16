@@ -100,22 +100,15 @@ fun HomeScreen(
         emailPromptStore.recordLaunchOnce()
         // Wait so the prompt never covers the first look at the balance.
         kotlinx.coroutines.delay(Constants.EMAIL_PROMPT_SHOW_DELAY_MS)
-        val anySheetOpen =
+        // Read after the wait, right before opening, so a sheet opened meanwhile holds it back.
+        val otherSheetShowing =
             showSend ||
                 showReceive ||
                 showBuy ||
                 showSell ||
                 selectedTrade != null ||
                 selectedPayment != null
-        if (
-            !anySheetOpen &&
-                EmailPromptPolicy.shouldShow(
-                    launches = emailPromptStore.launches,
-                    timesShown = emailPromptStore.timesShown,
-                    lastShownLaunch = emailPromptStore.lastShownLaunch,
-                    hasResponded = emailPromptStore.hasResponded,
-                )
-        ) {
+        if (EmailPromptPolicy.shouldShowOnHome(emailPromptStore, otherSheetShowing)) {
             emailPromptStore.recordShown()
             showEmailPrompt = true
         }

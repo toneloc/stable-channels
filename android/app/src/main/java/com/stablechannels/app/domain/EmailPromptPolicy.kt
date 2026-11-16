@@ -2,9 +2,8 @@ package com.stablechannels.app.domain
 
 /**
  * Decides when Home offers the email prompt: to anyone who has opened the wallet a few times,
- * funded or not. Only Save ends it; after "Not now" or a swipe the next showing waits the next gap
- * in [SHOW_GAPS] (launches 3, 12, 39), and the gaps repeat, so a 39-launch stretch never asks more
- * than three times.
+ * funded or not. "Not now" or a swipe only dismisses it: it returns after gaps of 3, 9 and 27
+ * launches ([SHOW_GAPS]), and the cycle repeats. Only Save ends it.
  */
 object EmailPromptPolicy {
     val SHOW_GAPS = listOf(3, 9, 27)
@@ -18,6 +17,19 @@ object EmailPromptPolicy {
         if (hasResponded) return false
         return launches >= lastShownLaunch + SHOW_GAPS[timesShown % SHOW_GAPS.size]
     }
+
+    /**
+     * Whether Home opens the prompt now. Home asks right before opening it, so it never covers
+     * another Home sheet.
+     */
+    fun shouldShowOnHome(store: EmailPromptStoring, otherSheetShowing: Boolean): Boolean =
+        !otherSheetShowing &&
+            shouldShow(
+                launches = store.launches,
+                timesShown = store.timesShown,
+                lastShownLaunch = store.lastShownLaunch,
+                hasResponded = store.hasResponded,
+            )
 }
 
 /**

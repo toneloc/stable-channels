@@ -526,6 +526,36 @@ class EmailPromptPolicyTest {
         assertTrue(shows(29, shown = 1, lastShown = 20))
     }
 
+    private class DueStore(
+        override val launches: Int = 3,
+        override val hasResponded: Boolean = false,
+    ) : EmailPromptStoring {
+        override val timesShown = 0
+        override val lastShownLaunch = 0
+
+        override fun recordLaunchOnce() = Unit
+
+        override fun recordShown() = Unit
+
+        override fun markResponded() = Unit
+    }
+
+    // Home asks right before opening the prompt, so it never opens over another Home sheet.
+    @Test
+    fun home_showsOnlyWhenDueAndNoOtherSheetIsShowing() {
+        assertTrue(EmailPromptPolicy.shouldShowOnHome(DueStore(), otherSheetShowing = false))
+        assertFalse(EmailPromptPolicy.shouldShowOnHome(DueStore(), otherSheetShowing = true))
+        assertFalse(
+            EmailPromptPolicy.shouldShowOnHome(DueStore(launches = 2), otherSheetShowing = false)
+        )
+        assertFalse(
+            EmailPromptPolicy.shouldShowOnHome(
+                DueStore(hasResponded = true),
+                otherSheetShowing = false,
+            )
+        )
+    }
+
     @Test
     fun neverShows_afterAnswer() {
         assertFalse(shows(3, responded = true))
