@@ -598,6 +598,11 @@ class SpliceEventRecoveryTest {
         handle(state, negotiated)
         assertNull(payment(id).txid)
         assertEquals("negotiated", db.getLspSplice(txid)!!.status)
+        // Nor at its lock, whose recovery binds a lone negotiation to a Move still waiting.
+        handle(state, ready)
+        assertEquals("locked", db.getLspSplice(txid)!!.status)
+        assertNull(payment(id).txid)
+        assertEquals("pending", payment(id).status)
         // A Move this process is negotiating takes the next negotiation as its own.
         set(state, "pendingSplice", PendingSplice("out", 1_000, "addr", id))
         val own = OutPoint("12".repeat(32), 0u)

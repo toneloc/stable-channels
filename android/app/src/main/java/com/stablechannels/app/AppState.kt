@@ -2260,7 +2260,14 @@ class AppState(private val context: Context) : ViewModel() {
                 nodeService.refreshChannels()
                 val db =
                     databaseService ?: throw IllegalStateException("Splice history unavailable")
-                SpliceEventRecorder.record(db, event, channelValue = ::liveChannelValue) { ready ->
+                // As at its negotiation, the LSP's splice locking within the window of its push is
+                // not given to a Move the app lost track of.
+                SpliceEventRecorder.record(
+                    db,
+                    event,
+                    lspSplice = pendingSplice == null && LspSpliceExpectation.isExpected(context),
+                    channelValue = ::liveChannelValue,
+                ) { ready ->
                     nodeService.channels
                         .singleOrNull {
                             it.userChannelId == ready.userChannelId &&
