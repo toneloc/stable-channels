@@ -1067,6 +1067,115 @@ final class NodeStartupCoordinatorTests: XCTestCase {
         appState.nodeStartup.reset()
     }
 
+    /// The notification extension can still hold the wallet dir and settle a stability payment
+    /// while a foreground restart waits for it; the restart must reload the books after taking
+    /// the lock, so its save keeps that write instead of the pre-lock snapshot.
+    func testForegroundRestart_keepsBooksTheNSEWroteWhileWaitingForTheLock() async throws {
+        NodeDirLock.shared.release()
+        let dataDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dataDir) }
+        let db = try DatabaseService(dataDir: dataDir)
+        try db.channelRepo.saveChannel(
+            channelId: "channel",
+            userChannelId: "user-channel",
+            expectedUSD: 100,
+            backingSats: 100_000,
+            note: nil
+        )
+        try FileManager.default.createDirectory(at: Constants.userDataDir, withIntermediateDirectories: true)
+        let lockPath = Constants.userDataDir.appendingPathComponent(NodeDirLock.lockFilename).path
+        let extensionHolder = open(lockPath, O_CREAT | O_RDWR, 0o644)
+        XCTAssertGreaterThanOrEqual(extensionHolder, 0)
+        defer { close(extensionHolder) }
+        XCTAssertEqual(flock(extensionHolder, LOCK_EX | LOCK_NB), 0, "The extension holds the wallet dir")
+        let appState = AppState(
+            nodeService: LatePausedNodeService(),
+            networkMonitor: MockNetworkMonitor(initialStatus: .online),
+            nodeStartup: heldRetries()
+        )
+        appState.databaseService = db
+        appState.stableChannel.userChannelId = "user-channel"
+        appState.phase = .wallet
+
+        let restart = Task { await appState.restartNodeFromForeground() }
+        // Once the flow is in progress the restart is parked on the lock wait; then the extension
+        // settles a payment and lets go.
+        await waitUntilRestartIsWaitingForTheLock(appState)
+        try db.channelRepo.saveChannel(
+            channelId: "channel",
+            userChannelId: "user-channel",
+            expectedUSD: 150,
+            backingSats: 150_000,
+            note: nil
+        )
+        flock(extensionHolder, LOCK_UN)
+        await restart.value
+
+        let saved = try XCTUnwrap(db.channelRepo.loadChannel(userChannelId: "user-channel"))
+        XCTAssertEqual(saved.expectedUSD, 150, "The restart must not overwrite the extension's write")
+        XCTAssertEqual(saved.backingSats, 150_000)
+        XCTAssertEqual(appState.stableChannel.expectedUSD.amount, 150)
+        appState.nodeStartup.reset()
+    }
+
+    func testForegroundRestart_showsTheExtensionsBooksWhenTheLockWaitEnds() async throws {
+        NodeDirLock.shared.release()
+        let dataDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dataDir) }
+        let db = try DatabaseService(dataDir: dataDir)
+        try db.channelRepo.saveChannel(
+            channelId: "channel",
+            userChannelId: "user-channel",
+            expectedUSD: 100,
+            backingSats: 100_000,
+            note: nil
+        )
+        try FileManager.default.createDirectory(at: Constants.userDataDir, withIntermediateDirectories: true)
+        let lockPath = Constants.userDataDir.appendingPathComponent(NodeDirLock.lockFilename).path
+        let extensionHolder = open(lockPath, O_CREAT | O_RDWR, 0o644)
+        XCTAssertGreaterThanOrEqual(extensionHolder, 0)
+        defer {
+            flock(extensionHolder, LOCK_UN)
+            close(extensionHolder)
+        }
+        XCTAssertEqual(flock(extensionHolder, LOCK_EX | LOCK_NB), 0, "The extension holds the wallet dir")
+        let appState = AppState(
+            nodeService: LatePausedNodeService(),
+            networkMonitor: MockNetworkMonitor(initialStatus: .online),
+            nodeStartup: heldRetries()
+        )
+        appState.databaseService = db
+        appState.stableChannel.userChannelId = "user-channel"
+        appState.phase = .wallet
+
+        let restart = Task { await appState.restartNodeFromForeground() }
+        await waitUntilRestartIsWaitingForTheLock(appState)
+        try db.channelRepo.saveChannel(
+            channelId: "channel",
+            userChannelId: "user-channel",
+            expectedUSD: 150,
+            backingSats: 150_000,
+            note: nil
+        )
+        // The wait ends without the lock (here cancelled; a timeout takes the same path).
+        restart.cancel()
+        await restart.value
+
+        XCTAssertEqual(appState.stableChannel.expectedUSD.amount, 150, "The books on screen must not stay stale")
+        XCTAssertEqual(appState.stableChannel.backingSats, 150_000)
+        appState.nodeStartup.reset()
+    }
+
+    /// The restart sets its flow flag on the main actor and runs straight to the lock wait, so
+    /// seeing the flag set means it is parked there.
+    private func waitUntilRestartIsWaitingForTheLock(_ appState: AppState) async {
+        while await !(MainActor.run { appState.isNodeFlowInProgress }) {
+            await Task.yield()
+        }
+    }
+
     func testBackgroundStopDuringLaunch_doesNotProduceTerminalError() async {
         let node = FeeStallingNodeService()
         var appState: AppState?

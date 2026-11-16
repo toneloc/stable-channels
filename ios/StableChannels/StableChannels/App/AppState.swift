@@ -1574,6 +1574,7 @@ class AppState {
     /// isStarting. performBackgroundStop must not release the wallet-dir lock
     /// out from under such a flow.
     private var nodeFlowInProgress = false
+    var isNodeFlowInProgress: Bool { nodeFlowInProgress }
     private var pendingOnlineRetry = false
     /// Node-start failover and automatic retry after transient chain-source failures.
     let nodeStartup: NodeStartupCoordinator
@@ -1692,8 +1693,11 @@ class AppState {
         }
         nodeFlowInProgress = true
         defer { finishNodeFlow() }
-        reloadStateWrittenWhileSuspended()
+        // Reload only while holding the wallet dir: the NSE writes the books until then, and the
+        // save after start would overwrite those writes with an earlier read.
         if nodeService.isRunning {
+            // A running node still holds the lock, so the NSE could not write since this read.
+            reloadStateWrittenWhileSuspended()
             // Node never stopped, so gossip was never extracted — do NOT touch
             // ldk_node_data.sqlite while LDK has it open (a stale
             // network_graph.bin would otherwise be written into the live DB).
@@ -1714,7 +1718,12 @@ class AppState {
             timeout: Constants.nodeDirLockTimeoutSecs,
             caller: "restartNodeFromForeground",
             log: AuditService.log
-        ).held else { return }
+        ).held else {
+            // No lock means no save, but still show what the extension wrote meanwhile.
+            reloadStateWrittenWhileSuspended()
+            return
+        }
+        reloadStateWrittenWhileSuspended()
         restoreGossipToDB()
         do {
             try await startNodeWithFailover(mnemonic: "")
