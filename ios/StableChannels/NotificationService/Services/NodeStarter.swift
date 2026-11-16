@@ -51,7 +51,13 @@ final class DefaultNodeStarter: NodeStarter {
         // latest_lightning_wallet_sync_timestamp — so on strip runs the freshness gate must
         // wait for a new sync instead of inheriting the main app's recent one. Logged so the
         // pilot metrics can split immediate-send runs from forced-resync runs.
-        let nodeMetricsReset = LdkDbMaintenance(dataDir: dataDir, log: logger.log).stripGossip()
+        let nodeMetricsReset: Bool
+        do {
+            nodeMetricsReset = try LdkDbMaintenance(dataDir: dataDir, log: logger.log).stripGossip()
+        } catch {
+            logger.log("Gossip strip failed: \(error)")
+            nodeMetricsReset = false
+        }
         logger
             .log("stability_gate {\"event\":\"node_metrics_reset\",\"platform\":\"ios\",\"reset\":\(nodeMetricsReset)}")
 

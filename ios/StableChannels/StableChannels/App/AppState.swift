@@ -1175,7 +1175,7 @@ class AppState {
             }
 
             // Purge empty network graph from DB to force fresh RGS sync
-            ldkDbMaintenance.purgeEmptyGraph()
+            runGossipMaintenance("purge") { try $0.purgeEmptyGraph() }
 
             do {
                 try await startNodeWithFailover(mnemonic: "")
@@ -1665,7 +1665,7 @@ class AppState {
         monitoredSpliceTxid = nil
         mempoolWebSocketService.disconnect()
         nodeService.stop()
-        ldkDbMaintenance.extractGossip()
+        runGossipMaintenance("extract") { try $0.extractGossip() }
         let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
         shared?.set(Date().timeIntervalSince1970, forKey: Constants.SharedDefaultsKey.mainAppLastActive)
         // Last DB write is done — hand the wallet dir to the NSE.
@@ -1737,7 +1737,7 @@ class AppState {
             return
         }
         reloadStateWrittenWhileSuspended()
-        ldkDbMaintenance.restoreGossip()
+        runGossipMaintenance("restore") { try $0.restoreGossip() }
         do {
             try await startNodeWithFailover(mnemonic: "")
             refreshBalances()
@@ -1802,9 +1802,13 @@ class AppState {
 
     // MARK: - Gossip Data Management
 
-    /// Gossip upkeep of the LDK DB; callers hold the wallet-dir lock with no node running.
-    private var ldkDbMaintenance: LdkDbMaintenance {
-        LdkDbMaintenance(dataDir: Constants.userDataDir, log: { print("[App] \($0)") })
+    /// Runs gossip upkeep on the LDK DB and audits a failure; callers hold the wallet-dir lock, no node running.
+    private func runGossipMaintenance(_ step: String, _ work: (LdkDbMaintenance) throws -> Void) {
+        do {
+            try work(LdkDbMaintenance(dataDir: Constants.userDataDir, log: { print("[App] \($0)") }))
+        } catch {
+            AuditService.log("GOSSIP_MAINTENANCE_FAILED", data: ["step": step, "error": "\(error)"])
+        }
     }
 
     // MARK: - Push Token Re-registration
