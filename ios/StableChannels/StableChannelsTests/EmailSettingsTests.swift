@@ -602,3 +602,32 @@ final class EmailPromptStoreTests: XCTestCase {
         XCTAssertNil(EmailPromptStore(defaults: defaults).savedEmail)
     }
 }
+
+@MainActor
+final class EmailWalletResetTests: XCTestCase {
+    override func tearDown() {
+        EmailPromptStore.shared.reset()
+        super.tearDown()
+    }
+
+    // Restore and wipe go through resetInMemoryWalletState: the old wallet's email state must not survive it.
+    func testResetInMemoryWalletState_clearsTheSharedEmailStore() {
+        let store = EmailPromptStore.shared
+        store.recordLaunchOnce()
+        store.recordShown()
+        store.markResponded()
+        store.savedEmail = EmailAddress("a@b.com")
+        store.lastSentTimestamp = 1_762_790_000
+
+        AppState().resetInMemoryWalletState()
+
+        XCTAssertNil(store.savedEmail)
+        XCTAssertEqual(store.launches, 0)
+        XCTAssertEqual(store.timesShown, 0)
+        XCTAssertEqual(store.lastShownLaunch, 0)
+        XCTAssertFalse(store.hasResponded)
+        XCTAssertEqual(store.lastSentTimestamp, 0)
+        store.recordLaunchOnce()
+        XCTAssertEqual(store.launches, 1, "this launch must count again for the restored wallet")
+    }
+}
