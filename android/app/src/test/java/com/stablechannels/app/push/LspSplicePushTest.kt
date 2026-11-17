@@ -138,13 +138,22 @@ class LspSplicePushTest {
 
     @Test
     fun `only the LSP channel moving to new funding counts as its splice locking`() {
-        assertTrue(lspSpliceLocked(fundingBeforeTxid = "aa", fundingNowTxid = "bb"))
+        val none: (String) -> Boolean = { false }
+        assertTrue(lspSpliceLocked(fundingBeforeTxid = "aa", fundingNowTxid = "bb", none))
         // A replayed ready event, or one for another channel, leaves the funding as it was.
-        assertFalse(lspSpliceLocked(fundingBeforeTxid = "aa", fundingNowTxid = "aa"))
+        assertFalse(lspSpliceLocked(fundingBeforeTxid = "aa", fundingNowTxid = "aa", none))
         // No LSP channel to read now is no lock.
-        assertFalse(lspSpliceLocked(fundingBeforeTxid = "aa", fundingNowTxid = null))
-        assertFalse(lspSpliceLocked(fundingBeforeTxid = null, fundingNowTxid = null))
+        assertFalse(lspSpliceLocked(fundingBeforeTxid = "aa", fundingNowTxid = null, none))
+        assertFalse(lspSpliceLocked(fundingBeforeTxid = null, fundingNowTxid = null, none))
         // A channel that had no funding to read when the hold began, and has now.
-        assertTrue(lspSpliceLocked(fundingBeforeTxid = null, fundingNowTxid = "bb"))
+        assertTrue(lspSpliceLocked(fundingBeforeTxid = null, fundingNowTxid = "bb", none))
+    }
+
+    @Test
+    fun `the user's own Move locking on the LSP channel is not the LSP's splice`() {
+        val ownMoves = setOf("bb")
+        assertFalse(lspSpliceLocked("aa", "bb") { it in ownMoves })
+        // The LSP's splice after it, on funding the app has no Move for, still is.
+        assertTrue(lspSpliceLocked("bb", "cc") { it in ownMoves })
     }
 }
