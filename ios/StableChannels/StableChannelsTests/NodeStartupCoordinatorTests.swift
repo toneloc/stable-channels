@@ -693,7 +693,8 @@ final class NodeStartupCoordinatorTests: XCTestCase {
         XCTAssertEqual(appState.stableChannel.backingSats, 150_000)
     }
 
-    /// AppState runs on any node service and opens the wallet database through the injected factory.
+    /// AppState opens the wallet database through the injected factory, and a failed open ends the
+    /// start before any node method runs.
     func testStart_opensTheDatabaseThroughTheInjectedFactory() async {
         NodeDirLock.shared.release()
         var openedDirs: [URL] = []
@@ -715,6 +716,44 @@ final class NodeStartupCoordinatorTests: XCTestCase {
         XCTAssertEqual(appState.phase, .error("Database init failed: \(TestError.database.localizedDescription)"))
         XCTAssertNil(node.databaseService)
         XCTAssertFalse(NodeDirLock.shared.isHeld, "A failed database open hands the wallet dir back")
+    }
+
+    /// With a working database, AppState starts the injected node once on the probed provider and
+    /// reaches the wallet with no LDK node behind it.
+    func testStart_withAWorkingDatabase_startsTheFakeNodeAndReachesTheWallet() async throws {
+        NodeDirLock.shared.release()
+        let dataDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dataDir) }
+        // The started wallet writes a heartbeat to the app group; put the old one back.
+        let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        let lastActive = shared?.object(forKey: Constants.SharedDefaultsKey.mainAppLastActive)
+        defer { shared?.set(lastActive, forKey: Constants.SharedDefaultsKey.mainAppLastActive) }
+        let db = try DatabaseService(dataDir: dataDir)
+        let node = FakeNodeService()
+        let appState = AppState(
+            nodeService: node,
+            networkMonitor: MockNetworkMonitor(initialStatus: .online),
+            nodeStartup: heldRetries(),
+            chainSourceProbe: ChainSourceProbe(isReachable: { _ in true }, log: { _, _ in }),
+            makeDatabase: { _ in db }
+        )
+        defer { appState.stop() }
+
+        await appState.start()
+
+        XCTAssertEqual(node.startCalls, [
+            FakeNodeService.StartCall(
+                network: .bitcoin,
+                esploraURL: Constants.primaryChainURL,
+                mnemonic: "",
+                lspConfig: appState.activeLSP
+            )
+        ])
+        XCTAssertEqual(appState.phase, .wallet)
+        XCTAssertFalse(appState.isSyncing)
+        XCTAssertTrue(appState.hasCompletedInitialSync)
+        XCTAssertTrue(node.databaseService === db)
     }
 
     /// A scheduled retry runs `retryConnection` with the syncing screen up; when that start fails
@@ -1312,8 +1351,18 @@ private final class FakeNodeService: AppNodeService {
     var savedMnemonic: String?
     var databaseService: DatabaseService?
 
-    func start(network _: Network, esploraURL _: String, mnemonic _: String, lspConfig _: LSPConfig) async throws {
-        throw NodeServiceError.notRunning
+    struct StartCall: Equatable {
+        let network: Network
+        let esploraURL: String
+        let mnemonic: String
+        let lspConfig: LSPConfig
+    }
+
+    private(set) var startCalls: [StartCall] = []
+
+    func start(network: Network, esploraURL: String, mnemonic: String, lspConfig: LSPConfig) async throws {
+        startCalls.append(StartCall(network: network, esploraURL: esploraURL, mnemonic: mnemonic, lspConfig: lspConfig))
+        isRunning = true
     }
 
     func stop() {}
