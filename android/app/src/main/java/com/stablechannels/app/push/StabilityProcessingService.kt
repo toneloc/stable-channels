@@ -785,7 +785,11 @@ class StabilityProcessingService : Service() {
                             node.eventHandled()
                         }
                         val fundingNow = lspChannelFunding(node, lspPubkey)
-                        if (lspSpliceLocked(fundingBefore?.txid, fundingNow?.txid)) {
+                        val locked =
+                            lspSpliceLocked(fundingBefore?.txid, fundingNow?.txid) { txid ->
+                                DatabaseService(this).use { it.paymentExistsForTxid(txid) }
+                            }
+                        if (locked) {
                             wait.onLocked(System.currentTimeMillis())
                         }
                     }

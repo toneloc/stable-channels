@@ -2287,11 +2287,13 @@ class AppState(private val context: Context) : ViewModel() {
                 // durably attached, never a funding fallback.
                 resumePendingSpliceConfirmation()
                 AuditService.log("CHANNEL_READY", mapOf("channel_id" to event.channelId))
-                // Another channel opening, the user's own splice or a replayed event can also be
-                // ready during a hold; only the LSP's channel on new funding is its splice locking.
+                // Another channel opening or a replayed event leaves the LSP channel's funding as
+                // it was. The user's own Move moves it too, to a txid the app recorded as its own.
                 if (
-                    lspSpliceHoldUntilMs != 0L &&
-                        lspSpliceLocked(lspSpliceFundingBeforeTxid, lspChannelFundingTxid())
+                    isHoldingForLspSplice &&
+                        lspSpliceLocked(lspSpliceFundingBeforeTxid, lspChannelFundingTxid()) {
+                            db.paymentExistsForTxid(it)
+                        }
                 ) {
                     releaseLspSpliceHold("locked")
                 }

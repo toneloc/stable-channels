@@ -130,8 +130,14 @@ internal class LspSpliceWait(startMs: Long, waitMs: Long, private val settleMs: 
 }
 
 /**
- * The LSP's splice has locked once its channel is ready on new funding. A replayed ready event, or
- * one for another channel, leaves the LSP channel's funding as it was.
+ * The LSP's splice has locked once its channel is ready on new funding that is not the user's own
+ * Move. A replayed ready event, or one for another channel, leaves the LSP channel's funding as it
+ * was. The user's Move is a splice of the same channel, so it moves the funding too, to a
+ * transaction the app has recorded as its own.
  */
-internal fun lspSpliceLocked(fundingBeforeTxid: String?, fundingNowTxid: String?): Boolean =
-    fundingNowTxid != null && fundingNowTxid != fundingBeforeTxid
+internal fun lspSpliceLocked(
+    fundingBeforeTxid: String?,
+    fundingNowTxid: String?,
+    isOwnMove: (String) -> Boolean,
+): Boolean =
+    fundingNowTxid != null && fundingNowTxid != fundingBeforeTxid && !isOwnMove(fundingNowTxid)
