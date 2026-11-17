@@ -87,6 +87,29 @@ final class SpliceBroadcastCheckerTests: XCTestCase {
         XCTAssertEqual(callCount, 4) // 2 retries * 2 endpoints
     }
 
+    func testUnknownTxidIsNotFoundThoughEsploraReportsItsStatus() async {
+        // Esplora's answers for a txid it has never seen (#467).
+        var paths: [String] = []
+        SpliceBroadcastMockURLProtocol.requestHandler = { request in
+            let path = request.url!.path
+            paths.append(path)
+            let isStatus = path.hasSuffix("/status")
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: isStatus ? 200 : 404,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            return (response, Data((isStatus ? #"{"confirmed":false}"# : "Transaction not found").utf8))
+        }
+
+        let checker = SpliceBroadcastChecker(urlSession: session, retries: 1, retryDelaySeconds: 0)
+        let status = await checker.checkStatus(txid: "deadbeef", endpointURLs: ["https://mempool.space/api"])
+
+        XCTAssertEqual(status, .notFound)
+        XCTAssertEqual(paths, ["/api/tx/deadbeef/hex"])
+    }
+
     func testReturnsInconclusiveOnServerErrorOrTimeout() async {
         SpliceBroadcastMockURLProtocol.requestHandler = { request in
             let response = HTTPURLResponse(

@@ -1,0 +1,653 @@
+package com.stablechannels.app.domain
+
+import android.content.Context
+import com.stablechannels.app.R
+import com.stablechannels.app.services.EmailPromptStore
+import com.stablechannels.app.services.EmailSubmissionService
+import com.stablechannels.app.services.EmailSubmitter
+import com.stablechannels.app.ui.email.EmailSettingsModel
+import com.stablechannels.app.ui.email.message
+import java.util.concurrent.CountDownLatch
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
+import org.robolectric.annotation.Config
+
+private const val NODE_ID = "02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619"
+private const val TS = 1_762_790_000L
+
+private fun email(raw: String) = EmailAddress.parse(raw)!!
+
+private class FakeSigner(
+    override val readyNodeId: String? = NODE_ID,
+    private val error: Exception? = null,
+) : NodeMessageSigner {
+    val signed = mutableListOf<String>()
+
+    override fun sign(message: ByteArray): String {
+        error?.let { throw it }
+        signed += String(message, Charsets.UTF_8)
+        return "sig"
+    }
+}
+
+private class InMemorySigningTimestamp(override var lastSignedTs: Long = 0) :
+    SigningTimestampStoring
+
+private class InMemorySavedEmail(override var savedEmail: EmailAddress? = null) : SavedEmailStoring
+
+private suspend fun failureOf(block: suspend () -> Unit): EmailSaveFailure? =
+    try {
+        block()
+        null
+    } catch (e: EmailSaveException) {
+        e.failure
+    }
+
+class EmailAddressTest {
+    @Test
+    fun validAddress_isTrimmedAndLowercased() {
+        assertEquals("satoshi@gmx.com", EmailAddress.parse("  Satoshi@GMX.com \n")?.value)
+    }
+
+    @Test
+    fun invalidAddresses_areRejected() {
+        val invalid =
+            listOf(
+                "",
+                "plain",
+                "@example.com",
+                "a@",
+                "a@b",
+                "a@b.c",
+                "a@@b.com",
+                "a@b@c.com",
+                "a b@c.com",
+                "a@.com",
+                "a@b..com",
+                "a@b.com.",
+                "a".repeat(65) + "@b.com",
+                "a@" + "b".repeat(250) + ".com",
+            )
+        for (raw in invalid) assertNull(raw, EmailAddress.parse(raw))
+    }
+
+    // Same rule as the server: plain ASCII address characters only, so nothing the server refuses
+    // gets sent.
+    @Test
+    fun addressesTheServerRefuses_areRejected() {
+        val refused =
+            listOf(
+                "a<b@example.com",
+                "a>b@example.com",
+                "\"a\"@example.com",
+                "a@exa<mple.com",
+                "a@example.com/x",
+                "a@exa_mple.com",
+                "a@-example.com",
+                "a@example-.com",
+                "a\\b@example.com",
+                "ä@example.com",
+                "a@exämple.com",
+                ".a@example.com",
+                "a.@example.com",
+                "a..b@example.com",
+            )
+        for (raw in refused) assertNull(raw, EmailAddress.parse(raw))
+        for (raw in
+            listOf(
+                "o'brien@example.com",
+                "a_b-c+d@sub-domain.example.co",
+                "x@xn--bcher-kva.example",
+            )) {
+            assertNotNull(raw, EmailAddress.parse(raw))
+        }
+    }
+
+    @Test
+    fun longestAllowedAddress_isAccepted() {
+        val label = EmailAddress.MAX_DOMAIN_LABEL_LENGTH
+        val raw = "a@" + listOf(label, label, label, 60).joinToString(".") { "b".repeat(it) }
+        assertEquals(EmailAddress.MAX_LENGTH, raw.length)
+        assertNotNull(EmailAddress.parse(raw))
+    }
+
+    // The server refuses a domain label over 63 characters, so the app does too.
+    @Test
+    fun domainLabelOver63Characters_isRejected() {
+        assertNotNull(EmailAddress.parse("a@" + "b".repeat(63) + ".com"))
+        assertNull(EmailAddress.parse("a@" + "b".repeat(64) + ".com"))
+        assertNull(EmailAddress.parse("a@example." + "c".repeat(64)))
+    }
+}
+
+class EmailRegistrationTest {
+    @Test
+    fun nextTimestamp_afterARecentFutureSignature_signsAfterIt() {
+        assertEquals(TS + 11, EmailRegistration.nextTimestamp(TS, lastSent = TS + 10))
+        assertEquals(TS, EmailRegistration.nextTimestamp(TS, lastSent = TS - 5))
+    }
+
+    // A clock that was once far ahead must not hold every later save outside the server window.
+    @Test
+    fun nextTimestamp_ignoresASignatureBeyondTheServerWindow() {
+        assertEquals(TS, EmailRegistration.nextTimestamp(TS, lastSent = TS + 3600))
+    }
+
+    @Test
+    fun payload_hasSortedKeysAndNoWhitespace_matchingIos() {
+        assertEquals(
+            """{"email":"you@example.com","node_id":"$NODE_ID","ts":1762790000,"type":"REGISTER_EMAIL_V1"}""",
+            EmailRegistration.payload(email("You@Example.com"), NODE_ID, TS),
+        )
+    }
+
+    @Test
+    fun payload_forRemoval_sendsEmptyEmail() {
+        assertEquals(
+            """{"email":"","node_id":"$NODE_ID","ts":1762790000,"type":"REGISTER_EMAIL_V1"}""",
+            EmailRegistration.payload(null, NODE_ID, TS),
+        )
+    }
+
+    @Test
+    fun payload_doesNotEscapeSlashes() {
+        val payload = EmailRegistration.payload(email("a/b@example.com"), NODE_ID, TS)
+        assertTrue(payload, payload.startsWith("""{"email":"a/b@example.com","""))
+    }
+}
+
+class EmailSubmissionServiceTest {
+    private fun service(
+        server: MockWebServer,
+        signer: NodeMessageSigner,
+        timestamps: SigningTimestampStoring = InMemorySigningTimestamp(),
+    ) =
+        EmailSubmissionService(
+            signer = signer,
+            timestamps = timestamps,
+            endpoint = server.url("/api/register-email").toString(),
+            nowSecs = { TS },
+        )
+
+    // Each Settings or Home model builds a service; they must reuse one connection pool.
+    @Test
+    fun services_shareOneDefaultClient() {
+        fun clientOf(service: EmailSubmissionService) =
+            EmailSubmissionService::class
+                .java
+                .getDeclaredField("client")
+                .apply { isAccessible = true }
+                .get(service)
+        val first = EmailSubmissionService(FakeSigner(), InMemorySigningTimestamp())
+        val second = EmailSubmissionService(FakeSigner(), InMemorySigningTimestamp())
+
+        assertSame(clientOf(first), clientOf(second))
+    }
+
+    @Test
+    fun submit_postsSignedEnvelopeOverExactPayload() = runTest {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(200).setBody("""{"ok":true}"""))
+            val signer = FakeSigner()
+
+            service(server, signer).submit(email("user@example.com"))
+
+            val payload =
+                """{"email":"user@example.com","node_id":"$NODE_ID","ts":1762790000,"type":"REGISTER_EMAIL_V1"}"""
+            assertEquals(listOf(payload), signer.signed)
+            val request = server.takeRequest()
+            assertEquals("POST", request.method)
+            assertEquals("/api/register-email", request.path)
+            assertEquals(
+                """{"payload":"${payload.replace("\"", "\\\"")}","signature":"sig"}""",
+                request.body.readUtf8(),
+            )
+        }
+    }
+
+    // The server refuses a timestamp that is not newer than the last one it saw for the node.
+    @Test
+    fun submit_twiceInTheSameSecond_signsStrictlyIncreasingTimestamps() = runTest {
+        MockWebServer().use { server ->
+            repeat(2) {
+                server.enqueue(MockResponse().setResponseCode(200).setBody("""{"ok":true}"""))
+            }
+            val signer = FakeSigner()
+            val timestamps = InMemorySigningTimestamp()
+            val service = service(server, signer, timestamps)
+
+            service.submit(email("a@b.co"))
+            service.submit(null)
+
+            assertEquals(
+                listOf(TS, TS + 1),
+                signer.signed.map { Regex("\"ts\":(\\d+)").find(it)!!.groupValues[1].toLong() },
+            )
+            assertEquals(TS + 1, timestamps.lastSignedTs)
+        }
+    }
+
+    @Test
+    fun submit_afterAFutureTimestamp_signsAfterIt() = runTest {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(200).setBody("""{"ok":true}"""))
+            val signer = FakeSigner()
+
+            service(server, signer, InMemorySigningTimestamp(TS + 10)).submit(null)
+
+            assertTrue(
+                signer.signed.single(),
+                signer.signed.single().contains("\"ts\":${TS + 11},"),
+            )
+        }
+    }
+
+    // 401 means a bad signature or a timestamp outside the server's window, most often a wrong
+    // device clock; 503 means saving is switched off for now.
+    @Test
+    fun submit_mapsServerStatusToFailure() = runTest {
+        val expected =
+            mapOf(
+                400 to EmailSaveFailure.REJECTED,
+                401 to EmailSaveFailure.SIGNATURE_REFUSED,
+                500 to EmailSaveFailure.REJECTED,
+                503 to EmailSaveFailure.UNAVAILABLE,
+            )
+        for ((code, failure) in expected) {
+            MockWebServer().use { server ->
+                server.enqueue(MockResponse().setResponseCode(code))
+                assertEquals(
+                    "$code",
+                    failure,
+                    failureOf { service(server, FakeSigner()).submit(null) },
+                )
+            }
+        }
+    }
+
+    // A 2xx whose body does not say ok:true is a refusal, so a refused save is never shown as
+    // saved.
+    @Test
+    fun submit_when2xxWithoutOkTrue_failsAsRejected() = runTest {
+        for (body in listOf("""{"ok":false}""", "", "not json")) {
+            MockWebServer().use { server ->
+                server.enqueue(MockResponse().setResponseCode(200).setBody(body))
+                val failure = failureOf { service(server, FakeSigner()).submit(null) }
+                assertEquals(body, EmailSaveFailure.REJECTED, failure)
+            }
+        }
+    }
+
+    @Test
+    fun submit_whenServerUnreachable_failsAsNetwork() = runTest {
+        val server = MockWebServer()
+        server.start()
+        val service = service(server, FakeSigner())
+        server.shutdown()
+
+        assertEquals(EmailSaveFailure.NETWORK, failureOf { service.submit(email("a@b.co")) })
+    }
+
+    @Test
+    fun submit_whenNodeNotRunning_failsWithoutNetworkCall() = runTest {
+        MockWebServer().use { server ->
+            val notReady = failureOf {
+                service(server, FakeSigner(readyNodeId = null)).submit(email("a@b.co"))
+            }
+            val signFails = failureOf {
+                service(server, FakeSigner(error = IllegalStateException())).submit(email("a@b.co"))
+            }
+
+            assertEquals(EmailSaveFailure.WALLET_NOT_READY, notReady)
+            assertEquals(EmailSaveFailure.WALLET_NOT_READY, signFails)
+            assertEquals(0, server.requestCount)
+        }
+    }
+}
+
+class EmailSettingsModelTest {
+    private class StubSubmitter(private val failure: EmailSaveFailure? = null) : EmailSubmitter {
+        val submitted = mutableListOf<EmailAddress?>()
+
+        override suspend fun submit(email: EmailAddress?) {
+            submitted += email
+            failure?.let { throw EmailSaveException(it) }
+        }
+    }
+
+    @Test
+    fun save_submitsNormalizedEmailStoresItAndAnswersPrompt() = runTest {
+        val stub = StubSubmitter()
+        val store = InMemorySavedEmail()
+        var savedCount = 0
+        val model = EmailSettingsModel(stub, store, onSaved = { savedCount++ })
+        model.onInputChange(" User@Example.com ")
+
+        model.save()
+
+        assertEquals(listOf("user@example.com"), stub.submitted.map { it?.value })
+        assertEquals(EmailSettingsModel.Status.SAVED, model.status)
+        assertEquals("user@example.com", store.savedEmail?.value)
+        assertEquals(store.savedEmail, model.savedEmail)
+        assertFalse(model.showsField)
+        assertEquals(1, savedCount)
+    }
+
+    @Test
+    fun save_withInvalidInput_doesNotSubmitAndShowsHint() = runTest {
+        val stub = StubSubmitter()
+        val model = EmailSettingsModel(stub, InMemorySavedEmail())
+        model.onInputChange("not-an-email")
+        assertFalse(model.canSave)
+        assertFalse(model.showsInvalidHint)
+
+        model.save()
+
+        assertTrue(stub.submitted.isEmpty())
+        assertTrue(model.showsInvalidHint)
+        assertEquals(EmailSettingsModel.Status.IDLE, model.status)
+    }
+
+    @Test
+    fun invalidHint_showsOnlyAfterFieldLosesFocus() {
+        val model = EmailSettingsModel(StubSubmitter(), InMemorySavedEmail())
+        model.onFocusChange(false)
+        model.onInputChange("bad")
+        assertFalse(model.showsInvalidHint)
+
+        model.onFocusChange(true)
+        assertFalse(model.showsInvalidHint)
+        model.onFocusChange(false)
+        assertTrue(model.showsInvalidHint)
+
+        model.onInputChange("")
+        assertFalse(model.showsInvalidHint)
+    }
+
+    @Test
+    fun save_whenServerFails_keepsFailureAndStore() = runTest {
+        val store = InMemorySavedEmail()
+        var savedCount = 0
+        val model =
+            EmailSettingsModel(
+                StubSubmitter(EmailSaveFailure.NETWORK),
+                store,
+                onSaved = { savedCount++ },
+            )
+        model.onInputChange("user@example.com")
+
+        model.save()
+
+        assertEquals(EmailSettingsModel.Status.FAILED, model.status)
+        assertEquals(EmailSaveFailure.NETWORK, model.failure)
+        assertNull(store.savedEmail)
+        assertEquals(0, savedCount)
+
+        model.onInputChange("user@example.co")
+        assertNull(model.failure)
+        assertEquals(EmailSettingsModel.Status.IDLE, model.status)
+    }
+
+    @Test
+    fun startChange_prefillsSavedAddressAndShowsField() {
+        val model =
+            EmailSettingsModel(StubSubmitter(), InMemorySavedEmail(email("old@example.com")))
+        assertFalse(model.showsField)
+
+        model.startChange()
+
+        assertTrue(model.showsField)
+        assertEquals("old@example.com", model.input)
+    }
+
+    @Test
+    fun remove_sendsNullAndClearsStore() = runTest {
+        val stub = StubSubmitter()
+        val store = InMemorySavedEmail(email("old@example.com"))
+        var savedCount = 0
+        val model = EmailSettingsModel(stub, store, onSaved = { savedCount++ })
+
+        model.remove()
+
+        assertEquals(listOf<EmailAddress?>(null), stub.submitted)
+        assertNull(store.savedEmail)
+        assertNull(model.savedEmail)
+        assertTrue(model.showsField)
+        // Removing is not an answer to the prompt, and the field it shows starts fresh.
+        assertEquals(EmailSettingsModel.Status.IDLE, model.status)
+        assertEquals(0, savedCount)
+    }
+
+    // Like the real service: a blocking request on IO that the server finishes even if the caller
+    // is cancelled while it runs.
+    private class BlockingSubmitter : EmailSubmitter {
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+
+        override suspend fun submit(email: EmailAddress?) {
+            withContext(Dispatchers.IO) {
+                started.countDown()
+                release.await()
+            }
+        }
+    }
+
+    @Test
+    fun save_whenSheetClosesMidRequest_stillRecordsTheSavedEmail() = runTest {
+        val service = BlockingSubmitter()
+        val store = InMemorySavedEmail()
+        var savedCount = 0
+        val model = EmailSettingsModel(service, store, onSaved = { savedCount++ })
+        model.onInputChange("user@example.com")
+        val sheetScope = CoroutineScope(Dispatchers.Default)
+
+        val job = sheetScope.launch { model.save() }
+        service.started.await()
+        sheetScope.cancel()
+        service.release.countDown()
+        job.join()
+
+        assertEquals("user@example.com", store.savedEmail?.value)
+        assertEquals(EmailSettingsModel.Status.SAVED, model.status)
+        assertEquals(1, savedCount)
+    }
+
+    @Test
+    fun remove_whenServerRejects_keepsSavedAddress() = runTest {
+        val store = InMemorySavedEmail(email("old@example.com"))
+        val model = EmailSettingsModel(StubSubmitter(EmailSaveFailure.REJECTED), store)
+
+        model.remove()
+
+        assertEquals(EmailSaveFailure.REJECTED, model.failure)
+        assertEquals("old@example.com", store.savedEmail?.value)
+        assertFalse(model.showsField)
+    }
+}
+
+class EmailSaveErrorMessageTest {
+    @Test
+    fun eachFailure_hasItsOwnMessage() {
+        assertEquals(
+            R.string.email_error_wallet_not_ready,
+            EmailSaveFailure.WALLET_NOT_READY.message,
+        )
+        assertEquals(R.string.email_error_network, EmailSaveFailure.NETWORK.message)
+        assertEquals(R.string.email_error_rejected, EmailSaveFailure.REJECTED.message)
+        assertEquals(R.string.email_error_check_clock, EmailSaveFailure.SIGNATURE_REFUSED.message)
+        assertEquals(R.string.email_error_unavailable, EmailSaveFailure.UNAVAILABLE.message)
+    }
+}
+
+class EmailPromptPolicyTest {
+    private fun shows(
+        launches: Int,
+        shown: Int = 0,
+        lastShown: Int = 0,
+        responded: Boolean = false,
+    ) = EmailPromptPolicy.shouldShow(launches, shown, lastShown, responded)
+
+    // Gaps of 3, 9 and 27 launches between showings: launches 3, 12 and 39, then the loop repeats.
+    @Test
+    fun shows_afterGapsOf3_9_27_thenRepeats() {
+        assertFalse(shows(2))
+        assertTrue(shows(3))
+        assertFalse(shows(11, shown = 1, lastShown = 3))
+        assertTrue(shows(12, shown = 1, lastShown = 3))
+        assertFalse(shows(38, shown = 2, lastShown = 12))
+        assertTrue(shows(39, shown = 2, lastShown = 12))
+        assertFalse(shows(41, shown = 3, lastShown = 39))
+        assertTrue(shows(42, shown = 3, lastShown = 39))
+        assertFalse(shows(50, shown = 4, lastShown = 42))
+        assertTrue(shows(51, shown = 4, lastShown = 42))
+        assertTrue(shows(78, shown = 5, lastShown = 51))
+    }
+
+    // A showing that was held back (another sheet open) starts its gap from when it did show.
+    @Test
+    fun delayedShow_countsTheNextGapFromWhenItShowed() {
+        assertFalse(shows(28, shown = 1, lastShown = 20))
+        assertTrue(shows(29, shown = 1, lastShown = 20))
+    }
+
+    private class DueStore(
+        override val launches: Int = 3,
+        override val hasResponded: Boolean = false,
+    ) : EmailPromptStoring {
+        override val timesShown = 0
+        override val lastShownLaunch = 0
+
+        override fun recordLaunchOnce() = Unit
+
+        override fun recordShown() = Unit
+
+        override fun markResponded() = Unit
+    }
+
+    // Home asks right before opening the prompt, so it never opens over another Home sheet.
+    @Test
+    fun home_showsOnlyWhenDueAndNoOtherSheetIsShowing() {
+        assertTrue(EmailPromptPolicy.shouldShowOnHome(DueStore(), otherSheetShowing = false))
+        assertFalse(EmailPromptPolicy.shouldShowOnHome(DueStore(), otherSheetShowing = true))
+        assertFalse(
+            EmailPromptPolicy.shouldShowOnHome(DueStore(launches = 2), otherSheetShowing = false)
+        )
+        assertFalse(
+            EmailPromptPolicy.shouldShowOnHome(
+                DueStore(hasResponded = true),
+                otherSheetShowing = false,
+            )
+        )
+    }
+
+    @Test
+    fun neverShows_afterAnswer() {
+        assertFalse(shows(3, responded = true))
+        assertFalse(shows(9, shown = 1, lastShown = 3, responded = true))
+    }
+}
+
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [35])
+class EmailPromptStoreTest {
+    private fun prefs() =
+        RuntimeEnvironment.getApplication()
+            .getSharedPreferences("email_prompt_test", Context.MODE_PRIVATE)
+            .also { it.edit().clear().commit() }
+
+    @Test
+    fun recordLaunchOnce_countsOncePerProcess() {
+        val prefs = prefs()
+        val store = EmailPromptStore(prefs)
+        store.recordLaunchOnce()
+        store.recordLaunchOnce()
+        assertEquals(1, store.launches)
+
+        EmailPromptStore(prefs).recordLaunchOnce()
+        assertEquals(2, EmailPromptStore(prefs).launches)
+    }
+
+    @Test
+    fun recordShown_countsAndRemembersTheLaunch() {
+        val prefs = prefs()
+        val store = EmailPromptStore(prefs)
+        store.recordLaunchOnce()
+        store.recordShown()
+
+        val reopened = EmailPromptStore(prefs)
+        assertEquals(1, reopened.timesShown)
+        assertEquals(1, reopened.lastShownLaunch)
+    }
+
+    // A restored wallet is a different node: the old address and answers must not carry over.
+    // The restored wallet's own launch counts even though this process already counted one.
+    @Test
+    fun reset_letsThisLaunchCountForTheNewWallet() {
+        val store = EmailPromptStore(prefs())
+        store.recordLaunchOnce()
+        store.reset()
+        store.recordLaunchOnce()
+        assertEquals(1, store.launches)
+    }
+
+    @Test
+    fun reset_clearsEverythingForANewWallet() {
+        val prefs = prefs()
+        val store = EmailPromptStore(prefs)
+        store.recordLaunchOnce()
+        store.recordShown()
+        store.markResponded()
+        store.savedEmail = email("user@example.com")
+        store.lastSignedTs = TS
+
+        store.reset()
+
+        val reopened = EmailPromptStore(prefs)
+        assertEquals(0, reopened.launches)
+        assertEquals(0, reopened.timesShown)
+        assertEquals(0, reopened.lastShownLaunch)
+        assertFalse(reopened.hasResponded)
+        assertNull(reopened.savedEmail)
+        assertEquals(0L, reopened.lastSignedTs)
+    }
+
+    @Test
+    fun lastSignedTs_persists() {
+        val prefs = prefs()
+        EmailPromptStore(prefs).lastSignedTs = TS
+        assertEquals(TS, EmailPromptStore(prefs).lastSignedTs)
+    }
+
+    @Test
+    fun markResponded_persists() {
+        val prefs = prefs()
+        EmailPromptStore(prefs).markResponded()
+        assertTrue(EmailPromptStore(prefs).hasResponded)
+    }
+
+    @Test
+    fun savedEmail_persistsAndClears() {
+        val prefs = prefs()
+        EmailPromptStore(prefs).savedEmail = email("user@example.com")
+        assertEquals("user@example.com", EmailPromptStore(prefs).savedEmail?.value)
+
+        EmailPromptStore(prefs).savedEmail = null
+        assertNull(EmailPromptStore(prefs).savedEmail)
+    }
+}

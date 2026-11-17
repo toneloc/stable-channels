@@ -58,7 +58,7 @@ struct ContentView: View {
             }
 
             // Auth overlay: shown only when locked and biometric is enabled
-            if !appState.isUnlocked && biometricEnabled {
+            if appState.isAppLocked {
                 Color.black
                     .ignoresSafeArea()
                     .overlay {
@@ -94,7 +94,7 @@ struct ContentView: View {
                 Task { @MainActor in
                     // 200ms delay lets .inactive from app switcher/Face ID fully settle first
                     try? await Task.sleep(nanoseconds: 200_000_000)
-                    if !appState.isUnlocked && biometricEnabled && !authFailed && scenePhase == .active {
+                    if appState.isAppLocked && !authFailed && scenePhase == .active {
                         await runAuth()
                     }
                 }

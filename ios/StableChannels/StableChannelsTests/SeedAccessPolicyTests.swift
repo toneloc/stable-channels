@@ -45,6 +45,30 @@ final class SeedAccessPolicyTests: XCTestCase {
         }
         XCTAssertEqual(probe.calls, 2)
     }
+
+    // Locked means App Access is on and this session has not passed it yet; without App Access nothing locks.
+    @MainActor
+    func testAppIsLockedOnlyWhenAppAccessIsOnAndNotYetPassed() async throws {
+        let suiteName = "SeedAccessPolicyTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(seedAccessDefaults: defaults)
+        appState.biometricAuth = AllowingAuth()
+
+        XCTAssertFalse(appState.isAppLocked)
+        defaults.set(true, forKey: Constants.appUnlockEnabledKey)
+        XCTAssertTrue(appState.isAppLocked)
+        _ = await appState.authenticate()
+        XCTAssertFalse(appState.isAppLocked)
+    }
+}
+
+/// Stands in for biometrics and always lets the user in.
+@MainActor
+private final class AllowingAuth: BiometricAuthenticating {
+    func authenticate(reason _: String, allowPasscodeFallback _: Bool) async throws -> Bool {
+        true
+    }
 }
 
 /// Stands in for biometrics: counts prompts and always denies.

@@ -14,6 +14,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.stablechannels.app.AppState
+import com.stablechannels.app.ui.email.rememberEmailSettingsModel
 
 sealed class SettingsRoute(val route: String) {
     object Hub : SettingsRoute("settings_hub")
@@ -37,6 +38,8 @@ sealed class SettingsRoute(val route: String) {
     object PushConnectivity : SettingsRoute("settings_push_connectivity")
 
     object AppAccess : SettingsRoute("settings_app_access")
+
+    object Email : SettingsRoute("settings_email")
 
     object Logs : SettingsRoute("settings_logs")
 
@@ -118,6 +121,11 @@ fun SettingsNavHost(
         composable(SettingsRoute.AppAccess.route) {
             SettingsSubViewScaffold(title = "App Access", navController = navController) {
                 AppAccessView()
+            }
+        }
+        composable(SettingsRoute.Email.route) {
+            SettingsSubViewScaffold(title = "Email", navController = navController) {
+                EmailView(model = rememberEmailSettingsModel(appState.nodeService))
             }
         }
         composable(SettingsRoute.Logs.route) {
