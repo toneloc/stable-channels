@@ -43,12 +43,18 @@ class NodeService(private val context: Context) {
     var channels: List<ChannelDetails> = emptyList()
         private set
 
-    var savedMnemonic: String? = run {
-        // Pre-load saved mnemonic from disk so it's available immediately
-        val file = File(Constants.userDataDir(context), "seed_phrase")
-        if (file.exists()) file.readText().trim().ifEmpty { null } else null
-    }
-        private set
+    private val _savedMnemonic =
+        MutableStateFlow(
+            // Pre-load saved mnemonic from disk so it's available immediately
+            File(Constants.userDataDir(context), "seed_phrase")
+                .takeIf { it.exists() }
+                ?.readText()
+                ?.trim()
+                ?.ifEmpty { null }
+        )
+    val savedMnemonicFlow: StateFlow<String?> = _savedMnemonic.asStateFlow()
+    val savedMnemonic: String?
+        get() = _savedMnemonic.value
 
     /**
      * The 64-byte seed [start] builds the node from: the BIP39 seed of the mnemonic, or a
@@ -160,7 +166,7 @@ class NodeService(private val context: Context) {
             val nodeEntropy =
                 if (words.isNotEmpty()) {
                     seedPhrasePath.writeText(words)
-                    savedMnemonic = words
+                    _savedMnemonic.value = words
                     NodeEntropy.fromBip39Mnemonic(words, null)
                 } else {
                     // Pre-upgrade wallet with only keys_seed: derive entropy from that seed file.
