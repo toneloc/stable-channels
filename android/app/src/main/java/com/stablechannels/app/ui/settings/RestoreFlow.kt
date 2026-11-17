@@ -18,7 +18,7 @@ private val EMPTY_FIELDS = MnemonicInput.toFields(emptyList())
  * the app always drops the typed phrase and closes the sheet, as iOS does; only a restore already
  * applying keeps its spinner, since it holds its own copy of the phrase.
  */
-internal class RestoreFlow {
+internal class RestoreFlow(private val isValidMnemonic: (String) -> Boolean) {
     var isOpen by mutableStateOf(false)
         private set
 
@@ -91,15 +91,22 @@ internal class RestoreFlow {
         if (!isApplying) isOpen = false
     }
 
-    /** The phrase to check for an open channel, or null after setting the word-count error. */
+    /**
+     * The phrase to check for an open channel, or null after setting a word-count or BIP39 error.
+     */
     fun startCheck(): String? {
         if (!MnemonicInput.isValidWordCount(phrase)) {
             error = "Seed phrase must be 12 or 24 words"
             return null
         }
+        val input = MnemonicInput.format(phrase)
+        if (!isValidMnemonic(input)) {
+            error = "Invalid seed words"
+            return null
+        }
         isChecking = true
         error = null
-        return MnemonicInput.format(phrase)
+        return input
     }
 
     /**

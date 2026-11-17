@@ -9,6 +9,7 @@ import com.stablechannels.app.domain.seed.AppLifecyclePhase
 import com.stablechannels.app.domain.seed.SeedAccessPolicy
 import com.stablechannels.app.services.AppAccessPreferencesManager
 import com.stablechannels.app.services.BiometricService
+import com.stablechannels.app.services.NodeService
 import com.stablechannels.app.ui.settings.seed.ObserveSeedLifecyclePhase
 import com.stablechannels.app.ui.settings.seed.RestoreSeedSheet
 import com.stablechannels.app.ui.settings.seed.RevealSecretPhraseDialog
@@ -20,7 +21,7 @@ fun BackupView(appState: AppState) {
     val scope = rememberCoroutineScope()
 
     var showSeedWords by remember { mutableStateOf(false) }
-    val restore = remember { RestoreFlow() }
+    val restore = remember { RestoreFlow(NodeService::isValidMnemonic) }
     // Read after the auth prompt returns, so a reply that lands in background opens nothing.
     var lifecyclePhase by remember { mutableStateOf(AppLifecyclePhase.ACTIVE) }
 
