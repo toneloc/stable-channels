@@ -28,6 +28,12 @@
 //! has not answered it in 10 minutes or its signed splice has not locked in 3 hours. Every try is
 //! written to the log as `Splice attempted Try N: ...`. Only a lock, the channel closing, or the
 //! operator ends it.
+//!
+//! The phone is not pushed for a try that only the LSP can make go through. While the on-chain
+//! wallet is short the try fails without a push, and the next one on the schedule pushes again once
+//! the wallet is funded. Once the node has refused the call and the row has failed five tries, the
+//! phone is no longer pushed for it; a call still goes out on the schedule whenever the phone is
+//! online, and a try that fails any other way is pushed for again.
 
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
@@ -75,8 +81,12 @@ const RETRY_JITTER_PERCENT: (u64, u64) = (10, 20);
 const NEGOTIATION_FAILED_ERROR: &str = "the splice negotiation failed";
 /// How long after a failure event a negotiation on the channel may still be that call's (see [`NEGOTIATION_FAILED_ERROR`]). The shortest retry gap is longer, so no retry can have gone out inside it.
 pub(crate) const REVIVE_WINDOW_SECS: i64 = 120;
-/// Failed tries written to the ledger; later ones go to the log only, so a phone that stays away for weeks does not fill the ledger.
+/// Failed tries written to the ledger; later ones go to the log only, so a phone that stays away for weeks does not fill the ledger. Also the tries after which a node that refuses the call no longer has the phone pushed for it.
 pub(crate) const LEDGER_FAILED_TRIES: u32 = 5;
+/// What a refused call records on the row, ahead of the node's own message.
+const REFUSAL_PREFIX: &str = "splice_in: ";
+/// The card's note for a row the node keeps refusing; see [`refused_by_node`].
+const REFUSED_NOTE: &str = "the node refused the last call, so the phone is no longer pushed for this request; a call still goes out on the schedule whenever the phone is online. Cancel and queue again to push it again";
 /// On-chain sats kept above the amount for the splice transaction's fee.
 pub(crate) const FEE_HEADROOM_SATS: u64 = 5_000;
 /// Bound on one node call, so a stalled call costs one pass and not the whole job.
@@ -621,7 +631,7 @@ async fn lock_if_shown(db: &Database, ldk: &dyn LdkServerCalls, row: &QueuedSpli
     LockCheck::Locked
 }
 
-/// Push the phone before anything else, so the app can hold its node; when no push can go out now and the phone is online anyway, splice while it is here.
+/// Push the phone before anything else, so the app can hold its node; when no push can go out now and the phone is online anyway, splice while it is here. A try that only the LSP can make go through is not pushed for: a short wallet fails it at once, and a node that keeps refusing the call gets it only when the phone is online by itself. Either way the schedule goes on.
 async fn wake_or_splice(
     db: &Database,
     ldk: &dyn LdkServerCalls,
@@ -631,6 +641,24 @@ async fn wake_or_splice(
     now: i64,
     clock: &(dyn Fn() -> i64 + Sync),
 ) {
+    match wallet_shortfall(ldk, row.amount_sats).await {
+        Ok(None) => {}
+        Ok(Some(short)) => {
+            fail(db, row, &format!("{short}; the phone is not pushed until it is funded"), now);
+            return;
+        }
+        Err(()) => {
+            note_no_push(db, row, "the node could not report its on-chain balance; no push or call until it does", now);
+            return;
+        }
+    }
+    if refused_by_node(row) {
+        note_no_push(db, row, REFUSED_NOTE, now);
+        if channel.is_usable {
+            start_splice(db, ldk, row, channel, now, false).await;
+        }
+        return;
+    }
     if send_push(db, push, row, now).await {
         info!(
             "[queued_splice] Splice attempted Try {}: pushed the phone for {} sats on {}; splicing once it is online",
@@ -693,13 +721,41 @@ async fn send_push(db: &Database, push: &Arc<Mutex<PushService>>, row: &QueuedSp
     } else {
         "the push provider did not accept the push"
     };
+    note_no_push(db, row, note, now);
+    false
+}
+
+/// Note on the row why no push went out, and log it when the reason changes.
+fn note_no_push(db: &Database, row: &QueuedSplice, note: &str, now: i64) {
     if row.wake_note.as_deref() != Some(note) {
         info!("[queued_splice] Splice attempted Try {}: no push for {}: {}", try_number(row), row.user_channel_id, note);
     }
     if let Err(error) = db.note_queued_splice_wake_issue(&row.user_channel_id, row.request_id, note, now) {
         db_failed("note_queued_splice_wake_issue", &row.user_channel_id, error);
     }
-    false
+}
+
+/// Whether the node has refused the row's call often enough that the phone is no longer pushed for it: the row has failed [`LEDGER_FAILED_TRIES`] tries, and the node refused the last one. Only the LSP's operator can change what the node refuses, so waking the phone every hour would not help. A call still goes out on the schedule whenever the phone is online, and once a try fails any other way, the next one is pushed for again.
+fn refused_by_node(row: &QueuedSplice) -> bool {
+    row.attempts >= LEDGER_FAILED_TRIES && row.last_error.as_deref().is_some_and(|error| error.starts_with(REFUSAL_PREFIX))
+}
+
+/// Why the on-chain wallet cannot fund a splice-in of `amount_sats` now, or None when it can. Err when the node could not say, which is not a try: the next pass asks again.
+async fn wallet_shortfall(ldk: &dyn LdkServerCalls, amount_sats: u64) -> Result<Option<String>, ()> {
+    let spendable = match timeout(rpc_timeout(), ldk.get_balances(GetBalancesRequest {})).await {
+        Ok(Ok(balances)) => balances.spendable_onchain_balance_sats,
+        Ok(Err(error)) => {
+            warn!("[queued_splice] get_balances failed: {}", error);
+            return Err(());
+        }
+        Err(_) => {
+            warn!("[queued_splice] get_balances timed out");
+            return Err(());
+        }
+    };
+    Ok(funding_shortfall_sats(spendable, amount_sats).map(|shortfall| {
+        format!("the on-chain wallet is {shortfall} sats short: {spendable} spendable, {} needed", amount_sats.saturating_add(FEE_HEADROOM_SATS))
+    }))
 }
 
 /// Make the splice-in call for a row with no call pending, on a channel that is usable.
@@ -749,26 +805,14 @@ async fn start_splice(
     } else {
         channel
     };
-    let spendable = match timeout(rpc_timeout(), ldk.get_balances(GetBalancesRequest {})).await {
-        Ok(Ok(balances)) => balances.spendable_onchain_balance_sats,
+    match wallet_shortfall(ldk, row.amount_sats).await {
+        Ok(None) => {}
+        Ok(Some(short)) => {
+            fail(db, row, &short, now);
+            return;
+        }
         // Not an attempt: the next pass asks again.
-        Ok(Err(error)) => {
-            warn!("[queued_splice] get_balances failed: {}", error);
-            return;
-        }
-        Err(_) => {
-            warn!("[queued_splice] get_balances timed out");
-            return;
-        }
-    };
-    if let Some(shortfall) = funding_shortfall_sats(spendable, row.amount_sats) {
-        fail(
-            db,
-            row,
-            &format!("the on-chain wallet is {shortfall} sats short: {spendable} spendable, {} needed", row.amount_sats.saturating_add(FEE_HEADROOM_SATS)),
-            now,
-        );
-        return;
+        Err(()) => return,
     }
     let current_txo = channel_funding_txo(channel);
     let lsp_before = lsp_side_sats(channel);
@@ -819,7 +863,7 @@ async fn start_splice(
             warn!("[queued_splice] splice_in answer lost for {}: {}", attempt.user_channel_id, error);
         }
         // The node refused, so nothing went to the phone.
-        Ok(Err(error)) => record_refusal(db, &attempt, &format!("splice_in: {}", error.message), now),
+        Ok(Err(error)) => record_refusal(db, &attempt, &format!("{REFUSAL_PREFIX}{}", error.message), now),
         Err(_) => warn!("[queued_splice] splice_in timed out for {}; waiting for the node's events", attempt.user_channel_id),
     }
 }
@@ -1900,6 +1944,104 @@ mod tests {
         assert_eq!((failed.status.as_str(), failed.attempts, failed.pending_on_node), ("failed", 1, false));
         assert!(failed.last_error.unwrap().contains("1 sats short"));
         capture();
+    }
+
+    #[tokio::test]
+    async fn a_short_wallet_is_not_pushed_for_and_the_phone_is_pushed_again_once_it_is_funded() {
+        let _guard = guard();
+        let db = database();
+        let ldk = node(false);
+        ldk.spendable_onchain_sats.store(AMOUNT_SATS, Ordering::SeqCst);
+        let dir = tempfile::tempdir().unwrap();
+        let sender = FakeSender::new(true);
+        let push = service(sender.clone(), dir.path(), &[COUNTERPARTY_HEX]);
+        queued(&db, 100);
+
+        // Every try on the schedule fails at once while the wallet is short, and none pushes the phone.
+        let mut now = 100;
+        for attempt in 1..=LEDGER_FAILED_TRIES + 2 {
+            pass(&db, &ldk, &push, now).await;
+            let failed = row(&db);
+            assert_eq!((failed.status.as_str(), failed.attempts), ("failed", attempt));
+            let error = failed.last_error.clone().unwrap();
+            assert!(error.contains(&format!("{FEE_HEADROOM_SATS} sats short")) && error.ends_with("the phone is not pushed until it is funded"), "{error}");
+            now = next_try_at(&failed);
+        }
+        assert!(sender.sent().is_empty(), "no push while only the LSP can make the try go through");
+        assert!(ldk.splice_ins.lock().unwrap().is_empty());
+
+        // The operator funds the wallet: the next try on the schedule pushes the phone again.
+        ldk.spendable_onchain_sats.store(FUNDED_SATS, Ordering::SeqCst);
+        pass(&db, &ldk, &push, now - 1).await;
+        assert!(sender.sent().is_empty(), "not before the try is due");
+        pass(&db, &ldk, &push, now).await;
+        assert_eq!(sender.sent(), vec![(COUNTERPARTY_HEX.to_string(), LSP_SPLICE_IN_DIRECTION.to_string())]);
+        assert_eq!(row(&db).status, "waking");
+    }
+
+    #[tokio::test]
+    async fn a_node_that_keeps_refusing_stops_the_pushes_but_not_the_tries() {
+        let _guard = guard();
+        let db = database();
+        let ldk = node(true);
+        *ldk.splice_in_error.lock().unwrap() = Some((LdkServerErrorCode::LightningError, "insufficient funds".into()));
+        let dir = tempfile::tempdir().unwrap();
+        let sender = FakeSender::new(true);
+        let push = service(sender.clone(), dir.path(), &[COUNTERPARTY_HEX]);
+        queued(&db, 100);
+
+        // Each of the first tries pushes the phone, which comes online, and the node refuses the call.
+        let mut now = 100;
+        for attempt in 1..=LEDGER_FAILED_TRIES {
+            push.lock().await.forget_cooldowns();
+            pass(&db, &ldk, &push, now).await;
+            assert_eq!(row(&db).status, "waking");
+            pass(&db, &ldk, &push, now + WAKE_GRACE_SECS).await;
+            let refused = row(&db);
+            assert_eq!((refused.status.as_str(), refused.attempts, refused.last_attempt_at), ("failed", attempt, Some(now + WAKE_GRACE_SECS)));
+            assert!(refused.last_error.as_deref().unwrap().starts_with(REFUSAL_PREFIX));
+            now = next_try_at(&refused);
+        }
+        assert_eq!(sender.sent().len(), LEDGER_FAILED_TRIES as usize);
+
+        // From then on the phone is not pushed, but each try still calls while it is online.
+        push.lock().await.forget_cooldowns();
+        pass(&db, &ldk, &push, now).await;
+        let refused = row(&db);
+        assert_eq!((refused.status.as_str(), refused.attempts, refused.last_attempt_at), ("failed", LEDGER_FAILED_TRIES + 1, Some(now)), "called and refused");
+        assert_eq!(sender.sent().len(), LEDGER_FAILED_TRIES as usize);
+
+        // While the phone is away, the due try waits for it with the reason on the card, for as long as it takes.
+        *ldk.channels.lock().unwrap() = vec![channel(false, TX_A, 0)];
+        now = next_try_at(&refused);
+        push.lock().await.forget_cooldowns();
+        pass(&db, &ldk, &push, now).await;
+        pass(&db, &ldk, &push, now + 86_400).await;
+        let waiting = row(&db);
+        assert_eq!(
+            (waiting.status.as_str(), waiting.attempts, waiting.wake_note.as_deref()),
+            ("failed", LEDGER_FAILED_TRIES + 1, Some(REFUSED_NOTE))
+        );
+        assert_eq!(sender.sent().len(), LEDGER_FAILED_TRIES as usize, "no push for a node that keeps refusing");
+
+        // The phone comes online by itself, and the node now takes the call.
+        *ldk.splice_in_error.lock().unwrap() = None;
+        *ldk.channels.lock().unwrap() = vec![channel(true, TX_A, 0)];
+        stable_channels::audit::enable_test_capture();
+        pass(&db, &ldk, &push, now + 86_405).await;
+        assert_eq!((row(&db).status.as_str(), row(&db).pending_on_node), ("splicing", true));
+        let events = capture();
+        assert_eq!(names(&events), ["QUEUED_SPLICE_STARTED"]);
+        assert_eq!(events[0].1["pushed"], false);
+
+        // The negotiation then fails, which is not the node refusing, so the next try is pushed for again.
+        on_splice_negotiation_failed(&db, USER_CHANNEL_ID_DECIMAL, now + 86_406);
+        let failed = row(&db);
+        assert_eq!(failed.last_error.as_deref(), Some(NEGOTIATION_FAILED_ERROR));
+        push.lock().await.forget_cooldowns();
+        pass(&db, &ldk, &push, next_try_at(&failed)).await;
+        assert_eq!(sender.sent().len(), LEDGER_FAILED_TRIES as usize + 1);
+        assert_eq!(row(&db).status, "waking");
     }
 
     #[tokio::test]
