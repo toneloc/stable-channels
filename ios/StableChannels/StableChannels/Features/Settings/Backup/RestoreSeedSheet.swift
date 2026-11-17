@@ -246,6 +246,10 @@ struct RestoreSeedSheet: View {
             // Guard couldn't run — fail-warn instead of silently proceeding.
             isRestoring = false
             showGuardUnavailableConfirm = true
+        } catch AppState.WalletRestoreError.interrupted {
+            // The typed words stay so the user can restore again.
+            restoreError = String(localized: "error_restore_interrupted")
+            isRestoring = false
         } catch {
             restoreError = String(localized: "error_restore_failed") + error.localizedDescription
             isRestoring = false

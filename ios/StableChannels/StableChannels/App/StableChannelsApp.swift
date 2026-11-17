@@ -123,9 +123,10 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             return
         }
 
-        // Suppress foreground banners for payment notifications (handled via in-app UI)
+        // Suppress foreground banners for payment notifications (handled via in-app UI), and for
+        // the LSP's splice push: the open app's node takes part in the splice itself.
         if let type = content.userInfo["notification_type"] as? String,
-           type.hasPrefix("payment") {
+           type.hasPrefix("payment") || type == LspSpliceNotice.notificationType {
             print("[Push] Suppressing foreground banner for \(type) notification")
             completionHandler([])
             return

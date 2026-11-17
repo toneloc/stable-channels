@@ -318,8 +318,9 @@ final class OfflineHandlingTests: XCTestCase {
         let appState = AppState(networkMonitor: mockMonitor)
         appState.isRetryingConnection = true
 
-        await appState.retryConnection()
+        let ran = await appState.retryConnection()
 
+        XCTAssertFalse(ran, "A turned-away retry reports it did not run, so it spends no retry budget")
         XCTAssertFalse(appState.hasCompletedInitialSync, "retryConnection must no-op when already retrying")
     }
 }

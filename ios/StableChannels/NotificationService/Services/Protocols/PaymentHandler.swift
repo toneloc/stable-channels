@@ -49,13 +49,19 @@ extension PaymentHandler {
 
 /// Factory to create the appropriate handler for a direction
 enum PaymentHandlerFactory {
-    /// `syncGate` carries the user_to_lsp chain-freshness wait context (see #243);
-    /// the other directions ignore it.
-    static func handler(for direction: PaymentDirection, syncGate: StabilitySyncGate? = nil) -> PaymentHandler {
+    /// `syncGate` carries the user_to_lsp chain-freshness wait context (see #243), and the
+    /// lsp_splice_in wait's deadline; the other directions ignore it. `channelsAtStart` is the
+    /// node's channel list before it connected, for the lsp_splice_in wait.
+    static func handler(
+        for direction: PaymentDirection,
+        syncGate: StabilitySyncGate? = nil,
+        channelsAtStart: [ChannelDetails]? = nil
+    ) -> PaymentHandler {
         switch direction {
         case .lspToUser: return LSPToUserHandler()
         case .incomingPayment: return IncomingPaymentHandler()
         case .userToLsp: return UserToLSPHandler(syncGate: syncGate)
+        case .lspSpliceIn: return LSPSpliceInHandler(window: syncGate, channelsAtStart: channelsAtStart)
         }
     }
 }

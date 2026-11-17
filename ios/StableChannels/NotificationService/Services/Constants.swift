@@ -10,6 +10,16 @@ enum Constants {
     static let satsInBTC = BitcoinUnits.satsPerBTC
     static let primaryChainURL = "https://blockstream.info/api"
     static let fallbackChainURL = "https://mempool.space/api"
+    static let esploraChainURLs: [String] = [primaryChainURL, fallbackChainURL]
+    /// A main-app heartbeat newer than this means the app is live and owns the node.
+    static let mainAppActiveWindowSecs: TimeInterval = 10
+
+    // Esplora sync config for the extension's node.
+    static let onchainWalletSyncIntervalSecs: UInt64 = 600
+    static let lightningWalletSyncIntervalSecs: UInt64 = 600
+    static let feeRateCacheUpdateIntervalSecs: UInt64 = 3600
+    // 6s rather than the app's 8s on purpose: the extension's run is short, so a stalled provider fails over sooner.
+    static let feeRateCacheUpdateTimeoutSecs: UInt64 = 6
 }
 
 enum Diagnostics {

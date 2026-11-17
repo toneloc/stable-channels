@@ -12,6 +12,7 @@ use axum::response::Response;
 
 use ldk_server_client::ldk_server_grpc::api::ListChannelsRequest;
 
+use crate::handlers::is_valid_node_id;
 use crate::stable_manager::LdkServerCalls;
 use crate::state::AppState;
 
@@ -26,13 +27,6 @@ fn json_response(status: axum::http::StatusCode, body: String) -> Response {
         .header("content-type", "application/json")
         .body(axum::body::Body::from(body))
         .unwrap()
-}
-
-/// Returns whether the node_id is a valid 33-byte compressed pubkey hex string.
-pub fn is_valid_node_id(node_id: &str) -> bool {
-    node_id.len() == 66
-        && node_id.chars().all(|c| c.is_ascii_hexdigit())
-        && (node_id.starts_with("02") || node_id.starts_with("03"))
 }
 
 pub async fn channel_exists(State(state): State<AppState>, body: Bytes) -> Response {
