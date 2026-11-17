@@ -21,12 +21,15 @@ internal object RevealColors {
     val veil: Color
         @Composable get() = groupedBackground.copy(alpha = 0.55f)
 
-    // iOS systemGroupedBackground and secondarySystemGroupedBackground; the theme has no match.
+    // iOS systemGroupedBackground, its secondary and tertiary levels; the theme has no match.
     val groupedBackground: Color
         @Composable get() = if (LocalDarkTheme.current) Color(0xFF000000) else Color(0xFFF2F2F7)
 
     val secondaryGroupedBackground: Color
         @Composable get() = if (LocalDarkTheme.current) Color(0xFF1C1C1E) else Color(0xFFFFFFFF)
+
+    val tertiaryGroupedBackground: Color
+        @Composable get() = if (LocalDarkTheme.current) Color(0xFF2C2C2E) else Color(0xFFF2F2F7)
 
     // iOS systemGreen, systemRed, systemOrange and systemBlue.
     val green: Color
