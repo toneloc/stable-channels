@@ -21,7 +21,7 @@ internal class RestoreCheck(val phrase: String)
  * the app always drops the typed phrase and closes the sheet, as iOS does; only a restore already
  * applying keeps its spinner, since it holds its own copy of the phrase.
  */
-internal class RestoreFlow {
+internal class RestoreFlow(private val isValidMnemonic: (String) -> Boolean) {
     var isOpen by mutableStateOf(false)
         private set
 
@@ -97,7 +97,7 @@ internal class RestoreFlow {
         if (!isApplying) isOpen = false
     }
 
-    /** The check to run for an open channel, or null after setting the word-count error. */
+    /** The check to run for an open channel, or null after setting a word-count or BIP39 error. */
     fun startCheck(): RestoreCheck? {
         // A second tap while a check runs would ask the LSP twice.
         if (isBusy) return null
@@ -105,8 +105,13 @@ internal class RestoreFlow {
             error = "Seed phrase must be 12 or 24 words"
             return null
         }
+        val input = MnemonicInput.format(phrase)
+        if (!isValidMnemonic(input)) {
+            error = "Invalid seed words"
+            return null
+        }
         error = null
-        return RestoreCheck(MnemonicInput.format(phrase)).also { activeCheck = it }
+        return RestoreCheck(input).also { activeCheck = it }
     }
 
     /**

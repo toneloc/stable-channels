@@ -11,7 +11,7 @@ private val PHRASE = "abandon ".repeat(11) + "about"
 class RestoreFlowTest {
 
     private fun checking(): Pair<RestoreFlow, RestoreCheck> {
-        val flow = RestoreFlow()
+        val flow = RestoreFlow { true }
         flow.open()
         flow.onPhraseChanged(PHRASE)
         return flow to flow.startCheck()!!
@@ -75,7 +75,7 @@ class RestoreFlowTest {
 
     @Test
     fun `a blank phrase never starts a restore`() {
-        val flow = RestoreFlow()
+        val flow = RestoreFlow { true }
         assertFalse(flow.startApply(""))
         assertFalse(flow.startApply("   "))
         assertFalse(flow.isBusy)
@@ -83,7 +83,7 @@ class RestoreFlowTest {
 
     @Test
     fun `only 12 or 24 words start the check`() {
-        val flow = RestoreFlow()
+        val flow = RestoreFlow { true }
         flow.onPhraseChanged("abandon about")
         assertNull(flow.startCheck())
         assertEquals("Seed phrase must be 12 or 24 words", flow.error)
@@ -91,8 +91,18 @@ class RestoreFlowTest {
     }
 
     @Test
+    fun `a phrase that fails BIP39 stops at a clear error before the channel check`() {
+        val flow = RestoreFlow { it != PHRASE }
+        flow.onPhraseChanged(PHRASE)
+        assertNull(flow.startCheck())
+        assertEquals("Invalid seed words", flow.error)
+        assertFalse(flow.isBusy)
+        assertNull(flow.warning)
+    }
+
+    @Test
     fun `typing the phrase fills the word cells and locks them`() {
-        val flow = RestoreFlow()
+        val flow = RestoreFlow { true }
         flow.onPhraseChanged(" Abandon  about ")
         assertEquals(listOf("abandon", "about") + List(22) { "" }, flow.wordFields)
         assertTrue(flow.isWordFieldsReadOnly)
@@ -100,7 +110,7 @@ class RestoreFlowTest {
 
     @Test
     fun `editing a cell rebuilds the phrase and keeps the cells editable`() {
-        val flow = RestoreFlow()
+        val flow = RestoreFlow { true }
         flow.onWordChanged(0, "abandon")
         flow.onWordChanged(2, " about\n")
         assertEquals("abandon about", flow.phrase)
@@ -110,7 +120,7 @@ class RestoreFlowTest {
 
     @Test
     fun `a phrase pasted into one cell spreads across the cells from there`() {
-        val flow = RestoreFlow()
+        val flow = RestoreFlow { true }
         flow.onWordChanged(0, "zoo")
         flow.onWordChanged(1, " Abandon ability\nable ")
         assertEquals(listOf("zoo", "abandon", "ability", "able", ""), flow.wordFields.take(5))
@@ -123,7 +133,7 @@ class RestoreFlowTest {
 
     @Test
     fun `clearing the phrase unlocks the word cells`() {
-        val flow = RestoreFlow()
+        val flow = RestoreFlow { true }
         flow.onPhraseChanged(PHRASE)
         flow.onPhraseChanged("")
         assertFalse(flow.isWordFieldsReadOnly)
@@ -131,7 +141,7 @@ class RestoreFlowTest {
 
     @Test
     fun `a numbered paste shows the format error`() {
-        val flow = RestoreFlow()
+        val flow = RestoreFlow { true }
         assertNull(flow.formatError)
         flow.onPhraseChanged(
             PHRASE.split(" ").mapIndexed { i, w -> "${i + 1}. $w" }.joinToString(" ")
@@ -144,7 +154,7 @@ class RestoreFlowTest {
 
     @Test
     fun `restore is allowed only with 12 or 24 letter-only words and nothing running`() {
-        val flow = RestoreFlow()
+        val flow = RestoreFlow { true }
         flow.onPhraseChanged("abandon about")
         assertFalse(flow.canRestore)
         flow.onPhraseChanged(PHRASE)
@@ -158,7 +168,7 @@ class RestoreFlowTest {
 
     @Test
     fun `the check uses the normalized phrase and still matches it`() {
-        val flow = RestoreFlow()
+        val flow = RestoreFlow { true }
         flow.onPhraseChanged("  " + PHRASE.uppercase().replace(" ", "\n "))
         val check = flow.startCheck()!!
         assertEquals(PHRASE, check.phrase)
@@ -167,7 +177,7 @@ class RestoreFlowTest {
 
     @Test
     fun `leaving the app or closing clears the word cells`() {
-        val flow = RestoreFlow()
+        val flow = RestoreFlow { true }
         flow.open()
         flow.onPhraseChanged(PHRASE)
         flow.onBackground()

@@ -31,7 +31,7 @@ class RestoreSeedFormTest {
 
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
 
-    private val restore = RestoreFlow()
+    private val restore = RestoreFlow { true }
     private var restores = 0
 
     private fun showForm() {
