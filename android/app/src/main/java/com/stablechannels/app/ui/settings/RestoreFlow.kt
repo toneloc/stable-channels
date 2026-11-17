@@ -3,6 +3,7 @@ package com.stablechannels.app.ui.settings
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.stablechannels.app.domain.seed.MnemonicInput
 
 /** Which warning the restore guard shows before a seed-only restore. */
 internal enum class RestoreWarning {
@@ -10,12 +11,14 @@ internal enum class RestoreWarning {
     UNVERIFIED,
 }
 
+private val EMPTY_FIELDS = MnemonicInput.toFields(emptyList())
+
 /** One channel check of [phrase]. Compared by identity, so two checks of the same phrase differ. */
 internal class RestoreCheck(val phrase: String)
 
 /**
- * The restore dialogs' state, kept out of the view so the background races test without UI. Leaving
- * the app always drops the typed phrase and closes the dialogs, as iOS does; only a restore already
+ * The restore sheet's state, kept out of the view so the background races test without UI. Leaving
+ * the app always drops the typed phrase and closes the sheet, as iOS does; only a restore already
  * applying keeps its spinner, since it holds its own copy of the phrase.
  */
 internal class RestoreFlow {
@@ -23,6 +26,15 @@ internal class RestoreFlow {
         private set
 
     var phrase by mutableStateOf("")
+        private set
+
+    var wordFields by mutableStateOf(EMPTY_FIELDS)
+        private set
+
+    /** The cells mirror a non-empty phrase read-only; typing in a cell keeps them editable. */
+    var isWordFieldsReadOnly by mutableStateOf(false)
+        private set
+
     var error by mutableStateOf<String?>(null)
         private set
 
@@ -37,20 +49,48 @@ internal class RestoreFlow {
     val isBusy: Boolean
         get() = activeCheck != null || isApplying
 
+    val canRestore: Boolean
+        get() =
+            !isBusy &&
+                MnemonicInput.isComplete(wordFields) &&
+                MnemonicInput.hasValidCharacterFormat(phrase)
+
+    /** Shown while the words hold more than letters, e.g. a numbered paste ("1. abandon"). */
+    val formatError: String?
+        get() =
+            if (phrase.isBlank() || MnemonicInput.hasValidCharacterFormat(phrase)) null
+            else "Enter only the words, without numbers or punctuation"
+
     fun open() {
         isOpen = true
+    }
+
+    fun onPhraseChanged(text: String) {
+        phrase = text
+        wordFields = MnemonicInput.toFields(MnemonicInput.parse(text))
+        isWordFieldsReadOnly = text.isNotEmpty()
+    }
+
+    /** A phrase pasted into one cell spreads across the cells from that cell on, as on iOS. */
+    fun onWordChanged(index: Int, word: String) {
+        val pasted = MnemonicInput.parse(word)
+        wordFields =
+            if (pasted.size > 1) MnemonicInput.toFields(wordFields.take(index) + pasted)
+            else wordFields.toMutableList().also { it[index] = word.filterNot(Char::isWhitespace) }
+        phrase = MnemonicInput.fromFields(wordFields)
+        isWordFieldsReadOnly = false
     }
 
     fun close() {
         if (isBusy) return
         isOpen = false
-        phrase = ""
+        clearPhrase()
         error = null
         warnedCheck = null
     }
 
     fun onBackground() {
-        phrase = ""
+        clearPhrase()
         error = null
         dismissWarning()
         activeCheck = null
@@ -61,14 +101,12 @@ internal class RestoreFlow {
     fun startCheck(): RestoreCheck? {
         // A second tap while a check runs would ask the LSP twice.
         if (isBusy) return null
-        val input = phrase.trim()
-        val words = input.split("\\s+".toRegex()).size
-        if (words != 12 && words != 24) {
+        if (!MnemonicInput.isValidWordCount(phrase)) {
             error = "Seed phrase must be 12 or 24 words"
             return null
         }
         error = null
-        return RestoreCheck(input).also { activeCheck = it }
+        return RestoreCheck(MnemonicInput.format(phrase)).also { activeCheck = it }
     }
 
     /**
@@ -85,7 +123,7 @@ internal class RestoreFlow {
         if (check !== activeCheck) return null
         activeCheck = null
         // The phrase was edited during the check: the answer is for other words, so nothing opens.
-        if (phrase.trim() != check.phrase) return null
+        if (MnemonicInput.format(phrase) != check.phrase) return null
         return when (channelExists) {
             false -> check.phrase
             true -> null.also { warn(RestoreWarning.OPEN_CHANNEL, check, onWarning) }
@@ -127,5 +165,11 @@ internal class RestoreFlow {
     fun onApplyFailed(message: String) {
         isApplying = false
         error = message
+    }
+
+    private fun clearPhrase() {
+        phrase = ""
+        wordFields = EMPTY_FIELDS
+        isWordFieldsReadOnly = false
     }
 }

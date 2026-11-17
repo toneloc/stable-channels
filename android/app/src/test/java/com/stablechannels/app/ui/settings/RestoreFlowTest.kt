@@ -13,7 +13,7 @@ class RestoreFlowTest {
     private fun checking(): Pair<RestoreFlow, RestoreCheck> {
         val flow = RestoreFlow()
         flow.open()
-        flow.phrase = PHRASE
+        flow.onPhraseChanged(PHRASE)
         return flow to flow.startCheck()!!
     }
 
@@ -84,10 +84,101 @@ class RestoreFlowTest {
     @Test
     fun `only 12 or 24 words start the check`() {
         val flow = RestoreFlow()
-        flow.phrase = "abandon about"
+        flow.onPhraseChanged("abandon about")
         assertNull(flow.startCheck())
         assertEquals("Seed phrase must be 12 or 24 words", flow.error)
         assertFalse(flow.isBusy)
+    }
+
+    @Test
+    fun `typing the phrase fills the word cells and locks them`() {
+        val flow = RestoreFlow()
+        flow.onPhraseChanged(" Abandon  about ")
+        assertEquals(listOf("abandon", "about") + List(22) { "" }, flow.wordFields)
+        assertTrue(flow.isWordFieldsReadOnly)
+    }
+
+    @Test
+    fun `editing a cell rebuilds the phrase and keeps the cells editable`() {
+        val flow = RestoreFlow()
+        flow.onWordChanged(0, "abandon")
+        flow.onWordChanged(2, " about\n")
+        assertEquals("abandon about", flow.phrase)
+        assertEquals(listOf("abandon", "", "about"), flow.wordFields.take(3))
+        assertFalse(flow.isWordFieldsReadOnly)
+    }
+
+    @Test
+    fun `a phrase pasted into one cell spreads across the cells from there`() {
+        val flow = RestoreFlow()
+        flow.onWordChanged(0, "zoo")
+        flow.onWordChanged(1, " Abandon ability\nable ")
+        assertEquals(listOf("zoo", "abandon", "ability", "able", ""), flow.wordFields.take(5))
+        assertEquals("zoo abandon ability able", flow.phrase)
+
+        flow.onWordChanged(0, PHRASE)
+        assertEquals(PHRASE, flow.phrase)
+        assertEquals(12, flow.wordFields.count { it.isNotEmpty() })
+    }
+
+    @Test
+    fun `clearing the phrase unlocks the word cells`() {
+        val flow = RestoreFlow()
+        flow.onPhraseChanged(PHRASE)
+        flow.onPhraseChanged("")
+        assertFalse(flow.isWordFieldsReadOnly)
+    }
+
+    @Test
+    fun `a numbered paste shows the format error`() {
+        val flow = RestoreFlow()
+        assertNull(flow.formatError)
+        flow.onPhraseChanged(
+            PHRASE.split(" ").mapIndexed { i, w -> "${i + 1}. $w" }.joinToString(" ")
+        )
+        assertFalse(flow.canRestore)
+        assertEquals("Enter only the words, without numbers or punctuation", flow.formatError)
+        flow.onPhraseChanged(PHRASE)
+        assertNull(flow.formatError)
+    }
+
+    @Test
+    fun `restore is allowed only with 12 or 24 letter-only words and nothing running`() {
+        val flow = RestoreFlow()
+        flow.onPhraseChanged("abandon about")
+        assertFalse(flow.canRestore)
+        flow.onPhraseChanged(PHRASE)
+        assertTrue(flow.canRestore)
+        flow.onPhraseChanged(PHRASE.replace("about", "ab0ut"))
+        assertFalse(flow.canRestore)
+        flow.onPhraseChanged(PHRASE)
+        flow.startCheck()
+        assertFalse(flow.canRestore)
+    }
+
+    @Test
+    fun `the check uses the normalized phrase and still matches it`() {
+        val flow = RestoreFlow()
+        flow.onPhraseChanged("  " + PHRASE.uppercase().replace(" ", "\n "))
+        val check = flow.startCheck()!!
+        assertEquals(PHRASE, check.phrase)
+        assertEquals(PHRASE, flow.onChecked(check, channelExists = false))
+    }
+
+    @Test
+    fun `leaving the app or closing clears the word cells`() {
+        val flow = RestoreFlow()
+        flow.open()
+        flow.onPhraseChanged(PHRASE)
+        flow.onBackground()
+        assertTrue(flow.wordFields.all { it.isEmpty() })
+        assertFalse(flow.isWordFieldsReadOnly)
+
+        flow.open()
+        flow.onWordChanged(0, "abandon")
+        flow.close()
+        assertTrue(flow.wordFields.all { it.isEmpty() })
+        assertEquals("", flow.phrase)
     }
 
     /** Check A, leave the app, come back with the same phrase and start check B. */
@@ -95,7 +186,7 @@ class RestoreFlowTest {
         val (flow, checkA) = checking()
         flow.onBackground()
         flow.open()
-        flow.phrase = PHRASE
+        flow.onPhraseChanged(PHRASE)
         return Triple(flow, checkA, flow.startCheck()!!)
     }
 
@@ -132,7 +223,7 @@ class RestoreFlowTest {
         val (flow, check) = checking()
         assertNull(flow.onChecked(check, channelExists = true))
 
-        flow.phrase = OTHER_PHRASE
+        flow.onPhraseChanged(OTHER_PHRASE)
 
         assertEquals(PHRASE, flow.confirmWarning())
     }
@@ -150,7 +241,7 @@ class RestoreFlowTest {
     @Test
     fun `a check whose phrase was edited ends without restoring or warning`() {
         val (flow, check) = checking()
-        flow.phrase = OTHER_PHRASE
+        flow.onPhraseChanged(OTHER_PHRASE)
 
         assertNull(flow.onChecked(check, channelExists = false))
         assertNull(flow.warning)
