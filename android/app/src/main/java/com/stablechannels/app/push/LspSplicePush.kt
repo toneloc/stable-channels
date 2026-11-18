@@ -65,7 +65,7 @@ object LspSpliceHoldBridge {
  * When the LSP last pushed for a splice of its own. It pushes before every one, and again every few
  * minutes while its call is unanswered, so a splice negotiated inside this window with no Move of
  * the user's in flight is the LSP's: a Move the app lost track of must not be given its
- * transaction.
+ * transaction, unless it is a splice-out and the channel turns out smaller once ready.
  */
 object LspSpliceExpectation {
     const val WINDOW_MS = 10 * 60 * 1000L

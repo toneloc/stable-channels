@@ -60,7 +60,28 @@ class LspSpliceRecordTest {
             previousFundingTxid = oldTxid,
         )
 
+    private fun spliceOut(): Long =
+        db.recordPendingSplice(
+            "splice_out",
+            30_000_000,
+            30.0,
+            100_000.0,
+            "7",
+            channel,
+            previousFundingTxid = oldTxid,
+        )
+
     private fun payment(id: Long) = db.getRecentPayments(100).single { it.id == id }
+
+    /** Moves the Move's creation [secs] into the past. */
+    private fun age(id: Long, secs: Long) =
+        db.writableDatabase.execSQL(
+            "UPDATE payments SET created_at = created_at - ? WHERE id = ?",
+            arrayOf(secs, id),
+        )
+
+    private val nowSecs: Long
+        get() = System.currentTimeMillis() / 1000
 
     /** The node lists the channel at [value] on [onFunding]: the old funding until the lock. */
     private fun record(
@@ -162,6 +183,70 @@ class LspSpliceRecordTest {
         assertTrue(record(negotiated.copy(newFundingTxo = own), value = valueAfter))
         assertEquals(own.txid, payment(id).txid)
         assertNull(db.getLspSplice(own.txid))
+    }
+
+    @Test
+    fun theUsersOwnSpliceOutInsideThePushWindowIsItsOwnOnceTheChannelIsReadySmaller() {
+        val now = nowSecs
+        val id = spliceOut()
+        assertTrue(record(negotiated, lspSplice = true, value = valueBefore, now = now))
+        assertNull("the negotiation names no size, so it is not given yet", payment(id).txid)
+        assertEquals("negotiated", db.getLspSplice(txid)!!.status)
+        // Past the pre-negotiation timeout, the splice-out still waits for the ready event.
+        age(id, 3_600)
+        assertTrue(db.hasPendingSplice())
+        assertEquals("pending", payment(id).status)
+
+        // Ready on the new funding, smaller: the splice was the user's splice-out.
+        assertTrue(record(ready, lspSplice = true, value = valueBefore - 30_500, now = now + 600))
+        assertEquals(txid, payment(id).txid)
+        assertEquals("pending", payment(id).status)
+        assertNull("not the LSP's splice", db.getLspSplice(txid))
+        assertFalse(db.hasPendingLspSplice(now + 600))
+        // Replays change nothing.
+        assertTrue(record(ready, lspSplice = true, value = valueBefore - 30_500, now = now + 610))
+        assertTrue(record(negotiated, lspSplice = true, value = valueBefore, now = now + 610))
+        assertNull(db.getLspSplice(txid))
+        assertEquals(txid, payment(id).txid)
+    }
+
+    @Test
+    fun theLspsSpliceInsideThePushWindowIsNotGivenToALeftoverSpliceOut() {
+        val now = nowSecs
+        val id = spliceOut()
+        assertTrue(record(negotiated, lspSplice = true, value = valueBefore, now = now))
+        // Ready larger, after the window: the LSP's splice-in, which a Move waiting for its
+        // transaction would otherwise be given.
+        assertTrue(record(ready, lspSplice = false, value = valueAfter, now = now + 900))
+        assertNull(payment(id).txid)
+        val locked = db.getLspSplice(txid)!!
+        assertEquals(("locked" to 50_000L), (locked.status to locked.addedSats))
+        // No longer waiting on the LSP's splice, the leftover expires as before.
+        age(id, 3_600)
+        assertFalse(db.hasPendingSplice())
+        assertEquals("failed", payment(id).status)
+    }
+
+    @Test
+    fun aSpliceOutIsOnlyGivenTheLspsSpliceWhenItIsTheOneMoveWaiting() {
+        val now = nowSecs
+        val first = spliceOut()
+        val second = spliceOut()
+        assertTrue(record(negotiated, lspSplice = true, value = valueBefore, now = now))
+        assertTrue(record(ready, lspSplice = true, value = valueBefore - 30_500, now = now + 600))
+        assertNull(payment(first).txid)
+        assertNull(payment(second).txid)
+        assertEquals("locked", db.getLspSplice(txid)!!.status)
+    }
+
+    @Test
+    fun aSpliceOutWaitsForTheReadyEventOnlyAsLongAsTheLspsSpliceHoldsTheRepairBack() {
+        val day = SpliceEventRecorder.LSP_SPLICE_PENDING_MAX_AGE_SECS
+        val id = spliceOut()
+        assertTrue(record(negotiated, lspSplice = true, value = valueBefore, now = nowSecs - day))
+        age(id, day + 60)
+        assertFalse(db.hasPendingSplice())
+        assertEquals("failed", payment(id).status)
     }
 
     @Test
