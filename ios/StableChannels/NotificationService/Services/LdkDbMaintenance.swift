@@ -29,6 +29,7 @@ struct LdkDbMaintenance {
     /// data leaves the DB and the NSE can load it (the file itself only shrinks on VACUUM). Rows go only once
     /// this call has written the graph file.
     func extractGossip() throws {
+        guard hasDatabase else { return }
         try withDatabase { db in
             var savedGraph = false
             if let graph = try blob(db, key: "network_graph"), graph.count > Self.minimumGraphBytes {
@@ -49,6 +50,7 @@ struct LdkDbMaintenance {
     /// Deletes a graph too small to be real (empty graph with a stale RGS timestamp), with the
     /// scorer and metrics, so the next start syncs gossip fresh.
     func purgeEmptyGraph() throws {
+        guard hasDatabase else { return }
         try withDatabase { db in
             if let size = try graphSize(db) {
                 guard size < 500_000 else { return }
@@ -101,6 +103,9 @@ struct LdkDbMaintenance {
     }
 
     // MARK: - SQLite
+
+    /// LDK creates its database on the first node start; before that there is no gossip to touch.
+    private var hasDatabase: Bool { FileManager.default.fileExists(atPath: databaseURL.path) }
 
     private func withDatabase<T>(_ body: (OpaquePointer?) throws -> T) throws -> T {
         var db: OpaquePointer?

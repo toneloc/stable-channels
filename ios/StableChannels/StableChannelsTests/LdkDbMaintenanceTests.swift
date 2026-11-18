@@ -158,6 +158,17 @@ final class LdkDbMaintenanceTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: maintenance.databaseURL.path))
     }
 
+    /// Before the node first starts there is no LDK database, so there is nothing to purge or extract.
+    func testPurgeAndExtract_missingDatabase_doNothingAndCreateNothing() throws {
+        try FileManager.default.removeItem(at: maintenance.databaseURL)
+
+        XCTAssertNoThrow(try maintenance.purgeEmptyGraph())
+        XCTAssertNoThrow(try maintenance.extractGossip())
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: maintenance.databaseURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: maintenance.graphFileURL.path))
+    }
+
     func testMissingDatabase_errorCarriesTheSQLiteResultCode() throws {
         try FileManager.default.removeItem(at: maintenance.databaseURL)
 
