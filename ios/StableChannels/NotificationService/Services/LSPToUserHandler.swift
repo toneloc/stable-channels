@@ -15,9 +15,7 @@ final class LSPToUserHandler: PaymentHandler {
         completion: @escaping (UNMutableNotificationContent, Bool?) -> Void
     ) {
         let startTime = Date()
-        // Within the window after the LSP's splice push, a negotiation is the LSP's: this node runs
-        // only while the app's does not, so no Move of the app's own is being negotiated.
-        let lspSplice = LspSpliceExpectation.isExpected(UserDefaults(suiteName: Constants.appGroup))
+        let lspSplice = SpliceOwnership.expectsLspSplice(UserDefaults(suiteName: Constants.appGroup))
         let timeout: TimeInterval = 22
         var receipts = LSPWakeReceipts()
 

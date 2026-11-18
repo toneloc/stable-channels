@@ -136,8 +136,9 @@ final class SpliceRepository {
     ///
     /// With `lspSplice` the caller knows the splice is the LSP's, so a Move still waiting for its
     /// transaction is not given this one. A negotiation no operation claims is recorded as the
-    /// LSP's splice and the ready event on its funding locks it; the result says when this event did
-    /// either, nil otherwise.
+    /// LSP's splice and the ready event on its funding locks it, or gives it back to the splice-out
+    /// it turns out to be (`SpliceEventRecorder.settleSpliceOutStatements`); the result says when
+    /// this event did any of these, nil otherwise.
     @discardableResult
     func recordEvent(
         _ receipt: SpliceEventReceipt,
@@ -149,9 +150,15 @@ final class SpliceRepository {
             .text(receipt.channelId), receipt.fundingTxid.map { .text($0) } ?? .null,
             receipt.fundingVout.map { .integer(Int64($0)) } ?? .null
         ]
-        let lspParams = params + [.integer(lspSplice ? 1 : 0), .integer(Int64(now.timeIntervalSince1970))]
+        let lspParams = params + [
+            .integer(lspSplice ? 1 : 0), .integer(Int64(now.timeIntervalSince1970)),
+            receipt.channelValueSats.map { .integer(Int64(clamping: $0)) } ?? .null
+        ]
         var change: LspSpliceChange?
         try rawSQL.inTransaction {
+            for sql in SpliceEventRecorder.settleSpliceOutStatements {
+                if try rawSQL.executeReturningChanges(sql, params: lspParams) > 0 { change = .wasSpliceOut }
+            }
             let firstReceipt = try rawSQL.executeReturningChanges(
                 SpliceEventRecorder.insertEventSQL, params: Array(lspParams.prefix(7))
             ) > 0

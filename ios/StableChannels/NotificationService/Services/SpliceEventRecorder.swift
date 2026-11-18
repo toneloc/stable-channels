@@ -41,7 +41,9 @@ enum SpliceEventRecorder {
         """,
         // A splice the LSP made into the channel, kept apart from the user's history so it never
         // shows as something received: "negotiated" until the channel is ready on its funding,
-        // then "locked".
+        // then "locked". `value_before_sats` is the channel's value before it; `move_row_id` is the
+        // one Move that was waiting for a transaction when it was negotiated, which the ready event
+        // may yet show it was, if it is a splice-out (`settleSpliceOutStatements`).
         """
         CREATE TABLE IF NOT EXISTS lsp_splices (
             txid TEXT PRIMARY KEY,
@@ -49,15 +51,28 @@ enum SpliceEventRecorder {
             channel_id TEXT NOT NULL,
             status TEXT NOT NULL,
             created_at INTEGER NOT NULL,
-            locked_at INTEGER
+            locked_at INTEGER,
+            move_row_id INTEGER,
+            value_before_sats INTEGER
         )
         """
     ]
 
+    /// The lsp_splices columns, for `addLspSpliceColumnsSQL`.
+    static let lspSpliceColumnsSQL = "SELECT name FROM pragma_table_info('lsp_splices')"
+
+    /// Adds the lsp_splices columns a build before them created the table without.
+    static func addLspSpliceColumnsSQL(existing: Set<String>) -> [String] {
+        [("move_row_id", "INTEGER"), ("value_before_sats", "INTEGER")]
+            .filter { !existing.contains($0.0) }
+            .map { "ALTER TABLE lsp_splices ADD COLUMN \($0.0) \($0.1)" }
+    }
+
     /// The event statements bind: ?1 event key, ?2 kind, ?3 user channel id, ?4 channel id,
     /// ?5 funding txid, ?6 funding vout; `insertEventSQL` and the LSP splice statements also bind
     /// ?7, 1 when the caller knows the splice is the LSP's, and the LSP splice statements ?8, the
-    /// time in epoch seconds.
+    /// time in epoch seconds, and ?9, the channel's value as the event saw it
+    /// (`SpliceEventReceipt.channelValueSats`).
     ///
     /// Captures the operation once, at first receipt; a replay keeps its original capture and an
     /// unmatched event is never reassigned to an operation created later. Each tier must yield
@@ -82,18 +97,7 @@ enum SpliceEventRecorder {
           AND (s.user_channel_id IS NULL OR s.user_channel_id = ?3)
         LIMIT 2
     ),
-    tracked AS (
-        SELECT p.id, p.status = 'pending' AS live
-        FROM payments p JOIN splice_operations s ON s.payment_row_id = p.id
-        WHERE p.status IN ('pending', 'expired') AND p.txid IS NULL
-          AND s.user_channel_id = ?3 AND s.channel_id = ?4
-          AND CASE WHEN ?2 = 'ready'
-              THEN s.previous_funding_txid IS NOT NULL AND (?5 IS NULL OR s.previous_funding_txid != ?5)
-              ELSE s.previous_funding_txid IS NULL OR s.previous_funding_txid != ?5 END
-    ),
-    preferred AS (
-        SELECT id FROM tracked WHERE live = (SELECT MAX(live) FROM tracked) LIMIT 2
-    ),
+    \(trackedCTE),
     legacy AS (
         SELECT p.id FROM payments p
         WHERE ?2 = 'negotiated' AND p.payment_type IN \(spliceTypesSQL)
@@ -111,12 +115,37 @@ enum SpliceEventRecorder {
     END
     """
 
+    /// The tracked tier: NULL-txid operations on the event's channel, and the ones preferred among
+    /// them (at most two, so one can be told from several).
+    private static let trackedCTE = """
+    tracked AS (
+        SELECT p.id, p.status = 'pending' AS live
+        FROM payments p JOIN splice_operations s ON s.payment_row_id = p.id
+        WHERE p.status IN ('pending', 'expired') AND p.txid IS NULL
+          AND s.user_channel_id = ?3 AND s.channel_id = ?4
+          AND CASE WHEN ?2 = 'ready'
+              THEN s.previous_funding_txid IS NOT NULL AND (?5 IS NULL OR s.previous_funding_txid != ?5)
+              ELSE s.previous_funding_txid IS NULL OR s.previous_funding_txid != ?5 END
+    ),
+    preferred AS (
+        SELECT id FROM tracked WHERE live = (SELECT MAX(live) FROM tracked) LIMIT 2
+    )
+    """
+
     /// Run on an event's first receipt only. Records a negotiation no operation claimed as the
     /// LSP's splice: when the caller knows it is the LSP's (?7), or no Move is waiting for a
     /// transaction at all, so a Move left ambiguous between two attempts is not taken for the LSP's.
+    ///
+    /// The negotiation names no size, so a Move negotiated while the LSP's splice is expected looks
+    /// the same as the LSP's. The one operation the tracked tier would have matched is kept as
+    /// `move_row_id` with the channel's value before (?9), for the ready event to settle by which
+    /// way the value moved (`settledSpliceOutCTE`).
     static let recordLspSpliceSQL = """
-    INSERT OR IGNORE INTO lsp_splices (txid, user_channel_id, channel_id, status, created_at)
-    SELECT ?5, ?3, ?4, 'negotiated', ?8
+    WITH
+    \(trackedCTE)
+    INSERT OR IGNORE INTO lsp_splices
+        (txid, user_channel_id, channel_id, status, created_at, move_row_id, value_before_sats)
+    SELECT ?5, ?3, ?4, 'negotiated', ?8, (SELECT CASE WHEN COUNT(*) = 1 THEN MAX(id) END FROM preferred), ?9
     WHERE ?2 = 'negotiated' AND ?5 IS NOT NULL
       AND EXISTS (SELECT 1 FROM splice_events WHERE event_key = ?1 AND payment_row_id IS NULL)
       AND (?7 = 1 OR NOT EXISTS (
@@ -124,6 +153,39 @@ enum SpliceEventRecorder {
           WHERE status IN ('pending', 'expired') AND txid IS NULL AND payment_type IN \(spliceTypesSQL)
       ))
     """
+
+    /// A splice recorded as the LSP's while a splice-out waited (`move_row_id`) that the ready event
+    /// on its funding shows was that splice-out: the channel is now worth less (?9) than before
+    /// it, which the LSP's splice-in never leaves, and the splice-out still waits for a transaction.
+    /// A splice-in grows the channel as the LSP's does, so it is never settled this way.
+    private static let settledSpliceOutCTE = """
+    settled AS (
+        SELECT l.txid, l.move_row_id FROM lsp_splices l JOIN payments p ON p.id = l.move_row_id
+        WHERE ?2 = 'ready' AND l.txid = ?5 AND l.user_channel_id = ?3 AND l.channel_id = ?4
+          AND l.status = 'negotiated' AND ?9 < l.value_before_sats
+          AND p.payment_type = '\(SplicePaymentType.spliceOut.rawValue)'
+          AND p.status IN ('pending', 'expired') AND p.txid IS NULL
+    )
+    """
+
+    /// Run in order before a ready event is matched. When it settles a splice as the splice-out's
+    /// (`settledSpliceOutCTE`), the negotiation is given to the splice-out and the LSP splice row is
+    /// dropped, so the assignment that follows stamps the splice-out with its transaction. The
+    /// second statement's change count says whether that happened.
+    static let settleSpliceOutStatements = [
+        """
+        WITH
+        \(settledSpliceOutCTE)
+        UPDATE splice_events SET payment_row_id = (SELECT move_row_id FROM settled)
+        WHERE event_type = 'negotiated' AND user_channel_id = ?3 AND channel_id = ?4 AND txid = ?5
+          AND payment_row_id IS NULL AND EXISTS (SELECT 1 FROM settled)
+        """,
+        """
+        WITH
+        \(settledSpliceOutCTE)
+        DELETE FROM lsp_splices WHERE txid IN (SELECT txid FROM settled)
+        """
+    ]
 
     /// The ready event on an LSP splice's funding locks it.
     static let lockLspSpliceSQL = """

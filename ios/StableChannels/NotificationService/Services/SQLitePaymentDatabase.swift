@@ -876,10 +876,23 @@ final class SQLitePaymentDatabase: PaymentDatabase {
             where sqlite3_exec(db, sql, nil, nil, nil) != SQLITE_OK {
             return false
         }
+        var lspSpliceColumns = Set<String>()
+        var columns: OpaquePointer?
+        if sqlite3_prepare_v2(db, SpliceEventRecorder.lspSpliceColumnsSQL, -1, &columns, nil) == SQLITE_OK {
+            while sqlite3_step(columns) == SQLITE_ROW {
+                lspSpliceColumns.insert(columnText(columns, 0))
+            }
+        }
+        sqlite3_finalize(columns)
+        for sql in SpliceEventRecorder.addLspSpliceColumnsSQL(existing: lspSpliceColumns)
+            where sqlite3_exec(db, sql, nil, nil, nil) != SQLITE_OK {
+            return false
+        }
         guard sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else { return false }
         let lsp: Int64 = lspSplice ? 1 : 0
         let now = Int64(Date().timeIntervalSince1970)
-        let inserted = runSpliceStatement(db, SpliceEventRecorder.insertEventSQL, receipt, extra: [lsp])
+        let inserted = SpliceEventRecorder.settleSpliceOutStatements.allSatisfy { runSpliceStatement(db, $0, receipt) }
+            && runSpliceStatement(db, SpliceEventRecorder.insertEventSQL, receipt, extra: [lsp])
         // Only the event's first receipt can record the LSP's splice, as in the app.
         let firstReceipt = inserted && sqlite3_changes(db) > 0
         let committed = inserted
@@ -910,7 +923,7 @@ final class SQLitePaymentDatabase: PaymentDatabase {
         }
     }
 
-    /// Binds the receipt in SpliceEventRecorder parameter order (?1...?6), then `extra` from ?7.
+    /// Binds the receipt in SpliceEventRecorder parameter order (?1...?6 and ?9), then `extra` from ?7.
     private func runSpliceStatement(
         _ db: OpaquePointer?,
         _ sql: String,
@@ -937,6 +950,11 @@ final class SQLitePaymentDatabase: PaymentDatabase {
             }
             for (index, value) in extra.enumerated() {
                 sqlite3_bind_int64(stmt, Int32(7 + index), value)
+            }
+            if let value = receipt.channelValueSats {
+                sqlite3_bind_int64(stmt, 9, Int64(clamping: value))
+            } else {
+                sqlite3_bind_null(stmt, 9)
             }
         }
         return sqlite3_step(stmt) == SQLITE_DONE

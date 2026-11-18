@@ -21,6 +21,10 @@ struct SpliceEventReceipt: Equatable {
     let identityTxid: String?
     let fundingTxid: String?
     let fundingVout: UInt32?
+    /// The channel's value from the node's listing, on the side of the splice the event sees: for a
+    /// negotiation the value before it (the listing stays on the old funding until the splice
+    /// locks), for a ready event the value on its funding. Nil when the listing does not show that.
+    let channelValueSats: UInt64?
 
     /// Keyed by the funding it resolved to, so each outpoint-less ready on a channel (the open,
     /// then every splice) is stored once instead of all sharing one key. A stale replay still
@@ -29,29 +33,58 @@ struct SpliceEventReceipt: Equatable {
         "\(kind.rawValue):\(userChannelId):\(channelId):\(identityTxid ?? fundingTxid ?? "unknown")"
     }
 
-    /// Maps an LDK event; nil for anything that is not SpliceNegotiated or ChannelReady.
-    /// A stale or early ready event may lack its outpoint, so the live channel funding fills in.
-    init?(event: Event, liveFunding: (_ userChannelId: String, _ channelId: String) -> OutPoint?) {
+    /// Maps an LDK event against the node's channel listing; nil for anything that is not
+    /// SpliceNegotiated or ChannelReady. A stale or early ready event may lack its outpoint, so the
+    /// live channel funding fills in.
+    init?(event: Event, channels: [ChannelDetails]) {
         switch event {
         case .spliceNegotiated(let channelId, let userChannelId, _, let newFundingTxo):
             self.init(
                 kind: .negotiated, userChannelId: userChannelId, channelId: channelId,
-                identityTxid: newFundingTxo.txid, funding: newFundingTxo
+                identityTxid: newFundingTxo.txid, funding: newFundingTxo, channels: channels
             )
         case .channelReady(let channelId, let userChannelId, _, let fundingTxo):
+            let liveFunding = Self.liveFunding(in: channels, userChannelId: userChannelId, channelId: channelId)
             self.init(
                 kind: .ready, userChannelId: userChannelId, channelId: channelId,
-                identityTxid: fundingTxo?.txid, funding: fundingTxo ?? liveFunding(userChannelId, channelId)
+                identityTxid: fundingTxo?.txid, funding: fundingTxo ?? liveFunding, channels: channels
             )
         default:
             return nil
         }
     }
 
+    /// Takes `channelValueSats` from the one listed channel with this identity, on the side of the
+    /// splice the event sees.
+    init(
+        kind: Kind,
+        userChannelId: String,
+        channelId: String,
+        identityTxid: String?,
+        funding: OutPoint?,
+        channels: [ChannelDetails]
+    ) {
+        let listed = Self.liveChannel(in: channels, userChannelId: userChannelId, channelId: channelId)
+        let listedOnFunding = funding != nil && listed?.fundingTxo?.txid == funding?.txid
+        let seen = kind == .ready ? listedOnFunding : funding != nil && !listedOnFunding
+        self.init(
+            kind: kind, userChannelId: userChannelId, channelId: channelId,
+            identityTxid: identityTxid, funding: funding,
+            channelValueSats: seen ? listed?.channelValueSats : nil
+        )
+    }
+
     /// Funding of the one live channel with this identity; nil when absent or ambiguous.
     static func liveFunding(in channels: [ChannelDetails], userChannelId: String, channelId: String) -> OutPoint? {
+        liveChannel(in: channels, userChannelId: userChannelId, channelId: channelId)?.fundingTxo
+    }
+
+    /// The one live channel with this identity; nil when absent or ambiguous.
+    private static func liveChannel(
+        in channels: [ChannelDetails], userChannelId: String, channelId: String
+    ) -> ChannelDetails? {
         let matches = channels.filter { $0.userChannelId == userChannelId && $0.channelId == channelId }
-        return matches.count == 1 ? matches[0].fundingTxo : nil
+        return matches.count == 1 ? matches[0] : nil
     }
 
     init(
@@ -59,7 +92,8 @@ struct SpliceEventReceipt: Equatable {
         userChannelId: String,
         channelId: String,
         identityTxid: String?,
-        funding: OutPoint?
+        funding: OutPoint?,
+        channelValueSats: UInt64? = nil
     ) {
         self.kind = kind
         self.userChannelId = userChannelId
@@ -67,6 +101,7 @@ struct SpliceEventReceipt: Equatable {
         self.identityTxid = identityTxid
         fundingTxid = funding?.txid
         fundingVout = funding?.vout
+        self.channelValueSats = channelValueSats
     }
 }
 
@@ -98,11 +133,7 @@ enum SpliceEventAcknowledgement {
         if case .spliceNegotiationFailed = event {
             return db.hasPendingSplice() == false
         }
-        let channels = listChannels()
-        let receipt = SpliceEventReceipt(event: event) {
-            SpliceEventReceipt.liveFunding(in: channels, userChannelId: $0, channelId: $1)
-        }
-        guard let receipt else { return true }
+        guard let receipt = SpliceEventReceipt(event: event, channels: listChannels()) else { return true }
         return db.recordSpliceEvent(receipt, lspSplice: lspSplice)
     }
 }
@@ -196,6 +227,9 @@ enum LspSpliceChange {
     case negotiated
     /// The ready event on its funding locked it.
     case locked
+    /// The ready event showed the channel shrank: the splice was the waiting splice-out's, which
+    /// now has it.
+    case wasSpliceOut
 }
 
 /// The LSP pushes `lsp_splice_in` before each splice of its own. For a while after that push, a
@@ -227,5 +261,24 @@ enum LspSpliceExpectation {
         guard let text = userInfo["stability"] as? String, let data = text.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
         return json["direction"] as? String == LspSpliceNotice.direction
+    }
+}
+
+/// Whether a splice negotiated now is expected to be the LSP's: the one rule the app and the
+/// extension's handlers share. It is while the LSP's splice push is being handled or within its
+/// window (`LspSpliceExpectation`), unless a Move of the user's own is in flight in this process.
+/// The extension runs its node only while the app's is stopped, so it has no Move in flight.
+///
+/// A negotiation names no size, so this cannot tell a splice-out from the LSP's splice. The
+/// recorder keeps such a splice-out with the LSP's splice and settles it once the channel is
+/// ready, by which way its value moved (`SpliceEventRecorder.recordLspSpliceSQL`).
+enum SpliceOwnership {
+    static func expectsLspSplice(
+        _ defaults: UserDefaults?,
+        handlingSplicePush: Bool = false,
+        moveInFlight: Bool = false,
+        at now: Date = Date()
+    ) -> Bool {
+        !moveInFlight && (handlingSplicePush || LspSpliceExpectation.isExpected(defaults, at: now))
     }
 }

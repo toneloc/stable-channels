@@ -2091,10 +2091,10 @@ class AppState {
 
         case .channelReady(let channelId, let userChannelId, _, _):
             nodeService.refreshChannels()
-            let channels = nodeService.channels
-            persistSpliceEvent(SpliceEventReceipt(event: event) {
-                SpliceEventReceipt.liveFunding(in: channels, userChannelId: $0, channelId: $1)
-            }, ackToken: ackToken, lspSplice: expectsLspSplice)
+            persistSpliceEvent(
+                SpliceEventReceipt(event: event, channels: nodeService.channels),
+                ackToken: ackToken, lspSplice: expectsLspSplice
+            )
 
             stableChannel.channelId = channelId
             refreshBalances()
@@ -3115,9 +3115,10 @@ class AppState {
         ])
 
         let txidStr = "\(newFundingTxo.txid)"
+        nodeService.refreshChannels()
         let receipt = SpliceEventReceipt(
             kind: .negotiated, userChannelId: userChannelId, channelId: channelId,
-            identityTxid: txidStr, funding: newFundingTxo
+            identityTxid: txidStr, funding: newFundingTxo, channels: nodeService.channels
         )
         guard persistSpliceEvent(receipt, ackToken: ackToken, lspSplice: expectsLspSplice) else { return }
         // The recorder matched this event to the operation that started it. A replay for a
@@ -3149,11 +3150,10 @@ class AppState {
         startSpliceConfirmationMonitor(txid: txidStr)
     }
 
-    /// The LSP's splice push came within its window and no Move of the app's own is in flight, so a
-    /// splice negotiated now is the LSP's.
     private var expectsLspSplice: Bool {
-        pendingSplice == nil
-            && LspSpliceExpectation.isExpected(UserDefaults(suiteName: Constants.appGroupIdentifier))
+        SpliceOwnership.expectsLspSplice(
+            UserDefaults(suiteName: Constants.appGroupIdentifier), moveInFlight: pendingSplice != nil
+        )
     }
 
     /// Commits a splice event before NodeService acknowledges it; on failure the event stays in
@@ -3170,7 +3170,12 @@ class AppState {
                 throw DatabaseError.executeFailed("Database unavailable for splice history")
             }
             if let change = try databaseService.spliceRepo.recordEvent(receipt, lspSplice: lspSplice) {
-                AuditService.log(change == .locked ? "LSP_SPLICE_LOCKED" : "LSP_SPLICE_NEGOTIATED", data: [
+                let name = switch change {
+                case .negotiated: "LSP_SPLICE_NEGOTIATED"
+                case .locked: "LSP_SPLICE_LOCKED"
+                case .wasSpliceOut: "LSP_SPLICE_WAS_SPLICE_OUT"
+                }
+                AuditService.log(name, data: [
                     "channel_id": receipt.channelId,
                     "user_channel_id": receipt.userChannelId,
                     "txid": receipt.fundingTxid ?? ""
