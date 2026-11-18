@@ -10,14 +10,14 @@ struct TradeExecutionResult {
 
 /// Builds a durable, correlated TRADE_V1 request and sends its non-refundable fee.
 final class TradeService {
-    private let nodeService: NodeService
+    private let nodeService: any AppNodeService
     private let databaseService: DatabaseService
 
     /// The app-group balance cache, read when no live channel is available.
     private let balanceCache: UserDefaults?
 
     init(
-        nodeService: NodeService,
+        nodeService: any AppNodeService,
         databaseService: DatabaseService,
         balanceCache: UserDefaults? = UserDefaults(suiteName: Constants.appGroupIdentifier)
     ) {

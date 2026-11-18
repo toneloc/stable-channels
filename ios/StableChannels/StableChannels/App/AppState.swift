@@ -107,7 +107,7 @@ class AppState {
 
     // MARK: - Services
 
-    let nodeService: NodeService
+    let nodeService: any AppNodeService
     let priceService = PriceService()
     let priceChartService: any PriceChartFetching = PriceChartService.shared
     var priceHistoryProvider: any PriceHistoryProviding
@@ -168,14 +168,15 @@ class AppState {
     let networkMonitor: any NetworkMonitoring
 
     init(
-        nodeService: NodeService = NodeService(),
+        nodeService: any AppNodeService = NodeService(),
         spliceBroadcastChecker: SpliceBroadcastChecking = SpliceBroadcastChecker(),
         verifyTradeSignature: (([UInt8], String, String) -> Bool)? = nil,
         repairBooksUseCase: RepairBooksUseCase? = nil,
         networkMonitor: any NetworkMonitoring = NWPathNetworkMonitor.shared,
         seedAccessDefaults: UserDefaults = .standard,
         nodeStartup: NodeStartupCoordinator? = nil,
-        chainSourceProbe: ChainSourceProbe = .live
+        chainSourceProbe: ChainSourceProbe = .live,
+        makeDatabase: @escaping (URL) throws -> DatabaseService = { try DatabaseService(dataDir: $0) }
     ) {
         self.seedAccessDefaults = seedAccessDefaults
         self.nodeService = nodeService
@@ -189,6 +190,7 @@ class AppState {
             chainURLStore: UserDefaultsChainURLStore(defaults: UserDefaults(suiteName: Constants.appGroupIdentifier))
         )
         self.chainSourceProbe = chainSourceProbe
+        self.makeDatabase = makeDatabase
         self.isOnline = networkMonitor.isOnline
 
         self.networkMonitor.onStatusChange = { [weak self] status in
@@ -673,7 +675,7 @@ class AppState {
     }
 
     private func initializeDatabaseServices() throws {
-        let db = try DatabaseService(dataDir: Constants.userDataDir)
+        let db = try makeDatabase(Constants.userDataDir)
         databaseService = db
         nodeService.databaseService = databaseService
         priceHistoryProvider = PriceHistoryService(databaseService: db)
@@ -1589,6 +1591,8 @@ class AppState {
     /// Node-start failover and automatic retry after transient chain-source failures.
     let nodeStartup: NodeStartupCoordinator
     private let chainSourceProbe: ChainSourceProbe
+    /// Opens the wallet database; injected so tests can open their own.
+    private let makeDatabase: (URL) throws -> DatabaseService
     /// True while node start is being retried after a transient chain-source failure.
     var isRetryingNodeStart: Bool { nodeStartup.isRetrying }
 

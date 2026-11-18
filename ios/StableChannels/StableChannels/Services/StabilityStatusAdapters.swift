@@ -2,12 +2,12 @@ import Foundation
 
 /// Adapts LDK Node and SQLite database checks to PaymentStatusProviding.
 final class LDKPaymentStatusAdapter: PaymentStatusProviding {
-    private let nodeService: NodeService
+    private let nodeService: any NodeServiceProtocol
     private let databaseService: DatabaseService
     private let hasPendingNodePaymentCheck: () -> Bool
 
     init(
-        nodeService: NodeService,
+        nodeService: any NodeServiceProtocol,
         databaseService: DatabaseService,
         hasPendingNodePaymentCheck: (() -> Bool)? = nil
     ) {
