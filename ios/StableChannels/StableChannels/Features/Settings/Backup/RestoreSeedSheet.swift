@@ -21,8 +21,7 @@ struct RestoreSeedSheet: View {
     }
 
     private var restoreValid: Bool {
-        let filledCount = wordFields.filter { !$0.isEmpty }.count
-        return filledCount == SeedConstants.wordCount12 || filledCount == SeedConstants.wordCount24
+        MnemonicUtils.isValidWordCount(wordFields.filter { !$0.isEmpty }.count)
     }
 
     var body: some View {
@@ -237,6 +236,9 @@ struct RestoreSeedSheet: View {
             isRestoring = false
             onSuccess()
             dismiss()
+        } catch AppState.WalletRestoreError.invalidMnemonic {
+            isRestoring = false
+            restoreError = String(localized: "error_seed_words")
         } catch AppState.WalletRestoreError.activeChannelDetected {
             // Divergence guard tripped: restoring would force-close a live
             // channel. Ask the user to opt in explicitly.

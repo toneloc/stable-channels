@@ -947,7 +947,78 @@ final class NodeStartupCoordinatorTests: XCTestCase {
         XCTAssertTrue(coordinator.isPaused, "Foreground, not the failed restore, ends the pause")
     }
 
+    /// Real words with a wrong checksum, even after "Continue Anyway", are rejected before the restore
+    /// wipes or writes anything, so the wallet stays as it was.
+    func testRestoreWithABadChecksum_leavesTheWalletUntouchedAndThrowsInvalidMnemonic() async throws {
+        keepInstalledAppUntouched()
+        NodeDirLock.shared.release()
+        let walletDir = try makeWalletDir(seedPhrase: Self.existingWords)
+        let walletBefore = try walletFiles(in: walletDir)
+        var appState: AppState?
+        let coordinator = makeCoordinator(sleep: { duration in
+            guard duration == Constants.nodeStartRetryDelay else { return }
+            appState?.performBackgroundStop()
+        })
+        appState = AppState(
+            nodeService: FeeStallingNodeService(dataDir: walletDir),
+            networkMonitor: MockNetworkMonitor(initialStatus: .online),
+            nodeStartup: coordinator
+        )
+        appState?.phase = .wallet
+
+        do {
+            try await appState?.restoreWalletFromMnemonic(Self.badChecksumWords, acknowledgeForceClose: true)
+            XCTFail("A phrase with a bad checksum must not restore")
+        } catch AppState.WalletRestoreError.invalidMnemonic {
+        } catch {
+            XCTFail("Expected .invalidMnemonic, got \(error)")
+        }
+
+        XCTAssertEqual(try walletFiles(in: walletDir), walletBefore, "The wallet folder must be untouched")
+        XCTAssertEqual(appState?.phase, .wallet)
+        coordinator.reset()
+    }
+
+    func testBIP39Check_acceptsValidPhrasesAndRejectsBadChecksumsCountsAndWords() {
+        let abandon = { (count: Int) in Array(repeating: "abandon", count: count).joined(separator: " ") }
+        XCTAssertTrue(MnemonicUtils.isValidBIP39(Self.restoredWords))
+        XCTAssertTrue(MnemonicUtils.isValidBIP39(Self.existingWords))
+        XCTAssertTrue(MnemonicUtils.isValidBIP39(abandon(23) + " art"))
+        XCTAssertFalse(MnemonicUtils.isValidBIP39(Self.badChecksumWords), "Bad checksum")
+        XCTAssertFalse(MnemonicUtils.isValidBIP39(abandon(23) + " about"), "Bad 24-word checksum")
+        XCTAssertFalse(MnemonicUtils.isValidBIP39(abandon(14) + " address"), "Valid BIP39, but not 12 or 24 words")
+        XCTAssertFalse(MnemonicUtils.isValidBIP39(abandon(11)), "Wrong word count")
+        XCTAssertFalse(MnemonicUtils.isValidBIP39(abandon(11) + " bitcoin"), "Not a BIP39 word")
+        XCTAssertTrue(MnemonicUtils.isValidBIP39(Self.restoredWords.replacingOccurrences(of: " ", with: "\n")))
+        XCTAssertTrue(MnemonicUtils.isValidBIP39(Self.restoredWords.replacingOccurrences(of: " ", with: " \t  ")))
+    }
+
+    /// A seed_phrase saved with a bad checksum fails start with an error instead of LDKNode aborting the
+    /// app, and leaves the wallet folder exactly as it was.
+    func testStartWithASavedBadChecksumPhrase_throwsAndLeavesTheWalletUntouched() async throws {
+        NodeDirLock.shared.release()
+        let walletDir = try makeWalletDir(seedPhrase: Self.badChecksumWords)
+        let walletBefore = try walletFiles(in: walletDir)
+        let service = NodeService(dataDir: walletDir)
+
+        do {
+            try await service.start(network: .signet, esploraURL: primary, mnemonic: "")
+            XCTFail("A saved phrase with a bad checksum must not start")
+        } catch NodeServiceError.invalidSeedPhrase {
+        } catch {
+            XCTFail("Expected .invalidSeedPhrase, got \(error)")
+        }
+
+        // Only the app's own wallet-dir lock, taken before the phrase is read, may appear.
+        var walletAfter = try walletFiles(in: walletDir)
+        walletAfter[NodeDirLock.lockFilename] = nil
+        XCTAssertEqual(walletAfter, walletBefore, "The wallet folder must be untouched")
+        XCTAssertNil(service.node, "No LDK node may be built")
+        XCTAssertFalse(service.isRunning)
+    }
+
     private static let existingWords = Array(repeating: "zoo", count: 11).joined(separator: " ") + " wrong"
+    private static let badChecksumWords = Array(repeating: "abandon", count: 12).joined(separator: " ")
     private static let restoredWords = Array(repeating: "abandon", count: 11).joined(separator: " ") + " about"
 
     private func assertRestoreInterrupted(_ appState: AppState) async {
@@ -1005,6 +1076,13 @@ final class NodeStartupCoordinatorTests: XCTestCase {
     /// and backfills prices into it, so it must never use the installed one.
     private func makeStallingNodeOnTempWallet() throws -> FeeStallingNodeService {
         try FeeStallingNodeService(dataDir: makeWalletDir(seedPhrase: Self.restoredWords))
+    }
+
+    /// Name and contents of each file in a wallet folder.
+    private func walletFiles(in walletDir: URL) throws -> [String: Data] {
+        try FileManager.default.contentsOfDirectory(atPath: walletDir.path).reduce(into: [:]) { files, name in
+            files[name] = try Data(contentsOf: walletDir.appendingPathComponent(name))
+        }
     }
 
     private func seedPhrase(in walletDir: URL) throws -> String {
