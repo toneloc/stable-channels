@@ -3150,10 +3150,11 @@ class AppState {
         startSpliceConfirmationMonitor(txid: txidStr)
     }
 
+    /// Where the extension notes the LSP's splice push.
+    @ObservationIgnored var lspSpliceDefaults = UserDefaults(suiteName: Constants.appGroupIdentifier)
+
     private var expectsLspSplice: Bool {
-        SpliceOwnership.expectsLspSplice(
-            UserDefaults(suiteName: Constants.appGroupIdentifier), moveInFlight: pendingSplice != nil
-        )
+        SpliceOwnership.expectsLspSplice(lspSpliceDefaults, moveInFlight: pendingSplice != nil)
     }
 
     /// Commits a splice event before NodeService acknowledges it; on failure the event stays in
@@ -3244,9 +3245,10 @@ class AppState {
                     txid: capturedTxid, channelId: "\(channelId)", userChannelId: "\(userChannelId)"
                 )
                 Task { [weak self] in await self?.retryPendingSpliceFailureChecks() }
-            } else if pendingSplice == nil {
-                // No Move of the app's own is in flight, so the negotiation that failed was the LSP's.
-                // A Move left without its transaction still expires on its own after 10 minutes.
+            } else if expectsLspSplice {
+                // No Move of the app's own is in flight and the LSP's splice is expected, so the
+                // negotiation that failed is taken to be the LSP's. A Move left without its
+                // transaction still expires on its own after 10 minutes.
                 AuditService.log("LSP_SPLICE_FAILED", data: [
                     "channel_id": "\(channelId)",
                     "user_channel_id": "\(userChannelId)"

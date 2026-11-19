@@ -425,6 +425,7 @@ final class SpliceFailureRecoveryTests: XCTestCase {
     private var app: AppState!
     private let txid = String(repeating: "ab", count: 32)
     private let channel = SpliceChannelIdentity(userChannelId: "7", channelId: "channel", previousFundingTxid: nil)
+    private let defaultsSuite = "SpliceFailureRecoveryTests-\(UUID().uuidString)"
 
     override func setUp() async throws {
         dataDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -435,12 +436,14 @@ final class SpliceFailureRecoveryTests: XCTestCase {
     override func tearDown() async throws {
         app = nil
         db = nil
+        UserDefaults(suiteName: defaultsSuite)?.removePersistentDomain(forName: defaultsSuite)
         try FileManager.default.removeItem(at: dataDir)
     }
 
     private func makeApp(_ status: TxBroadcastStatus) -> AppState {
         let value = AppState(spliceBroadcastChecker: RecoverySpliceChecker(result: status))
         value.databaseService = db
+        value.lspSpliceDefaults = UserDefaults(suiteName: defaultsSuite)
         return value
     }
 
@@ -461,13 +464,15 @@ final class SpliceFailureRecoveryTests: XCTestCase {
         try db.rawSQL.query("SELECT status FROM payments WHERE txid = ?", params: [.text(txid)]).first?.string(0)
     }
 
-    func testAFailedNegotiationWithNoMoveInFlightFailsNoRow() throws {
-        // A Move the app lost track of before negotiation: its row has no transaction and the app
-        // holds no Move in memory, so the failed negotiation was the LSP's.
+    func testAFailedNegotiationWithNoMoveInFlightInsideThePushWindowFailsNoRow() throws {
+        // A Move the app lost track of before negotiation: its row has no transaction, the app
+        // holds no Move in memory and the LSP's splice is expected, so the failed negotiation is
+        // taken to be the LSP's.
         let rowId = try db.spliceRepo.recordPendingSplice(
             paymentType: .spliceOut, amountMsat: 50_000_000, amountUSD: 25, btcPrice: 50000,
             address: "bc1qtest", selfSend: false, channel: channel
         )
+        LspSpliceExpectation.note(app.lspSpliceDefaults)
         let ack = EventAckToken()
         app.handleSpliceNegotiationFailed(channelId: "channel", userChannelId: "7", ackToken: ack)
         XCTAssertTrue(ack.shouldAck)
@@ -477,8 +482,26 @@ final class SpliceFailureRecoveryTests: XCTestCase {
         XCTAssertFalse(app.isSweeping)
     }
 
+    func testAFailedNegotiationAfterARelaunchOutsideThePushWindowFailsTheMoveAsBefore() throws {
+        // After a relaunch the Move is only in the database. With no LSP splice expected, its
+        // failed negotiation is its own, as on main.
+        let rowId = try db.spliceRepo.recordPendingSplice(
+            paymentType: .spliceOut, amountMsat: 50_000_000, amountUSD: 25, btcPrice: 50000,
+            address: "bc1qtest", selfSend: false, channel: channel
+        )
+        app.isSweeping = true
+        let ack = EventAckToken()
+        app.handleSpliceNegotiationFailed(channelId: "channel", userChannelId: "7", ackToken: ack)
+        XCTAssertTrue(ack.shouldAck)
+        let status = try db.rawSQL.query("SELECT status FROM payments WHERE id = ?", params: [.integer(rowId)])
+        XCTAssertEqual(status.first?.string(0), "failed")
+        XCTAssertEqual(app.statusMessage, "Splice failed")
+        XCTAssertFalse(app.isSweeping)
+    }
+
     func testAFailedNegotiationOfTheAppsOwnMoveStillFailsItsRow() throws {
         try app.beginSpliceOut(amountSats: 50_000, address: "bc1qtest", channel: channel)
+        LspSpliceExpectation.note(app.lspSpliceDefaults)
         let ack = EventAckToken()
         app.handleSpliceNegotiationFailed(channelId: "channel", userChannelId: "7", ackToken: ack)
         XCTAssertTrue(ack.shouldAck)

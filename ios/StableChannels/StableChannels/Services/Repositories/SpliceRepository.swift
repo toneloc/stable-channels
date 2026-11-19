@@ -326,7 +326,11 @@ final class SpliceRepository {
         // Expired rows no longer count as an active pending splice, but they
         // stay recoverable — a late spliceNegotiated can still stamp its txid
         // via recoverAssignments and return the row to 'pending'.
-        let noTxidCutoff = Int64(Date().timeIntervalSince1970) - 600
+        // A Move whose negotiation may have been recorded as the LSP's splice waits for the ready
+        // event to settle which it was. Until then it may still spend the channel's funding output,
+        // so it keeps holding back the emergency close (#456), for as long as that splice holds the
+        // books repair back.
+        let now = Int64(Date().timeIntervalSince1970)
         try rawSQL.execute(
             """
             UPDATE payments
@@ -334,9 +338,13 @@ final class SpliceRepository {
             WHERE status = 'pending'
               AND payment_type IN \(SpliceEventRecorder.spliceTypesSQL)
               AND txid IS NULL
-              AND created_at < ?
+              AND created_at < ?1
+              AND NOT EXISTS (
+                  SELECT 1 FROM lsp_splices l
+                  WHERE l.move_row_id = payments.id AND l.status = 'negotiated' AND l.created_at > ?2
+              )
             """,
-            params: [.integer(noTxidCutoff)]
+            params: [.integer(now - 600), .integer(now - SpliceEventRecorder.lspSplicePendingMaxAgeSecs)]
         )
         let rows = try rawSQL.query(SpliceEventRecorder.hasPendingSpliceSQL)
         return !rows.isEmpty
