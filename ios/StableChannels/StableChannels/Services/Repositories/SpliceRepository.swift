@@ -303,7 +303,7 @@ final class SpliceRepository {
         ).isEmpty
     }
 
-    /// Negotiated LSP splices newer than this hold the Move they named (see `heldByLspSpliceSQL`).
+    /// A Move an LSP splice first named before this is no longer held (see `heldByLspSpliceSQL`).
     private static func lspSpliceHoldSince(_ now: Int64) -> Int64 {
         now - SpliceEventRecorder.lspSplicePendingMaxAgeSecs
     }

@@ -571,6 +571,39 @@ final class SpliceEventRecorderTests: XCTestCase {
         XCTAssertEqual(try row(move).status, "expired")
     }
 
+    func testALaterLspSpliceNamingTheSameMoveDoesNotRestartItsDay() throws {
+        // An RBF of the LSP's splice, or a new one, names the same Move again with a new txid. An
+        // older LSP splice that named no Move does not count.
+        let now = Date()
+        let earlier = String(repeating: "0d", count: 32)
+        try service.spliceRepo.recordEvent(
+            negotiated(earlier), lspSplice: true, now: now.addingTimeInterval(-3 * 86400)
+        )
+        try service.spliceRepo.recordEvent(
+            ready(eventFunding: earlier), now: now.addingTimeInterval(-2 * 86400)
+        )
+        let move = try begin(.spliceOut)
+        let rbf = String(repeating: "0c", count: 32)
+        try service.spliceRepo.recordEvent(
+            negotiated(newFunding, valueSats: 100_000), lspSplice: true, now: now.addingTimeInterval(-7200)
+        )
+        try service.spliceRepo.recordEvent(
+            negotiated(rbf, valueSats: 100_000), lspSplice: true, now: now.addingTimeInterval(-3600)
+        )
+        try ageOut(move)
+        XCTAssertTrue(try service.spliceRepo.hasPendingSplice())
+        XCTAssertEqual(try row(move).status, "pending")
+
+        let dayAgo = TimeInterval(SpliceEventRecorder.lspSplicePendingMaxAgeSecs) + 60
+        try service.rawSQL.execute(
+            "UPDATE lsp_splices SET created_at = created_at - ? WHERE txid = ?",
+            params: [.integer(Int64(dayAgo)), .text(newFunding)]
+        )
+        XCTAssertFalse(try service.spliceRepo.hasPendingSplice())
+        XCTAssertEqual(try row(move).status, "expired", "the day counts from the first LSP splice that named it")
+        XCTAssertFalse(try service.spliceRepo.moveSpends(userChannelId: ucid, fundingTxid: oldFunding))
+    }
+
     func testWithTwoMovesWaitingNeitherIsKeptFromExpiring() throws {
         let first = try begin(.spliceOut)
         let second = try begin(.spliceOut)
