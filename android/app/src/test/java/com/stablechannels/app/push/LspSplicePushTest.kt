@@ -111,11 +111,19 @@ class LspSplicePushTest {
     }
 
     @Test
-    fun `the wait ends at once on a failed negotiation and at the deadline otherwise`() {
+    fun `a failed negotiation does not end the wait, which ends at the deadline or the lock`() {
+        // A failure left over from an earlier attempt must not stop the node before the LSP's
+        // splice_init.
         val failed = LspSpliceWait(startMs = 1_000, waitMs = 60_000, settleMs = 10_000)
         failed.onFailed()
-        assertTrue(failed.isDone(1_001))
+        assertFalse(failed.isDone(1_001))
+        assertTrue(failed.isDone(61_000))
         assertEquals(LspSpliceWait.Outcome.FAILED, failed.outcome)
+        val failedThenLocked = LspSpliceWait(startMs = 1_000, waitMs = 60_000, settleMs = 10_000)
+        failedThenLocked.onFailed()
+        failedThenLocked.onLocked(20_000)
+        assertTrue(failedThenLocked.isDone(30_000))
+        assertEquals(LspSpliceWait.Outcome.LOCKED, failedThenLocked.outcome)
 
         val idle = LspSpliceWait(startMs = 1_000, waitMs = 60_000, settleMs = 10_000)
         assertFalse(idle.isDone(60_999))
@@ -128,11 +136,12 @@ class LspSplicePushTest {
         assertTrue(late.isDone(61_000))
         assertEquals(LspSpliceWait.Outcome.LOCKED, late.outcome)
 
-        // A failure after the lock ends the wait at once but does not take the lock back.
+        // A failure after the lock does not take the lock back.
         val lockedThenFailed = LspSpliceWait(startMs = 1_000, waitMs = 60_000, settleMs = 10_000)
         lockedThenFailed.onLocked(30_000)
         lockedThenFailed.onFailed()
-        assertTrue(lockedThenFailed.isDone(30_001))
+        assertFalse(lockedThenFailed.isDone(30_001))
+        assertTrue(lockedThenFailed.isDone(40_000))
         assertEquals(LspSpliceWait.Outcome.LOCKED, lockedThenFailed.outcome)
     }
 

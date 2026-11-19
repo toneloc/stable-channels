@@ -660,9 +660,12 @@ class StabilityProcessingService : Service() {
      * The LSP queued a splice-in of its own funds and woke this phone for it. The node has to stay
      * up through the negotiation: the LSP sends splice_init once it sees the channel usable, both
      * sides sign, and the channel locks the new funding 0-conf. The wait ends at the lock plus a
-     * short settle window, at a failed negotiation, or at the deadline. Splice events are persisted
-     * the way the other waits persist them, so the app's bookkeeping sees them; an incoming payment
-     * in the window is recorded like one in an lsp_to_user wait.
+     * short settle window, or at the deadline. A failed negotiation does not end it: the event
+     * names no funding, so it cannot be told from one left over from an earlier attempt. Splice
+     * events are persisted the way the other waits persist them, so the app's bookkeeping sees
+     * them; an incoming payment in the window is recorded like one in an lsp_to_user wait. An event
+     * that has to be left for the app stops the wait taking events, but the node stays up: LDK
+     * signs and locks the splice without them.
      */
     private fun handleLspSpliceIn(node: Node, dbPath: String) {
         val lspPubkey = LspPreferencesManager.getLspPubkey(this)
@@ -687,8 +690,23 @@ class StabilityProcessingService : Service() {
             )
         val price = RunPrice()
         var hasUnpersistedEvent = false
+        var leftForApp: BackingUpdateFailed? = null
+        fun isOwnMove(txid: String) = DatabaseService(this).use { it.paymentExistsForTxid(txid) }
+        fun lockedNow() =
+            try {
+                val fundingNow = lspChannelFunding(node, lspPubkey)?.txid
+                lspSpliceLocked(fundingBefore?.txid, fundingNow, ::isOwnMove)
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not check the LSP's splice: ${e.message}")
+                false
+            }
 
         while (!wait.isDone(System.currentTimeMillis())) {
+            if (leftForApp != null) {
+                if (lockedNow()) wait.onLocked(System.currentTimeMillis())
+                Thread.sleep(1000)
+                continue
+            }
             try {
                 val event =
                     try {
@@ -721,14 +739,7 @@ class StabilityProcessingService : Service() {
                         persistSpliceEvent(event, { ready -> fundingOf(node, ready) }) {
                             node.eventHandled()
                         }
-                        val fundingNow = lspChannelFunding(node, lspPubkey)
-                        val locked =
-                            lspSpliceLocked(fundingBefore?.txid, fundingNow?.txid) { txid ->
-                                DatabaseService(this).use { it.paymentExistsForTxid(txid) }
-                            }
-                        if (locked) {
-                            wait.onLocked(System.currentTimeMillis())
-                        }
+                        if (lockedNow()) wait.onLocked(System.currentTimeMillis())
                     }
                     is Event.SpliceNegotiationFailed -> {
                         deferSpliceFailure { node.eventHandled() }
@@ -737,9 +748,9 @@ class StabilityProcessingService : Service() {
                     else -> node.eventHandled()
                 }
             } catch (e: Exception) {
-                if (e is BackingUpdateFailed)
-                    throw e // permanent; let onStartCommand flag for retry
-                Thread.sleep(500)
+                // Permanent: the events stay for the app, and onStartCommand flags for retry once
+                // the wait is over.
+                if (e is BackingUpdateFailed) leftForApp = e else Thread.sleep(500)
             }
         }
         AuditService.log(
@@ -748,8 +759,10 @@ class StabilityProcessingService : Service() {
                 "outcome" to wait.outcome.name.lowercase(),
                 "waited_ms" to (System.currentTimeMillis() - startMs),
                 "funding_txid" to lspChannelFunding(node, lspPubkey)?.txid,
+                "left_for_app" to (leftForApp != null),
             ),
         )
+        leftForApp?.let { throw it }
         if (hasUnpersistedEvent) {
             throw BackingUpdateFailed(
                 "DB write still failing for incoming payment — leaving pending for foreground retry"

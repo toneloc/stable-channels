@@ -1563,9 +1563,9 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     /**
-     * The splice locked or failed, so the node is no longer needed for it. In the background, the
-     * stop is brought forward to the quick-switch grace unless something else still holds the node
-     * for the long one.
+     * The splice locked, so the node is no longer needed for it. In the background, the stop is
+     * brought forward to the quick-switch grace unless something else still holds the node for the
+     * long one.
      */
     private fun releaseLspSpliceHold(reason: String) {
         if (lspSpliceHoldUntilMs == 0L) return
@@ -2362,7 +2362,9 @@ class AppState(private val context: Context) : ViewModel() {
                 )
             }
             is Event.SpliceNegotiationFailed -> {
-                releaseLspSpliceHold("negotiation_failed")
+                // The hold is not released here: the event names no funding, so it may be the
+                // user's own Move failing, with the LSP's splice still to come. The hold ends at
+                // the lock or after LSP_SPLICE_HOLD_MS.
                 // Snapshot to local vals: spliceTxid/pendingSplice/spliceGeneration can all be
                 // mutated concurrently by the IO-thread confirmation monitor or by a brand-new
                 // splice starting, so re-reading them after the async check below would be a
