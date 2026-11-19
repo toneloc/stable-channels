@@ -10,14 +10,59 @@ daemon, and the operator web dashboard against Umbrel's Bitcoin app.
 - `sc-lsp` owns stable-channel accounting and talks to LDK Server over its
   authenticated TLS gRPC interface.
 - `gui` serves the WASM dashboard and proxies same-origin `/api/` requests to
-  `sc-lsp`. Umbrel's `app_proxy` protects the dashboard; the GUI container
-  only serves `/setup` to requests coming through that proxy.
+  `sc-lsp`. The GUI also has its own token login; for now the whole app stays
+  behind the Umbrel login (see "GUI login and `/setup`" below), and the GUI container
+  only serves `/setup` to requests coming through Umbrel's proxy.
 - Lightning P2P port `19735` is published for wallet connections (`9735` is
   already reserved by Umbrel's LND app). Operators
   still need a reachable IP/domain or Tor endpoint for off-LAN wallets.
 
-The API key shown at `/setup` is an operator secret. It is not a wallet or
-provider credential and must never be shared with wallet users.
+### GUI login and `/setup`
+
+The dashboard asks for a token. The GUI admin token is the file
+`gui.macaroon` that `sc-lsp` writes under its data directory
+(`data/sc-lsp/<network>/gui.macaroon`, hex). When you are logged in to Umbrel,
+the web GUI fetches it from `/setup/token.txt` and signs you in without typing;
+`/setup` also explains it. The admin token can make and revoke other logins, so
+it is an operator secret: keep it private and never share it with wallet users.
+Until `sc-lsp` has written the file, `/setup/token.txt` answers 503 and the GUI
+keeps trying.
+
+Give other people limited logins from the GUI's Access page; they type their
+token at the GUI's sign-in screen. For now the whole app, including the GUI,
+stays behind the Umbrel login, so on Umbrel a limited login also needs the
+Umbrel account. The release that pins GUI images built with token logins opens
+the GUI pages and `/api/` past the Umbrel login and keeps `/setup` behind it,
+by adding to the `app_proxy` environment in `docker-compose.yml`:
+
+```yaml
+      PROXY_AUTH_WHITELIST: "/*"
+      PROXY_AUTH_BLACKLIST: "/setup*"
+```
+
+Add those two lines only together with that image bump, never on their own.
+
+Do not turn off "Require Umbrel login" for the whole app in Umbrel's settings:
+that would also open `/setup`, and so the admin token, to anyone who can reach
+the app.
+
+On a home network Umbrel is plain HTTP unless you use Tor or Umbrel's HTTPS, so
+a token typed there can be read by someone on the same network.
+
+### HTTPS outside Umbrel
+
+The GUI image can also serve HTTPS on port `8443` for servers outside Umbrel
+(the Umbrel compose leaves it off). Set `SC_GUI_TLS_CERT` and `SC_GUI_TLS_KEY`
+to a mounted certificate and key, or set `SC_GUI_TLS=self-signed` to have it
+make a pair under `/etc/nginx/tls` at first start (the browser warns once).
+If either certificate variable is set but the pair is missing, empty or
+unreadable, the container refuses to start instead of leaving HTTPS off.
+The same holds for any `SC_GUI_TLS` value other than `self-signed` and for a
+self-signed setup that fails (for example, no `openssl`).
+Port `80` stays plain HTTP when `8443` is on, so outside Umbrel publish only
+`8443`.
+Outside Umbrel, `/setup` answers only Umbrel's `app_proxy`, so log in with a
+token.
 
 ## Configuration
 

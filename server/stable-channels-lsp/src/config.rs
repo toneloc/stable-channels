@@ -95,7 +95,7 @@ impl Config {
         PathBuf::from(&self.storage.disk.dir_path).join("tls.key")
     }
 
-    /// SC daemon's own API key file (network-scoped).
+    /// Where the daemon kept its API key before token logins (network-scoped); it is no longer read.
     pub fn local_api_key_path(&self) -> PathBuf {
         PathBuf::from(&self.storage.disk.dir_path)
             .join(&self.node.network)

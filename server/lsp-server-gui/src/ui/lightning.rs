@@ -1,9 +1,13 @@
 use dioxus::prelude::*;
 
+use sc_rest_client::ldk_server_grpc::endpoints::{
+	BOLT11_RECEIVE_PATH, BOLT11_SEND_PATH, BOLT12_RECEIVE_PATH, BOLT12_SEND_PATH, SPONTANEOUS_SEND_PATH,
+};
+
 use crate::actions;
 use crate::format::{amount_entry_preview, unit_label};
 use crate::state::{AppCtx, LightningTab, Op, SendKind};
-use crate::ui::widgets::{Bubble, Card, Field, Gate, Icon, LastId, Spinner, TextArea, TextInput};
+use crate::ui::widgets::{any_permission_of, Bubble, Card, Field, Gate, Icon, LastId, NoAccess, Spinner, TextArea, TextInput};
 
 const HELP_BOLT11_INVOICE: &str = "A one-time Lightning invoice that can include amount, description, expiry, routing hints, and payment hash. Enter an amount only when the invoice is zero-amount.";
 const HELP_GENERATED_BOLT11_INVOICE: &str = "A one-time Lightning invoice another payer can settle before it expires.";
@@ -25,12 +29,13 @@ const HELP_KEYSEND: &str =
 	"A spontaneous Lightning payment that includes the payment secret material needed by the recipient to settle without a prior invoice.";
 const HELP_LAST_PAYMENT_ID: &str = "The local identifier used to look up this payment record later.";
 
-const TABS: [(LightningTab, &str, &str, &str); 5] = [
-	(LightningTab::Bolt11Send, "BOLT11 Send", "arrow-up", "blue"),
-	(LightningTab::Bolt11Receive, "BOLT11 Receive", "arrow-down", "green"),
-	(LightningTab::Bolt12Send, "BOLT12 Send", "arrow-up-right", "orange"),
-	(LightningTab::Bolt12Receive, "BOLT12 Receive", "arrow-down-left", "purple"),
-	(LightningTab::SpontaneousSend, "Keysend", "zap", "gray"),
+/// Each flow with the route its form calls; a flow the token can't call is not offered.
+const TABS: [(LightningTab, &str, &str, &str, &str); 5] = [
+	(LightningTab::Bolt11Send, "BOLT11 Send", "arrow-up", "blue", BOLT11_SEND_PATH),
+	(LightningTab::Bolt11Receive, "BOLT11 Receive", "arrow-down", "green", BOLT11_RECEIVE_PATH),
+	(LightningTab::Bolt12Send, "BOLT12 Send", "arrow-up-right", "orange", BOLT12_SEND_PATH),
+	(LightningTab::Bolt12Receive, "BOLT12 Receive", "arrow-down-left", "purple", BOLT12_RECEIVE_PATH),
+	(LightningTab::SpontaneousSend, "Keysend", "zap", "gray", SPONTANEOUS_SEND_PATH),
 ];
 
 #[component]
@@ -39,10 +44,17 @@ pub fn Lightning() -> Element {
 	if !ctx.is_connected() {
 		return rsx! { Gate {} };
 	}
-	let active = ctx.nav.read().lightning_tab;
+	let tabs: Vec<_> = TABS.into_iter().filter(|(.., route)| ctx.can(route)).collect();
+	let Some(first) = tabs.first().map(|(tab, ..)| *tab) else {
+		let routes = TABS.map(|(.., route)| route);
+		return rsx! { Card { NoAccess { permission: any_permission_of(&routes) } } };
+	};
+	// The remembered flow, unless this token can't use it.
+	let chosen = ctx.nav.read().lightning_tab;
+	let active = if tabs.iter().any(|(tab, ..)| *tab == chosen) { chosen } else { first };
 	rsx! {
 		div { class: "tiles",
-			for (tab, label, icon, tone) in TABS {
+			for (tab, label, icon, tone, _) in tabs {
 				button {
 					key: "{label}",
 					class: if tab == active { "tile active" } else { "tile" },

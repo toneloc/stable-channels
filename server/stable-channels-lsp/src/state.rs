@@ -13,8 +13,12 @@ use crate::stable_manager::StableChannelManager;
 pub struct AppState {
     /// gRPC client for LDK Server; every call gives up after `LDK_CALL_TIMEOUT`.
     pub ldk_server: Arc<crate::ldk_client::LdkClient>,
-    /// HMAC api_key for this daemon's REST surface (used by auth middleware).
-    pub api_key: Arc<Vec<u8>>,
+    /// Asks LDK Server about GUI tokens.
+    pub tokens: Arc<dyn crate::access::tokens::TokenAuthority>,
+    /// GUI sessions and the daemon's own token id; empty until LDK Server first answers about that token.
+    pub access: Arc<std::sync::OnceLock<crate::access::Access>>,
+    /// The id of the token in gui.macaroon, so ListTokens can tag it and RevokeToken can replace it.
+    pub gui_token_id: Arc<Mutex<Option<String>>>,
     /// SC daemon's data directory (audit log, sqlite, etc.).
     pub data_dir: PathBuf,
     /// Network name, e.g. "regtest" / "bitcoin".

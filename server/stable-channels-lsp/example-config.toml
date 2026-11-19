@@ -15,7 +15,6 @@ network = "regtest"
 [storage.disk]
 # SC daemon's data directory. Will hold:
 #   - tls.crt + tls.key (auto-generated on first start)
-#   - <network>/api_key (auto-generated)
 #   - audit_log.txt (append-only)
 #   - stable_channels.db (sqlite)
 dir_path = "./data/stable-channels-lsp"

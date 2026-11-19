@@ -1,14 +1,19 @@
 use dioxus::prelude::*;
 
 use crate::actions;
-use crate::state::{AppCtx, Op};
+use sc_rest_client::sc_protos::stable::LDK_LOG_PATH;
+
+use crate::state::{permission_for, AppCtx, Op};
 use crate::ui::audit_log::LogToolbar;
 use crate::ui::log_view::{LogKind, LogView};
-use crate::ui::widgets::{Empty, Icon};
+use crate::ui::widgets::{Empty, Icon, NoAccess};
 
 #[component]
 pub fn LdkLog() -> Element {
 	let ctx = use_context::<AppCtx>();
+	if !ctx.can(LDK_LOG_PATH) {
+		return rsx! { div { class: "card", NoAccess { permission: permission_for(LDK_LOG_PATH) } } };
+	}
 	let mut forms = ctx.forms;
 	let lines = forms.read().ldk_log.max_lines.clone();
 	let loading = ctx.busy(Op::LdkLog);

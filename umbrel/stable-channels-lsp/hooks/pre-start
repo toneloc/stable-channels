@@ -136,8 +136,8 @@ EOF
     mv -f -- "$SC_CONFIG_TMP" "${CONF_DIR}/sc-lsp.toml"
 fi
 
-# The GUI setup helper uses this marker to locate sc-lsp's network-scoped API
-# key. Derive it from the persistent config, not the current Bitcoin export,
+# The GUI setup helper uses this marker to locate sc-lsp's network-scoped GUI
+# token. Derive it from the persistent config, not the current Bitcoin export,
 # so an operator edit and the marker cannot silently diverge.
 SC_EFFECTIVE_NETWORK="$({
     awk -F= '

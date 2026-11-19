@@ -8,10 +8,10 @@ Cargo workspace for the **Stable Channels LSP** bidaemon architecture, under act
 flowchart TD
     Client["Client (operator GUI / wallet)"]
 
-    Client -->|"POST /Endpoint over TLS :3002<br/>protobuf body<br/>X-Auth = HMAC(SC api_key, body)"| SCVerify
+    Client -->|"POST /Endpoint over TLS :3002<br/>protobuf body<br/>X-Auth = session-signed request"| SCVerify
 
     subgraph SC ["stable-channels-lsp daemon"]
-        SCVerify{"HMAC verify<br/>SC api_key"} --> Route{"Route by path"}
+        SCVerify{"Verify token login<br/>or session signature"} --> Route{"Route by path"}
         Route -- "SC-owned<br/>/GetPrice, /ListStableChannels,<br/>/AuditLog" --> Local["Local handler"]
         Route -- "Proxy<br/>/GetNodeInfo, /OpenChannel,<br/>/Bolt11Receive, ..." --> Grpc["ldk-server-client<br/>(gRPC wrapper)"]
         Local --> SCData[("sqlite + price feed<br/>+ audit log")]
@@ -50,25 +50,29 @@ Each connection (client → SC daemon, *and* SC daemon → LDK Server) is secure
 | Item | Role |
 |---|---|
 | **API URL** | Where the listener is (`https://127.0.0.1:3002` for the SC daemon, `127.0.0.1:3536` for LDK Server gRPC). |
-| **Client credential** | Hop 1 (SC daemon): a 32-byte api_key, used as the key in `HMAC-SHA256(api_key, request_body)`; the HMAC goes in the `X-Auth` header. Hop 2 (LDK Server): a macaroon; for every request the client adds a caveat binding a copy to the RPC method, body hash and time, and sends that copy in the `macaroon` header. **Neither secret travels on the wire after provisioning.** This is what authenticates the **client to the server**. |
+| **Client credential** | Hop 1 (SC daemon): an LDK Server token (macaroon) at login, then a per-session signed request: the login returns a session secret, and each later request is signed with it in the `X-Auth` header. Hop 2 (LDK Server): a macaroon; for every request the client adds a caveat binding a copy to the RPC method, body hash and time, and sends that copy in the `macaroon` header. **Requests carry only signatures or bound copies; a GUI token itself crosses the wire (inside TLS) only at login.** This is what authenticates the **client to the server**. |
 | **TLS certificate** | The server's self-signed cert, **pinned** by the client. Authenticates the **server to the client** and encrypts the channel. |
 
-So three jobs, three mechanisms: the HMAC or bound macaroon proves who's calling, cert pinning proves who's answering, TLS encrypts the bytes in between.
+So three jobs, three mechanisms: the session signature or bound macaroon proves who's calling, cert pinning proves who's answering, TLS encrypts the bytes in between.
 
-The two hops use **independent pairs** of (credential, TLS cert):
+The two hops have **separate TLS certs but one token system**: every token is an LDK Server macaroon.
 
-- Hop 1 (client → SC daemon): the SC daemon's api_key + the SC daemon's TLS cert.
-- Hop 2 (SC daemon → LDK Server): **LDK Server's own** macaroon + **LDK Server's own** TLS cert.
+- Hop 1 (client → SC daemon): an LDK Server token (then its session secret) + the SC daemon's TLS cert.
+- Hop 2 (SC daemon → LDK Server): the daemon's own LDK Server token + **LDK Server's own** TLS cert.
 
-A leak on either hop is contained. A leaked SC daemon api_key (on a wallet, on the operator GUI host, anywhere) gives the attacker access only to the SC daemon, not to LDK Server, because LDK Server only trusts its own macaroons. Symmetrically, a leaked LDK Server macaroon (e.g., off the host running both daemons) gives no access to the SC daemon's REST API, though an admin macaroon can read every channel and payment on the node, wallets' node ids included, and can move funds.
+**What a leaked token reaches: its permissions, on both servers.** A GUI token is an LDK Server token, so besides logging into the SC daemon (whose own routes are checked against the same LDK permission names) it works directly against LDK Server's gRPC wherever that port can be reached. The other way round, any LDK Server token restricted only by permissions and an expiry can log into the SC daemon (tokens limited to single methods are refused at login). An `admin` token can read every channel and payment on the node, wallets' node ids included, and can move funds. A leaked session secret is worth only that session, until it ends (logout, revoke, daemon restart or its 12-hour limit). After a leak, revoke the token on the GUI's Access page: LDK Server stops accepting it and the daemon ends its sessions at once (after a revoke with LDK Server's own command line, they end within about 30 seconds).
 
-**How the SC daemon obtains LDK Server's secrets**: at startup the SC daemon reads LDK Server's own config file (path set in `sc-config.toml` under `[ldk_server] config_path`), derives the TLS cert path and `<storage>/<network>/macaroons/admin.macaroon` from it, and loads both into memory. `[ldk_server] macaroon_path` points it at a different macaroon instead. A macaroon without a permission breaks whatever needs it: the daemon's own stability, SYNC and refund keysends, message signing and verification, channel and payment reads and the event stream, and also the operator GUI's actions, which go through the daemon's proxy routes. The daemon reads the macaroon only at startup, so restart it after replacing the file. Both daemons need read access to a shared filesystem, usually the same host (Umbrel, VM, etc.). To split them across hosts, those two files have to be shipped over a separate secure channel, or the transport upgraded to mTLS.
+The daemon's own token is separate from GUI logins: the Access page refuses to revoke it, since that would stop stability payments. To replace it, make a new one with LDK Server's own tools, point the daemon at it and restart the daemon (see below).
+
+**GUI admin token and remote desktop GUIs**: once LDK Server answers, the daemon keeps a working admin token for the first GUI login in `<storage_dir>/<network>/gui.macaroon` (hex, mode 0600; `<storage_dir>` is the daemon's `[storage.disk] dir_path`). It makes a new one when the file is missing or refused, and at once when that token is revoked on the Access page. A desktop GUI on the same machine reads it from there. For a desktop GUI on another machine, copy the token (`gui.macaroon`, or better a limited token made on the Access page) and the daemon's `<storage_dir>/tls.crt` to it over a secure channel, and enter them as the GUI's access token and TLS cert path. The daemon's `[tls] hosts` must name the address that GUI dials; the daemon writes its certificate only when none exists, so after changing `[tls] hosts` delete `tls.crt` and `tls.key`, restart the daemon and give every client that pinned the old certificate the new one.
+
+**How the SC daemon obtains LDK Server's secrets**: at startup the SC daemon reads LDK Server's own config file (path set in `sc-config.toml` under `[ldk_server] config_path`), derives the TLS cert path and `<storage>/<network>/macaroons/admin.macaroon` from it, and loads both into memory. `[ldk_server] macaroon_path` points it at a different macaroon instead. A macaroon without a permission breaks whatever needs it: the daemon's own stability, SYNC and refund keysends, message signing and verification, channel and payment reads and the event stream, and also the operator GUI's actions: GUI sessions get at most its permissions, GUI logins need it to have `macaroons:manage`, and only an unrestricted `admin` token can make `gui.macaroon`. The daemon reads the macaroon only at startup, so restart it after replacing the file. Both daemons need read access to a shared filesystem, usually the same host (Umbrel, VM, etc.). To split them across hosts, those two files have to be shipped over a separate secure channel, or the transport upgraded to mTLS.
 
 ## Crates
 
 | Crate | Source | Role |
 |---|---|---|
-| `stable-channels-lsp/` | local | The daemon. axum REST server, HMAC auth, `ldk-server-client` wrapper. |
+| `stable-channels-lsp/` | local | The daemon. axum REST server, token login and session-signed auth, `ldk-server-client` wrapper. |
 | `sc-protos/` | local | Hand written `prost` types for SC specific REST endpoints, plus route path constants. |
 | `sc-rest-client/` | local | REST client library, linked into the GUI and consumed by mobile wallet apps. WASM compatible. |
 | `lsp-server-gui/` | local | Native (Dioxus desktop) + WASM (Dioxus web) operator GUI. Talks to `stable-channels-lsp` over REST. |

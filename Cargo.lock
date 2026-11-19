@@ -7590,6 +7590,7 @@ dependencies = [
 name = "sc-protos"
 version = "0.1.0"
 dependencies = [
+ "bitcoin_hashes",
  "prost",
  "serde",
 ]
@@ -7598,7 +7599,9 @@ dependencies = [
 name = "sc-rest-client"
 version = "0.1.0"
 dependencies = [
- "bitcoin_hashes",
+ "futures-executor",
+ "futures-util",
+ "getrandom 0.2.17",
  "js-sys",
  "ldk-server-grpc",
  "prost",

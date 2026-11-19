@@ -493,6 +493,35 @@ pub fn Empty(icon: &'static str, title: String, #[props(default)] hint: String, 
 	}
 }
 
+/// The notice for something the logged-in token has no permission to see.
+pub fn no_access_text(permission: &str) -> String {
+	format!("This token can't see this (needs {permission})")
+}
+
+/// Shown in place of a page or card whose data the token can't read.
+#[component]
+pub fn NoAccess(permission: String) -> Element {
+	rsx! {
+		Empty { icon: "key", title: no_access_text(&permission), hint: "Log in with a token that has this permission to see it." }
+	}
+}
+
+/// The permissions behind `routes`, each once, as "a, b or c" (for a page any of them would open).
+pub fn any_permission_of(routes: &[&str]) -> String {
+	let mut needed: Vec<&str> = Vec::new();
+	for route in routes {
+		let permission = crate::state::permission_for(route);
+		if !needed.contains(&permission) {
+			needed.push(permission);
+		}
+	}
+	match needed.as_slice() {
+		[] => String::new(),
+		[only] => only.to_string(),
+		[rest @ .., last] => format!("{} or {last}", rest.join(", ")),
+	}
+}
+
 /// Shared "not connected" view: Open Settings (and Retry after an error).
 #[component]
 pub fn Gate() -> Element {

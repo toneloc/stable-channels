@@ -3,8 +3,10 @@ use dioxus::prelude::*;
 use crate::actions;
 use crate::config::ChainSourceConfig;
 use crate::format::{relative_long, truncate_id};
-use crate::state::{AppCtx, Op};
-use crate::ui::widgets::{Card, CopyBtn, Empty, Gate, Hover, IdCopy, Kv, Pill, RefreshBtn};
+use sc_rest_client::ldk_server_grpc::endpoints::GET_NODE_INFO_PATH;
+
+use crate::state::{permission_for, AppCtx, Op};
+use crate::ui::widgets::{Card, CopyBtn, Empty, Gate, Hover, IdCopy, Kv, NoAccess, Pill, RefreshBtn};
 
 const HELP_NODE_ID: &str = "The public key that identifies this Lightning node to peers and the network.";
 const HELP_BEST_BLOCK: &str = "The best known block for this node's wallet, shown by block hash and height. If this height trails your chain source tip, the node may still be syncing.";
@@ -30,8 +32,10 @@ pub fn NodeInfo() -> Element {
 	let connected = ctx.is_connected();
 	rsx! {
 		div { class: "grid-2",
-			if connected {
+			if connected && ctx.can(GET_NODE_INFO_PATH) {
 				NodeDetails {}
+			} else if connected {
+				Card { title: "Node Details", NoAccess { permission: permission_for(GET_NODE_INFO_PATH) } }
 			}
 			// Chain source is local config — visible even while disconnected.
 			ChainSource {}

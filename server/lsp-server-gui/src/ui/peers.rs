@@ -1,8 +1,10 @@
 use dioxus::prelude::*;
 
 use crate::actions;
-use crate::state::{AppCtx, Dialog, Op};
-use crate::ui::widgets::{Bubble, Card, Check, Empty, Field, Gate, Icon, Modal, Peer, Pill, RefreshBtn, Spinner, TextInput, Th};
+use sc_rest_client::ldk_server_grpc::endpoints::{CONNECT_PEER_PATH, DISCONNECT_PEER_PATH, LIST_PEERS_PATH};
+
+use crate::state::{permission_for, AppCtx, Dialog, Op};
+use crate::ui::widgets::{Bubble, Card, Check, Empty, Field, Gate, Icon, Modal, NoAccess, Peer, Pill, RefreshBtn, Spinner, TextInput, Th};
 use crate::ui::{close_dialog, open_dialog};
 
 const HELP_PEER_NODE_ID: &str = "The node public key identifying the connected or target peer.";
@@ -23,8 +25,13 @@ pub fn Peers() -> Element {
 	if !ctx.is_connected() {
 		return rsx! { Gate {} };
 	}
+	if !ctx.can(LIST_PEERS_PATH) {
+		return rsx! { Card { NoAccess { permission: permission_for(LIST_PEERS_PATH) } } };
+	}
 	let loading = ctx.busy(Op::Peers);
 	let disconnecting = ctx.busy(Op::DisconnectPeer);
+	let can_connect = ctx.can(CONNECT_PEER_PATH);
+	let can_disconnect = ctx.can(DISCONNECT_PEER_PATH);
 	let rows: Option<Vec<PeerRow>> = ctx.data.read().peers.as_ref().map(|resp| {
 		resp.peers
 			.iter()
@@ -38,7 +45,9 @@ pub fn Peers() -> Element {
 				span { class: "count", "{connected_count} peers connected" }
 				div { class: "row", style: "margin-left: auto;",
 					RefreshBtn { busy: loading, onclick: move |_| actions::fetch_peers(ctx), op: Op::Peers }
-					button { class: "btn sm accent", onclick: move |_| open_dialog(ctx, Dialog::ConnectPeer), Icon { name: "plus", size: 14 } "Connect Peer" }
+					if can_connect {
+						button { class: "btn sm accent", onclick: move |_| open_dialog(ctx, Dialog::ConnectPeer), Icon { name: "plus", size: 14 } "Connect Peer" }
+					}
 				}
 			}
 			match rows {
@@ -50,7 +59,9 @@ pub fn Peers() -> Element {
 									Th { label: "Node ID", help: HELP_PEER_NODE_ID }
 									Th { label: "Address", help: HELP_PEER_ADDRESS }
 									Th { label: "Status", help: HELP_PEER_STATUS }
-									th { class: "right", "Actions" }
+									if can_disconnect {
+										th { class: "right", "Actions" }
+									}
 								}
 							}
 							tbody {
@@ -65,15 +76,17 @@ pub fn Peers() -> Element {
 												Pill { tone: "muted", "Disconnected" }
 											}
 										}
-										td { class: "right",
-											button {
-												class: "btn sm danger",
-												disabled: disconnecting,
-												onclick: {
-													let node_id = peer.node_id.clone();
-													move |_| actions::disconnect_peer(ctx, node_id.clone())
-												},
-												"Disconnect"
+										if can_disconnect {
+											td { class: "right",
+												button {
+													class: "btn sm danger",
+													disabled: disconnecting,
+													onclick: {
+														let node_id = peer.node_id.clone();
+														move |_| actions::disconnect_peer(ctx, node_id.clone())
+													},
+													"Disconnect"
+												}
 											}
 										}
 									}

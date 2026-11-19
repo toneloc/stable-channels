@@ -20,6 +20,7 @@ services:
     environment:
       APP_HOST: stable-channels-lsp_gui_1
       APP_PORT: 80
+      # The whole app stays behind the Umbrel login until the release that pins GUI images built with token logins.
 
   ldk-server:
     image: ghcr.io/toneloc/sc-ldk-server:5f631bd@sha256:cd3e9cdea982fcd81e88f024bb4500da44001f542a5be22b962ec3459c980859
@@ -64,5 +65,5 @@ services:
     environment:
       SC_LSP_UPSTREAM: https://stable-channels-lsp_sc-lsp_1:3002
     volumes:
-      # Read sc-lsp's generated api_key so /setup can display it.
+      # Read sc-lsp's gui.macaroon so /setup/token.txt can serve it.
       - ${APP_DATA_DIR}/data/sc-lsp:/run/sc-lsp:ro

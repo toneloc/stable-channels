@@ -16,7 +16,8 @@ sc-protos = { path = "../sc-protos" }
 # types unify.
 ldk-server-grpc = { git = "https://github.com/lightningdevkit/ldk-server", rev = "aa2d60f51ebacc7edd5dbdfb90b53a9c73ee0bd3", features = ["serde"], default-features = false }
 prost = { version = "0.11.6", default-features = false, features = ["std", "prost-derive"] }
-bitcoin_hashes = "0.14"
+getrandom = "0.2"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
@@ -24,4 +25,8 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 reqwest = { version = "0.12", default-features = false }
 js-sys = "0.3"
+getrandom = { version = "0.2", features = ["js"] }
 web-sys = { version = "0.3", features = ["Window", "Location"] }
+
+[dev-dependencies]
+futures-executor = "0.3"

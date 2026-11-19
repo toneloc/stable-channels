@@ -2,15 +2,19 @@ use dioxus::prelude::*;
 
 use std::collections::HashMap;
 
-use sc_rest_client::sc_protos::stable::StableChannelInfo;
+use sc_rest_client::ldk_server_grpc::endpoints::{
+	CLOSE_CHANNEL_PATH, FORCE_CLOSE_CHANNEL_PATH, LIST_CHANNELS_PATH, OPEN_CHANNEL_PATH, SPLICE_IN_PATH, SPLICE_OUT_PATH,
+	UPDATE_CHANNEL_CONFIG_PATH,
+};
+use sc_rest_client::sc_protos::stable::{StableChannelInfo, EDIT_STABLE_CHANNEL_PATH};
 
 use crate::actions;
 use crate::format::{format_sats, format_usd, unit_label};
 use crate::health::{has_stable_position, settle_threshold_usd, settlement, stable_drift, Drift, Settlement};
-use crate::state::{AppCtx, ChannelSortColumn, ChannelStatusFilter, Dialog, Drawer, Op};
+use crate::state::{permission_for, AppCtx, ChannelSortColumn, ChannelStatusFilter, Dialog, Drawer, Op};
 use crate::ui::widgets::{
-	Amount, Bubble, Card, Check, CopyBtn, Empty, Field, Gate, Hover, Icon, IdCopy, Kv, LiquidityBar, Modal, Peer, Pill,
-	RefreshBtn, SidePanel, SortTh, Spinner, Stat, TextInput, Th,
+	Amount, Bubble, Card, Check, CopyBtn, Empty, Field, Gate, Hover, Icon, IdCopy, Kv, LiquidityBar, Modal, NoAccess, Peer,
+	Pill, RefreshBtn, SidePanel, SortTh, Spinner, Stat, TextInput, Th,
 };
 use crate::ui::{close_dialog, close_drawer, open_dialog, open_drawer};
 
@@ -168,7 +172,11 @@ pub fn Channels() -> Element {
 	if !ctx.is_connected() {
 		return rsx! { Gate {} };
 	}
+	if !ctx.can(LIST_CHANNELS_PATH) {
+		return rsx! { Card { NoAccess { permission: permission_for(LIST_CHANNELS_PATH) } } };
+	}
 	let loading = ctx.busy(Op::Channels);
+	let can_open = ctx.can(OPEN_CHANNEL_PATH);
 	let price = ctx.price_value();
 	let data = ctx.data.read();
 	let stable_by_id: HashMap<String, StableSummary> = data
@@ -306,7 +314,9 @@ pub fn Channels() -> Element {
 				span { class: "count", "{shown} of {total} channel(s)" }
 				div { class: "row", style: "margin-left: auto;",
 					RefreshBtn { busy: loading, onclick: move |_| actions::fetch_channels(ctx), op: Op::Channels }
-					button { class: "btn sm accent", onclick: move |_| open_dialog(ctx, Dialog::OpenChannel), Icon { name: "plus", size: 14 } "Open Channel" }
+					if can_open {
+						button { class: "btn sm accent", onclick: move |_| open_dialog(ctx, Dialog::OpenChannel), Icon { name: "plus", size: 14 } "Open Channel" }
+					}
 				}
 			}
 			if rows.is_empty() {
@@ -423,11 +433,30 @@ const CHANNEL_ACTIONS: [(Dialog, &str, &str, &str); 4] = [
 	(Dialog::CloseChannel, "x", "Close", "danger"),
 ];
 
+/// Whether the token may take a channel action; Close opens both the cooperative and the force close.
+fn action_allowed(ctx: AppCtx, which: Dialog) -> bool {
+	match which {
+		Dialog::SpliceIn => ctx.can(SPLICE_IN_PATH),
+		Dialog::SpliceOut => ctx.can(SPLICE_OUT_PATH),
+		Dialog::CloseChannel => ctx.can(CLOSE_CHANNEL_PATH) || ctx.can(FORCE_CLOSE_CHANNEL_PATH),
+		_ => ctx.can(UPDATE_CHANNEL_CONFIG_PATH),
+	}
+}
+
+/// The channel actions this token may take.
+fn allowed_actions(ctx: AppCtx) -> Vec<(Dialog, &'static str, &'static str, &'static str)> {
+	CHANNEL_ACTIONS.into_iter().filter(|(which, ..)| action_allowed(ctx, *which)).collect()
+}
+
 /// Collapsed row actions menu.
 #[component]
 fn RowMenu(user_channel_id: String, counterparty: String) -> Element {
 	let ctx = use_context::<AppCtx>();
 	let mut open = use_signal(|| false);
+	let actions = allowed_actions(ctx);
+	if actions.is_empty() {
+		return rsx! {};
+	}
 	rsx! {
 		// Clicks inside the menu must not open the row's side panel; Esc closes it.
 		div {
@@ -442,7 +471,7 @@ fn RowMenu(user_channel_id: String, counterparty: String) -> Element {
 			if open() {
 				div { class: "menu-catcher", onclick: move |_| open.set(false) }
 				div { class: "menu", role: "menu",
-					for (which, icon, label, class) in CHANNEL_ACTIONS {
+					for (which, icon, label, class) in actions {
 						button {
 							key: "{label}",
 							role: "menuitem",
@@ -506,8 +535,10 @@ pub fn ChannelDrawer(user_channel_id: String) -> Element {
 	};
 	let uid = ch.user_channel_id.clone();
 	let counterparty = ch.counterparty_node_id.clone();
+	let actions = allowed_actions(ctx);
+	let has_actions = !actions.is_empty();
 	let actions_row = rsx! {
-		for (which, icon, label, class) in CHANNEL_ACTIONS {
+		for (which, icon, label, class) in actions {
 			button {
 				key: "{label}",
 				class: "btn sm {class}",
@@ -527,7 +558,7 @@ pub fn ChannelDrawer(user_channel_id: String) -> Element {
 			sub: crate::format::truncate_id(&ch.counterparty_node_id, 10, 10),
 			icon: rsx! { Bubble { icon: "link", tone: "blue" } },
 			onclose: move |_| close_drawer(ctx),
-			footer: actions_row,
+			footer: has_actions.then_some(actions_row),
 			div { class: "drawer-hero",
 				div { class: "row between",
 					span { class: "hero-amount", Amount { msat: ch.channel_value_sats * 1000, strong: true } }
@@ -609,18 +640,20 @@ fn NoStablePosition(sc: StableChannelInfo) -> Element {
 		div { class: "card inner",
 			div { class: "row between",
 				span { class: "field-label", "Stable position" }
-				button { class: "btn sm", onclick: move |_| {
-					let mut forms = ctx.forms;
-					{
-						let mut f = forms.write();
-						f.edit_stable_channel.channel_id = sc.channel_id.clone();
-						f.edit_stable_channel.expected_usd = String::new();
-						f.edit_stable_channel.note = sc.note.clone();
-					}
-					close_drawer(ctx);
-					let mut nav = ctx.nav;
-					nav.write().active_tab = crate::state::ActiveTab::StableChannels;
-				}, Icon { name: "edit", size: 14 } "Set target" }
+				if ctx.can(EDIT_STABLE_CHANNEL_PATH) {
+					button { class: "btn sm", onclick: move |_| {
+						let mut forms = ctx.forms;
+						{
+							let mut f = forms.write();
+							f.edit_stable_channel.channel_id = sc.channel_id.clone();
+							f.edit_stable_channel.expected_usd = String::new();
+							f.edit_stable_channel.note = sc.note.clone();
+						}
+						close_drawer(ctx);
+						let mut nav = ctx.nav;
+						nav.write().active_tab = crate::state::ActiveTab::StableChannels;
+					}, Icon { name: "edit", size: 14 } "Set target" }
+				}
 			}
 			div { class: "muted small", "No stable position. This channel holds only bitcoin, so the LSP sends it no balance syncs." }
 		}
@@ -648,18 +681,20 @@ fn StableSection(sc: StableChannelInfo, price: Option<f64>) -> Element {
 						close_drawer(ctx);
 						actions::open_channel_ledger(ctx, uid.clone());
 					}, Icon { name: "list", size: 14 } "Ledger" }
-					button { class: "btn sm", onclick: move |_| {
-						let mut forms = ctx.forms;
-						{
-							let mut f = forms.write();
-							f.edit_stable_channel.channel_id = edit.channel_id.clone();
-							f.edit_stable_channel.expected_usd = format!("{:.2}", edit.expected_usd);
-							f.edit_stable_channel.note = edit.note.clone();
-						}
-						close_drawer(ctx);
-						let mut nav = ctx.nav;
-						nav.write().active_tab = crate::state::ActiveTab::StableChannels;
-					}, Icon { name: "edit", size: 14 } "Edit target" }
+					if ctx.can(EDIT_STABLE_CHANNEL_PATH) {
+						button { class: "btn sm", onclick: move |_| {
+							let mut forms = ctx.forms;
+							{
+								let mut f = forms.write();
+								f.edit_stable_channel.channel_id = edit.channel_id.clone();
+								f.edit_stable_channel.expected_usd = format!("{:.2}", edit.expected_usd);
+								f.edit_stable_channel.note = edit.note.clone();
+							}
+							close_drawer(ctx);
+							let mut nav = ctx.nav;
+							nav.write().active_tab = crate::state::ActiveTab::StableChannels;
+						}, Icon { name: "edit", size: 14 } "Edit target" }
+					}
 				}
 			}
 			div { class: "kv",
@@ -767,6 +802,8 @@ pub fn CloseChannelDialog() -> Element {
 	let confirmed = view.read().force_close_confirm;
 	let close_pending = ctx.busy(Op::CloseChannel);
 	let force_pending = ctx.busy(Op::ForceCloseChannel);
+	let can_close = ctx.can(CLOSE_CHANNEL_PATH);
+	let can_force = ctx.can(FORCE_CLOSE_CHANNEL_PATH);
 	let mut cancel = move || {
 		forms.write().close_channel = Default::default();
 		close_dialog(ctx);
@@ -779,27 +816,31 @@ pub fn CloseChannelDialog() -> Element {
 			onclose: move |_| cancel(),
 			footer: rsx! {
 				button { class: "btn ghost", onclick: move |_| cancel(), "Cancel" }
-				Hover { tip: HELP_CLOSE_CHANNEL.to_string(),
-					button { class: "btn primary", disabled: close_pending || force_pending, onclick: move |_| actions::close_channel(ctx),
-						if close_pending { Spinner {} }
-						"Close (Cooperative)"
+				if can_close {
+					Hover { tip: HELP_CLOSE_CHANNEL.to_string(),
+						button { class: "btn primary", disabled: close_pending || force_pending, onclick: move |_| actions::close_channel(ctx),
+							if close_pending { Spinner {} }
+							"Close (Cooperative)"
+						}
 					}
 				}
 			},
 			Field { label: "Channel ID", help: HELP_CHANNEL_ID, TextInput { value: form.user_channel_id.clone(), mono: true, oninput: move |v| forms.write().close_channel.user_channel_id = v } }
 			Field { label: "Counterparty", help: HELP_COUNTERPARTY, TextInput { value: form.counterparty_node_id.clone(), mono: true, oninput: move |v| forms.write().close_channel.counterparty_node_id = v } }
-			Field { label: "Force Close Reason", hint: "Only used for a force close",
-				TextInput { value: form.force_close_reason.clone(), oninput: move |v| forms.write().close_channel.force_close_reason = v }
-			}
-			// Destructive force close: gated behind an irreversibility checkbox.
-			div { class: "confirm-box",
-				div { class: "title", Icon { name: "alert", size: 16 } "Force Close" }
-				span { class: "small muted", "Broadcasts the latest commitment transaction unilaterally. Funds stay locked until the timelock expires." }
-				Check { checked: confirmed, danger: true, label: "I understand this is irreversible", onchange: move |v| view.write().force_close_confirm = v }
-				div { class: "row",
-					button { class: "btn danger solid", disabled: !confirmed || force_pending, onclick: move |_| actions::force_close_channel(ctx),
-						if force_pending { Spinner {} }
-						"Force Close"
+			if can_force {
+				Field { label: "Force Close Reason", hint: "Only used for a force close",
+					TextInput { value: form.force_close_reason.clone(), oninput: move |v| forms.write().close_channel.force_close_reason = v }
+				}
+				// Destructive force close: gated behind an irreversibility checkbox.
+				div { class: "confirm-box",
+					div { class: "title", Icon { name: "alert", size: 16 } "Force Close" }
+					span { class: "small muted", "Broadcasts the latest commitment transaction unilaterally. Funds stay locked until the timelock expires." }
+					Check { checked: confirmed, danger: true, label: "I understand this is irreversible", onchange: move |v| view.write().force_close_confirm = v }
+					div { class: "row",
+						button { class: "btn danger solid", disabled: !confirmed || force_pending, onclick: move |_| actions::force_close_channel(ctx),
+							if force_pending { Spinner {} }
+							"Force Close"
+						}
 					}
 				}
 			}
@@ -930,8 +971,70 @@ mod tests {
 	#[component]
 	fn PanelHarness(sc: sc_rest_client::sc_protos::stable::StableChannelInfo) -> Element {
 		use crate::state::{Connection, Forms, Nav, Prefs};
-		use_context_provider(|| AppCtx::new(Connection::new(), Forms::default(), Nav::default(), Prefs::default(), false));
+		use_context_provider(|| AppCtx::new(Connection::signed_in("admin", &["admin"]), Forms::default(), Nav::default(), Prefs::default(), false));
 		rsx! { StableSection { sc, price: None } }
+	}
+
+	#[component]
+	fn ReadOnlyPanelHarness(sc: sc_rest_client::sc_protos::stable::StableChannelInfo) -> Element {
+		use crate::state::{Connection, Forms, Nav, Prefs};
+		let permissions = sc_rest_client::ldk_server_grpc::permissions::READONLY_PERMISSIONS;
+		use_context_provider(|| AppCtx::new(Connection::signed_in("viewer", &permissions), Forms::default(), Nav::default(), Prefs::default(), false));
+		rsx! { StableSection { sc, price: None } }
+	}
+
+	#[test]
+	fn a_read_only_session_cannot_set_or_edit_a_target_from_the_panel() {
+		use sc_rest_client::sc_protos::stable::StableChannelInfo;
+		for expected_usd in [0.0, 50.0] {
+			let sc = StableChannelInfo { user_channel_id: "u".into(), expected_usd, expected_msats: 50_000_000, ..Default::default() };
+			let mut dom = VirtualDom::new_with_props(ReadOnlyPanelHarness, ReadOnlyPanelHarnessProps { sc });
+			dom.rebuild_in_place();
+			let html = dioxus_ssr::render(&dom);
+			assert!(html.contains("Stable position"));
+			assert!(!html.contains("Set target") && !html.contains("Edit target"), "{expected_usd}: an edit button shows");
+		}
+	}
+
+	#[component]
+	fn ActionsHarness(permissions: Vec<&'static str>) -> Element {
+		use crate::state::{Connection, Forms, Nav, Prefs};
+		use sc_rest_client::ldk_server_grpc::{api::ListChannelsResponse, types::Channel};
+		let ctx = use_context_provider(|| AppCtx::new(Connection::signed_in("t", &permissions), Forms::default(), Nav::default(), Prefs::default(), false));
+		use_hook(move || {
+			let mut data = ctx.data;
+			data.write().channels = Some(ListChannelsResponse {
+				channels: vec![Channel { user_channel_id: "7".into(), channel_id: "c7".into(), counterparty_node_id: "02aa".into(), ..Default::default() }],
+			});
+		});
+		rsx! {
+			ChannelDrawer { user_channel_id: "7".to_string() }
+			CloseChannelDialog {}
+		}
+	}
+
+	fn actions_html(permissions: &[&'static str]) -> String {
+		let mut dom = VirtualDom::new_with_props(ActionsHarness, ActionsHarnessProps { permissions: permissions.to_vec() });
+		dom.rebuild_in_place();
+		dioxus_ssr::render(&dom)
+	}
+
+	#[test]
+	fn channel_actions_follow_the_tokens_permissions() {
+		let admin = actions_html(&["admin"]);
+		for text in ["Splice+ (add funds)", "Splice- (remove funds)", "Config</button>", "Close</button>", "Close (Cooperative)", "Force Close"] {
+			assert!(admin.contains(text), "admin lacks {text}");
+		}
+		let readonly = actions_html(&sc_rest_client::ldk_server_grpc::permissions::READONLY_PERMISSIONS);
+		for text in ["Splice+", "Splice-", "Config</button>", "Close</button>", "Close (Cooperative)", "Force Close"] {
+			assert!(!readonly.contains(text), "read-only shows {text}");
+		}
+		let manage = actions_html(&["channels:read", "channels:manage"]);
+		assert!(manage.contains("Splice+ (add funds)") && manage.contains("Config</button>") && manage.contains("Close (Cooperative)"));
+		assert!(!manage.contains("Splice- (remove funds)"), "splice out sends money (payments:send)");
+		assert!(!manage.contains("Force Close"), "force close needs channels:force_close");
+		let force = actions_html(&["channels:read", "channels:force_close"]);
+		assert!(force.contains("Close</button>") && force.contains("Force Close") && !force.contains("Close (Cooperative)"));
 	}
 
 	#[test]
