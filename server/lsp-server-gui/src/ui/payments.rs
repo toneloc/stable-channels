@@ -3,12 +3,13 @@ use hex::DisplayHex;
 
 use crate::actions;
 use crate::format::{csv_row, local_datetime, relative_short, truncate_id};
-use crate::state::{AppCtx, Op, PaymentSortColumn, SettlementKind};
+use crate::state::{permission_for, AppCtx, Op, PaymentSortColumn, SettlementKind};
 use crate::ui::widgets::{
-	Amount, Bubble, Card, CopyBtn, Empty, Gate, Hover, Icon, IdCopy, Kv, Pill, RefreshBtn, SegBtn, SidePanel, SortTh,
-	Spinner, TextInput, Th, When,
+	Amount, Bubble, Card, CopyBtn, Empty, Gate, Hover, Icon, IdCopy, Kv, NoAccess, Pill, RefreshBtn, SegBtn, SidePanel,
+	SortTh, Spinner, TextInput, Th, When,
 };
 use crate::ui::close_drawer;
+use sc_rest_client::ldk_server_grpc::endpoints::LIST_PAYMENTS_PATH;
 use sc_rest_client::ldk_server_grpc::types::PaymentKind;
 
 const HELP_PAYMENT_ID: &str =
@@ -84,6 +85,9 @@ pub fn Payments() -> Element {
 	let ctx = use_context::<AppCtx>();
 	if !ctx.is_connected() {
 		return rsx! { Gate {} };
+	}
+	if !ctx.can(LIST_PAYMENTS_PATH) {
+		return rsx! { Card { NoAccess { permission: permission_for(LIST_PAYMENTS_PATH) } } };
 	}
 	let loading = ctx.busy(Op::Payments);
 	let loading_all = ctx.busy(Op::PaymentsAll);

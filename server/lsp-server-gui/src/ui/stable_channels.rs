@@ -3,10 +3,12 @@ use dioxus::prelude::*;
 use crate::actions;
 use crate::format::format_usd;
 use crate::health::{stable_drift, Drift};
-use crate::state::{AppCtx, Drawer, Op};
+use sc_rest_client::sc_protos::stable::{EDIT_STABLE_CHANNEL_PATH, LIST_STABLE_CHANNELS_PATH};
+
+use crate::state::{permission_for, AppCtx, Drawer, Op};
 use crate::ui::channels::drift_pill;
 use crate::ui::open_drawer;
-use crate::ui::widgets::{Amount, Card, Empty, Field, Gate, Icon, Peer, Pill, RefreshBtn, Spinner, TextInput, Th};
+use crate::ui::widgets::{Amount, Card, Empty, Field, Gate, Icon, NoAccess, Peer, Pill, RefreshBtn, Spinner, TextInput, Th};
 
 const HELP_CHANNEL_ID: &str = "The Lightning channel tied to this stable-channel record.";
 const HELP_DRIFT: &str =
@@ -56,6 +58,9 @@ pub fn StableChannels() -> Element {
 	});
 	if !ctx.is_connected() {
 		return rsx! { Gate {} };
+	}
+	if !ctx.can(LIST_STABLE_CHANNELS_PATH) {
+		return rsx! { Card { NoAccess { permission: permission_for(LIST_STABLE_CHANNELS_PATH) } } };
 	}
 	let loading = ctx.busy(Op::ListStableChannels);
 	let price = ctx.price.read().as_ref().map(|p| p.price);
@@ -164,7 +169,9 @@ pub fn StableChannels() -> Element {
 				}
 			}
 		}
-		EditCard {}
+		if ctx.can(EDIT_STABLE_CHANNEL_PATH) {
+			EditCard {}
+		}
 	}
 }
 
@@ -220,13 +227,15 @@ fn StableRowView(row: StableRow) -> Element {
 					button { class: "btn sm", title: "Open this stable user_channel_id", onclick: move |_| actions::open_channel_ledger(ctx, ledger_id.clone()),
 						Icon { name: "list", size: 14 } "Ledger"
 					}
-					button { class: "btn sm", title: "Edit this channel's stable target", onclick: move |_| {
-						let mut forms = ctx.forms;
-						let mut f = forms.write();
-						f.edit_stable_channel.channel_id = edit_row.channel_id.clone();
-						f.edit_stable_channel.expected_usd = format!("{:.2}", edit_row.expected_usd);
-						f.edit_stable_channel.note = edit_row.note.clone();
-					}, Icon { name: "edit", size: 14 } "Edit" }
+					if ctx.can(EDIT_STABLE_CHANNEL_PATH) {
+						button { class: "btn sm", title: "Edit this channel's stable target", onclick: move |_| {
+							let mut forms = ctx.forms;
+							let mut f = forms.write();
+							f.edit_stable_channel.channel_id = edit_row.channel_id.clone();
+							f.edit_stable_channel.expected_usd = format!("{:.2}", edit_row.expected_usd);
+							f.edit_stable_channel.note = edit_row.note.clone();
+						}, Icon { name: "edit", size: 14 } "Edit" }
+					}
 				}
 			}
 		}

@@ -26,11 +26,14 @@ COPY . .
 RUN server/lsp-server-gui/web/build.sh
 
 FROM nginx:alpine
+RUN apk add --no-cache openssl
 COPY --from=build /src/server/lsp-server-gui/dist /usr/share/nginx/html
 COPY umbrel/docker/lsp-gui-nginx.conf.template /etc/nginx/templates/default.conf.template
-COPY umbrel/docker/40-provision-gui-api-key.sh /docker-entrypoint.d/40-provision-gui-api-key.sh
-RUN chmod +x /docker-entrypoint.d/40-provision-gui-api-key.sh
+COPY umbrel/docker/gui-locations.inc.template /etc/nginx/templates/gui-locations.inc.template
+COPY umbrel/docker/30-gui-tls.sh /docker-entrypoint.d/30-gui-tls.sh
+COPY umbrel/docker/40-provision-gui-token.sh /docker-entrypoint.d/40-provision-gui-token.sh
+RUN chmod +x /docker-entrypoint.d/30-gui-tls.sh /docker-entrypoint.d/40-provision-gui-token.sh
 # Default keeps the e2e behavior; Umbrel compose overrides with the injected
 # sc-lsp container name.
 ENV SC_LSP_UPSTREAM=https://sc-lsp:3002
-EXPOSE 80
+EXPOSE 80 8443

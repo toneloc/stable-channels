@@ -1,5 +1,8 @@
 use dioxus::prelude::*;
-use sc_rest_client::sc_protos::stable::{AccountingSnapshot, ChannelLedgerEvent, ChannelLedgerOverview, LedgerRef};
+use sc_rest_client::sc_protos::stable::{
+	AccountingSnapshot, ChannelLedgerEvent, ChannelLedgerOverview, LedgerRef, LIST_CHANNEL_LEDGER_EVENTS_PATH,
+	RELEASE_STABILITY_PAYMENT_PATH,
+};
 
 use crate::actions;
 use crate::ledger::{
@@ -8,8 +11,8 @@ use crate::ledger::{
 	latest_state_caption, loaded_events_caption, relative_timestamp, sats_delta, snapshot_rows, status_help,
 	status_tone, timeline_order, ForwardingLeg,
 };
-use crate::state::{AppCtx, ChannelLedgerForm, ChannelLedgerRequestKey, Dialog, Op, ReleaseStabilityPaymentForm};
-use crate::ui::widgets::{Bubble, Empty, Hover, Icon, IdCopy, InfoTip, Modal, Pill, SegBtn, Spinner, Stat, TextInput};
+use crate::state::{permission_for, AppCtx, ChannelLedgerForm, ChannelLedgerRequestKey, Dialog, Op, ReleaseStabilityPaymentForm};
+use crate::ui::widgets::{Bubble, Empty, Hover, Icon, IdCopy, InfoTip, Modal, NoAccess, Pill, SegBtn, Spinner, Stat, TextInput};
 use crate::ui::{close_dialog, open_dialog};
 
 const CATEGORIES: [&str; 10] =
@@ -53,6 +56,9 @@ pub fn ChannelLedger() -> Element {
 			actions::fetch_channels(ctx);
 		}
 	});
+	if !ctx.can(LIST_CHANNEL_LEDGER_EVENTS_PATH) {
+		return rsx! { div { class: "card", NoAccess { permission: permission_for(LIST_CHANNEL_LEDGER_EVENTS_PATH) } } };
+	}
 	let form = ctx.forms.read().channel_ledger.clone();
 	let loading = ctx.busy(Op::ChannelLedger);
 	let exporting = ctx.busy(Op::ChannelLedgerExport);
@@ -270,7 +276,7 @@ fn Timeline(events: Vec<ChannelLedgerEvent>, overview: Option<ChannelLedgerOverv
 							if let Some(target) = entry.target_after.filter(|_| entry.target_changed) {
 								Pill { tone: "info", "target {crate::format::format_usd(target)}" }
 							}
-							if let Some(payment_id) = crate::history::top_up_to_release(&entry.events) {
+							if let Some(payment_id) = crate::history::top_up_to_release(&entry.events).filter(|_| ctx.can(RELEASE_STABILITY_PAYMENT_PATH)) {
 								button {
 									class: "btn sm",
 									onclick: {

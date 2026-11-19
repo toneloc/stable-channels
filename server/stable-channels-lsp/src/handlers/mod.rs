@@ -69,6 +69,8 @@ pub fn map_grpc_error(e: LdkServerError) -> Response {
     let code = match e.error_code {
         LdkServerErrorCode::InvalidRequestError => ErrorCode::InvalidRequestError,
         LdkServerErrorCode::AuthError => ErrorCode::AuthError,
+        // The daemon's macaroon lacks this RPC's permission; the REST enum has no separate code.
+        LdkServerErrorCode::AuthorizationError => ErrorCode::AuthError,
         LdkServerErrorCode::LightningError => ErrorCode::LightningError,
         LdkServerErrorCode::InternalServerError => ErrorCode::InternalServerError,
         LdkServerErrorCode::InternalError => ErrorCode::UnknownError,
@@ -126,6 +128,19 @@ mod tests {
             parse_node_key(&format!("02{}", "0".repeat(64))).is_none(),
             "not a point on the curve"
         );
+    }
+
+    #[tokio::test]
+    async fn a_missing_macaroon_permission_reaches_the_client_as_a_401_with_ldks_message() {
+        let error = LdkServerError::new(LdkServerErrorCode::AuthorizationError, "macaroon requires permission: channels:read");
+
+        let response = map_grpc_error(error);
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = ErrorResponse::decode(&bytes[..]).unwrap();
+        assert_eq!(body.error_code, ErrorCode::AuthError as i32);
+        assert_eq!(body.message, "macaroon requires permission: channels:read");
     }
 
     #[test]

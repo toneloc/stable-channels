@@ -3,8 +3,9 @@ use std::collections::HashMap;
 use dioxus::prelude::*;
 use crate::actions;
 use crate::format::{csv_row, truncate_id};
-use crate::state::{AppCtx, Op};
-use crate::ui::widgets::{Amount, Card, Empty, Gate, Icon, IdCopy, Pill, RefreshBtn, Spinner, Stat, Th};
+use crate::state::{permission_for, AppCtx, Op};
+use crate::ui::widgets::{Amount, Card, Empty, Gate, Icon, IdCopy, NoAccess, Pill, RefreshBtn, Spinner, Stat, Th};
+use sc_rest_client::ldk_server_grpc::endpoints::LIST_FORWARDED_PAYMENTS_PATH;
 
 const HELP_TOTAL_FEE: &str = "Fees earned by this node for forwarding payments.";
 const HELP_AMOUNT_FORWARDED: &str = "Total value forwarded through this node.";
@@ -88,6 +89,9 @@ pub fn ForwardedPayments() -> Element {
 	let ctx = use_context::<AppCtx>();
 	if !ctx.is_connected() {
 		return rsx! { Gate {} };
+	}
+	if !ctx.can(LIST_FORWARDED_PAYMENTS_PATH) {
+		return rsx! { Card { NoAccess { permission: permission_for(LIST_FORWARDED_PAYMENTS_PATH) } } };
 	}
 	let loading = ctx.busy(Op::ForwardedPayments);
 	let data = ctx.data.read();

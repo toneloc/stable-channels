@@ -1,13 +1,13 @@
 //! Revenue tab: what the LSP earned, spent and settled for the peg, and every movement behind it.
 
 use dioxus::prelude::*;
-use sc_rest_client::sc_protos::revenue::{RevenueItem, RevenueLine};
+use sc_rest_client::sc_protos::revenue::{RevenueItem, RevenueLine, GET_REVENUE_PATH, REFUND_TRADE_FEE_PATH};
 
 use crate::actions;
 use crate::format::csv_row;
-use crate::state::{AppCtx, Dialog, Op, RefundTradeFeeForm, RevenueWindow};
+use crate::state::{permission_for, AppCtx, Dialog, Op, RefundTradeFeeForm, RevenueWindow};
 use crate::ui::{close_dialog, open_dialog};
-use crate::ui::widgets::{Bubble, Card, Empty, Gate, Icon, IdCopy, InfoTip, Kv, Modal, Peer, Pill, RefreshBtn, SegBtn, Spinner, Stat, Th};
+use crate::ui::widgets::{Bubble, Card, Empty, Gate, Icon, IdCopy, InfoTip, Kv, Modal, NoAccess, Peer, Pill, RefreshBtn, SegBtn, Spinner, Stat, Th};
 
 const HELP_NET: &str = "Earned minus spent. Stability settlements are not included, nor routing fees paid on stability, protocol and refund payments.";
 const HELP_STABILITY: &str = "Sats paid to users when BTC fell and received when it rose. This is the peg working, not income.";
@@ -182,6 +182,9 @@ pub fn Revenue() -> Element {
 	});
 	if !ctx.is_connected() {
 		return rsx! { Gate {} };
+	}
+	if !ctx.can(GET_REVENUE_PATH) {
+		return rsx! { Card { NoAccess { permission: permission_for(GET_REVENUE_PATH) } } };
 	}
 	let loading = ctx.busy(Op::GetRevenue);
 	let (window, filter) = {
@@ -398,7 +401,7 @@ fn ActivityRow(item: RevenueItem) -> Element {
 				if id.is_empty() { span { class: "faint", "—" } } else { IdCopy { value: id } }
 			}
 			td { class: "right",
-				if can_refund(&item) {
+				if can_refund(&item) && ctx.can(REFUND_TRADE_FEE_PATH) {
 					button {
 						class: "btn sm",
 						onclick: {

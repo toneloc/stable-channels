@@ -1,9 +1,11 @@
 use dioxus::prelude::*;
 
+use sc_rest_client::ldk_server_grpc::endpoints::{GET_BALANCES_PATH, ONCHAIN_RECEIVE_PATH, ONCHAIN_SEND_PATH};
+
 use crate::actions;
 use crate::format::{amount_entry_preview, unit_label};
 use crate::state::{AppCtx, OnchainTab, Op, SendKind};
-use crate::ui::widgets::{Bubble, Card, Check, Field, Gate, Icon, InfoTip, Kv, LastId, Pill, Spinner, TextInput};
+use crate::ui::widgets::{any_permission_of, Bubble, Card, Check, Field, Gate, Icon, InfoTip, Kv, LastId, NoAccess, Pill, Spinner, TextInput};
 
 const HELP_ADDRESS: &str =
 	"The Bitcoin address for the current network. Verify it belongs to the intended recipient and network before sending.";
@@ -23,10 +25,11 @@ const HELP_BROADCAST_AWAITING_CONFIRMATION: &str =
 const HELP_AWAITING_THRESHOLD_CONFIRMATIONS: &str =
 	"The sweep transaction is confirmed but needs more confirmations before the balance is considered safe or spendable.";
 
-const TABS: [(OnchainTab, &str, &str, &str); 3] = [
-	(OnchainTab::Send, "Send", "arrow-up", "blue"),
-	(OnchainTab::Receive, "Receive", "arrow-down", "green"),
-	(OnchainTab::History, "History", "clock", "gray"),
+/// Each tab with the route it needs; a tab the token can't use is not offered.
+const TABS: [(OnchainTab, &str, &str, &str, &str); 3] = [
+	(OnchainTab::Send, "Send", "arrow-up", "blue", ONCHAIN_SEND_PATH),
+	(OnchainTab::Receive, "Receive", "arrow-down", "green", ONCHAIN_RECEIVE_PATH),
+	(OnchainTab::History, "History", "clock", "gray", GET_BALANCES_PATH),
 ];
 
 #[component]
@@ -35,10 +38,17 @@ pub fn Onchain() -> Element {
 	if !ctx.is_connected() {
 		return rsx! { Gate {} };
 	}
-	let active = ctx.nav.read().onchain_tab;
+	let tabs: Vec<_> = TABS.into_iter().filter(|(.., route)| ctx.can(route)).collect();
+	let Some(first) = tabs.first().map(|(tab, ..)| *tab) else {
+		let routes = TABS.map(|(.., route)| route);
+		return rsx! { Card { NoAccess { permission: any_permission_of(&routes) } } };
+	};
+	// The remembered tab, unless this token can't use it.
+	let chosen = ctx.nav.read().onchain_tab;
+	let active = if tabs.iter().any(|(tab, ..)| *tab == chosen) { chosen } else { first };
 	rsx! {
 		div { class: "tiles",
-			for (tab, label, icon, tone) in TABS {
+			for (tab, label, icon, tone, _) in tabs {
 				button {
 					key: "{label}",
 					class: if tab == active { "tile active" } else { "tile" },

@@ -6,10 +6,14 @@ use crate::actions;
 use crate::dashboard::{self, FeedEntry, Peg, Progress};
 use crate::format::{format_usd, local_time, relative_short};
 use crate::health::{self, Attention, Severity, Target};
-use crate::state::{ActiveTab, AppCtx, Drawer, Op, RevenueWindow};
+use sc_rest_client::ldk_server_grpc::endpoints::{GET_BALANCES_PATH, LIST_CHANNELS_PATH};
+use sc_rest_client::sc_protos::revenue::GET_REVENUE_PATH;
+use sc_rest_client::sc_protos::stable::{LIST_CHANNEL_LEDGER_EVENTS_PATH, LIST_STABLE_CHANNELS_PATH};
+
+use crate::state::{permission_for, ActiveTab, AppCtx, Drawer, Op, RevenueWindow};
 use crate::ui::open_drawer;
 use crate::ui::revenue::{bounded, spent_untracked, totals};
-use crate::ui::widgets::{Bubble, Card, Empty, Gate, Icon, Pill, RefreshBtn, Spinner, Stat};
+use crate::ui::widgets::{no_access_text, Bubble, Card, Empty, Gate, Icon, NoAccess, Pill, RefreshBtn, Spinner, Stat};
 
 const HELP_USERS: &str = "Channels with a USD target. Online counts the wallets connected right now; new means the LSP started tracking them in the last 7 days.";
 const HELP_STABILIZED: &str = "Sum of the USD targets the LSP keeps stable, and whether every position is at its peg.";
@@ -156,25 +160,37 @@ pub fn Overview() -> Element {
 		},
 		None => (dash(), String::new()),
 	};
+	// Each card follows its own data's permission: a card the token can't read names what it needs.
+	let locked = |route: &str| (dash(), no_access_text(permission_for(route)));
+	let (users_value, users_sub) = if ctx.can(LIST_STABLE_CHANNELS_PATH) {
+		(users.as_ref().map(|u| u.count.to_string()).unwrap_or_else(dash), users_sub.unwrap_or_default())
+	} else {
+		locked(LIST_STABLE_CHANNELS_PATH)
+	};
+	let (peg_value, peg_sub) = if ctx.can(LIST_STABLE_CHANNELS_PATH) {
+		(peg.map(|(usd, _)| format_usd(usd)).unwrap_or_else(dash), peg_sub.unwrap_or_default())
+	} else {
+		locked(LIST_STABLE_CHANNELS_PATH)
+	};
+	let can_revenue = ctx.can(GET_REVENUE_PATH);
+	let (room_value, room_sub) = match [GET_BALANCES_PATH, LIST_CHANNELS_PATH].into_iter().find(|route| !ctx.can(route)) {
+		Some(route) => locked(route),
+		None => (room_value, room_sub),
+	};
+	let can_feed = ctx.can(LIST_CHANNEL_LEDGER_EVENTS_PATH);
 
 	rsx! {
 		div { class: "row end",
 			RefreshBtn { busy, onclick: refresh_all, label: "Refresh all", op: Op::Channels }
 		}
 		div { class: "grid-4",
-			Stat {
-				title: "Stable users",
-				help: HELP_USERS,
-				value: users.as_ref().map(|u| u.count.to_string()).unwrap_or_else(dash),
-				sub: users_sub.unwrap_or_default(),
+			Stat { title: "Stable users", help: HELP_USERS, value: users_value, sub: users_sub }
+			Stat { title: "Stabilized", help: HELP_STABILIZED, value: peg_value, sub: peg_sub }
+			if can_revenue {
+				Stat { title: "Net this week", help: HELP_NET, value: week_value, sub: week_sub, onclick: open_revenue_week }
+			} else {
+				Stat { title: "Net this week", help: HELP_NET, value: dash(), sub: no_access_text(permission_for(GET_REVENUE_PATH)) }
 			}
-			Stat {
-				title: "Stabilized",
-				help: HELP_STABILIZED,
-				value: peg.map(|(usd, _)| format_usd(usd)).unwrap_or_else(dash),
-				sub: peg_sub.unwrap_or_default(),
-			}
-			Stat { title: "Net this week", help: HELP_NET, value: week_value, sub: week_sub, onclick: open_revenue_week }
 			Stat { title: "Room to grow", help: HELP_ROOM, value: room_value, sub: room_sub }
 		}
 		Card {
@@ -211,14 +227,17 @@ pub fn Overview() -> Element {
 			help: HELP_ACTIVITY,
 			sub: if extended { "Last 7 days across every channel" } else { "Last 24 hours across every channel" },
 			class: "flush",
-			match (recent, activity_error) {
-				(None, Some(error)) => rsx! {
+			match (can_feed, recent, activity_error) {
+				(false, _, _) => rsx! {
+					NoAccess { permission: permission_for(LIST_CHANNEL_LEDGER_EVENTS_PATH) }
+				},
+				(true, None, Some(error)) => rsx! {
 					Empty { icon: "list", title: feed_title, hint: error }
 				},
-				(None, None) => rsx! {
+				(true, None, None) => rsx! {
 					div { class: "empty", Spinner { large: true } }
 				},
-				(Some(list), error) => rsx! {
+				(true, Some(list), error) => rsx! {
 					if let Some(error) = error {
 						div { class: "small danger", style: "padding: 10px 16px;", "Last refresh failed: {error}" }
 					}

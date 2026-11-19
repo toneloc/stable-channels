@@ -2,8 +2,10 @@ use dioxus::prelude::*;
 
 use crate::actions;
 use crate::format::{format_sats, format_usd};
-use crate::state::{AppCtx, DisplayUnit, Op};
-use crate::ui::widgets::{Card, Empty, Gate, Hover, InfoTip, Kv, RefreshBtn, Stat, Th};
+use sc_rest_client::ldk_server_grpc::endpoints::GET_BALANCES_PATH;
+
+use crate::state::{permission_for, AppCtx, DisplayUnit, Op};
+use crate::ui::widgets::{Card, Empty, Gate, Hover, InfoTip, Kv, NoAccess, RefreshBtn, Stat, Th};
 
 const HELP_ONCHAIN_TOTAL: &str = "The total balance tracked by the node's on-chain wallet.";
 const HELP_ONCHAIN_SPENDABLE: &str =
@@ -71,6 +73,9 @@ pub fn Balances() -> Element {
 	let ctx = use_context::<AppCtx>();
 	if !ctx.is_connected() {
 		return rsx! { Gate {} };
+	}
+	if !ctx.can(GET_BALANCES_PATH) {
+		return rsx! { Card { NoAccess { permission: permission_for(GET_BALANCES_PATH) } } };
 	}
 	let loading = ctx.busy(Op::Balances);
 	let Some(b) = ctx.data.read().balances.clone() else {

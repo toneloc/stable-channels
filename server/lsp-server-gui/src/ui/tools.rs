@@ -1,8 +1,10 @@
 use dioxus::prelude::*;
 
+use sc_rest_client::ldk_server_grpc::endpoints::{EXPORT_PATHFINDING_SCORES_PATH, SIGN_MESSAGE_PATH, VERIFY_SIGNATURE_PATH};
+
 use crate::actions;
 use crate::state::{AppCtx, Op};
-use crate::ui::widgets::{Bubble, Card, Field, Gate, Icon, Pill, Spinner, TextArea, TextInput};
+use crate::ui::widgets::{any_permission_of, Bubble, Card, Field, Gate, Icon, NoAccess, Pill, Spinner, TextArea, TextInput};
 
 #[component]
 pub fn Tools() -> Element {
@@ -10,13 +12,27 @@ pub fn Tools() -> Element {
 	if !ctx.is_connected() {
 		return rsx! { Gate {} };
 	}
+	// Each tool calls one route; only the ones this token may call are shown.
+	let routes = [SIGN_MESSAGE_PATH, VERIFY_SIGNATURE_PATH, EXPORT_PATHFINDING_SCORES_PATH];
+	let [sign, verify, export] = routes.map(|route| ctx.can(route));
+	if !(sign || verify || export) {
+		return rsx! { Card { NoAccess { permission: any_permission_of(&routes) } } };
+	}
 	rsx! {
 		div { class: "tools",
-			div { class: "tools-pair",
-				SignCard {}
-				VerifyCard {}
+			if sign || verify {
+				div { class: "tools-pair",
+					if sign {
+						SignCard {}
+					}
+					if verify {
+						VerifyCard {}
+					}
+				}
 			}
-			ExportCard {}
+			if export {
+				ExportCard {}
+			}
 		}
 	}
 }

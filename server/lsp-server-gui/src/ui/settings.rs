@@ -7,13 +7,12 @@ use crate::config::ChainSourceType;
 #[cfg(target_arch = "wasm32")]
 use crate::state::Dialog;
 use crate::state::{AppCtx, ConnectionStatus, DisplayUnit, Theme};
-use crate::ui::widgets::{Card, Check, Field, Icon, Modal, SegBtn, TextArea, TextInput};
+use crate::ui::widgets::{Card, Check, Field, Icon, Modal, SegBtn, Spinner, TextArea, TextInput};
 use crate::ui::close_dialog;
 #[cfg(target_arch = "wasm32")]
 use crate::ui::open_dialog;
 
-const HINT_API_KEY: &str =
-	"Auto-generated at <storage_dir>/<network>/api_key. Get hex: xxd -p <path>/api_key | tr -d '\\n'";
+const HINT_TOKEN: &str = "An LDK Server token (hex). The daemon writes an admin one to <storage_dir>/<network>/gui.macaroon; a token with fewer permissions shows less.";
 
 #[component]
 pub fn Settings() -> Element {
@@ -73,7 +72,10 @@ fn apply_config(ctx: AppCtx, gui_config: GuiConfig, path: Option<String>) {
 	let mut conn = ctx.conn;
 	let mut c = conn.write();
 	c.server_url = gui_config.server_url;
-	c.api_key = gui_config.api_key;
+	// A pasted config can't reach the daemon's files, so keep a typed token rather than blank it.
+	if !gui_config.token.is_empty() {
+		c.token = gui_config.token;
+	}
 	c.network = gui_config.network;
 	if let Some(path) = path {
 		c.tls_cert_path = gui_config.tls_cert_path;
@@ -90,7 +92,7 @@ fn ConnectionCard() -> Element {
 	let mut conn = ctx.conn;
 	let c = conn.read();
 	let server_url = c.server_url.clone();
-	let api_key = c.api_key.clone();
+	let token = c.token.clone();
 	// TLS cert path is only needed on native (browser handles TLS)
 	#[cfg(not(target_arch = "wasm32"))]
 	let cert = cert_field(ctx, c.tls_cert_path.clone());
@@ -106,9 +108,10 @@ fn ConnectionCard() -> Element {
 		ConnectionStatus::Error(e) => ("danger", e.clone()),
 	};
 	let file_busy = ctx.busy(crate::state::Op::FileDialog);
+	let logging_in = ctx.busy(crate::state::Op::Login);
 
 	rsx! {
-		Card { title: "Connection", sub: "Stable Channels LSP daemon (REST over TLS, HMAC-authenticated)",
+		Card { title: "Connection", sub: "Stable Channels LSP daemon (REST over TLS, logged in with an LDK Server token)",
 			div { class: "stack", style: "gap: 16px;",
 				div { class: "toggle-row",
 					div { class: "row nowrap", style: "gap: 10px; min-width: 0;",
@@ -122,15 +125,17 @@ fn ConnectionCard() -> Element {
 				Field { label: "Server URL",
 					TextInput { value: server_url, mono: true, placeholder: "localhost:3002", oninput: move |v| conn.write().server_url = v }
 				}
-				Field { label: "API Key", hint: HINT_API_KEY,
-					TextInput { value: api_key, mono: true, placeholder: "64 hex characters", oninput: move |v| conn.write().api_key = v }
+				Field { label: "Access token", hint: HINT_TOKEN,
+					TextInput { value: token, mono: true, password: true, placeholder: "hex token", oninput: move |v| conn.write().token = v }
 				}
 				{cert}
 				div { class: "row",
 					if connected {
 						button { class: "btn danger", onclick: move |_| actions::disconnect(ctx), Icon { name: "power", size: 16 } "Disconnect" }
 					} else {
-						button { class: "btn primary", onclick: move |_| actions::connect(ctx), Icon { name: "plug", size: 16 } "Connect" }
+						button { class: "btn primary", disabled: logging_in, onclick: move |_| actions::connect(ctx),
+							if logging_in { Spinner {} "Logging in..." } else { Icon { name: "plug", size: 16 } "Connect" }
+						}
 					}
 					button { class: "btn", disabled: file_busy, onclick: move |_| load_config(ctx), Icon { name: "upload", size: 16 } "Load Config" }
 				}

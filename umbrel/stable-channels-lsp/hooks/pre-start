@@ -116,7 +116,7 @@ dir_path = "/data/stable-channels-lsp"
 config_path = "/etc/sc-lsp/ldk-server.toml"
 grpc_address = "${LDK_SERVER_HOST}:3536"
 cert_path    = "/data/ldk-server/tls.crt"
-api_key_path = "/data/ldk-server/${NETWORK}/api_key"
+macaroon_path = "/data/ldk-server/${NETWORK}/macaroons/admin.macaroon"
 
 # Optional mobile push notifications. Copy the credential files into this
 # app's data/config directory, then uncomment the relevant settings below.
@@ -136,8 +136,8 @@ EOF
     mv -f -- "$SC_CONFIG_TMP" "${CONF_DIR}/sc-lsp.toml"
 fi
 
-# The GUI setup helper uses this marker to locate sc-lsp's network-scoped API
-# key. Derive it from the persistent config, not the current Bitcoin export,
+# The GUI setup helper uses this marker to locate sc-lsp's network-scoped GUI
+# token. Derive it from the persistent config, not the current Bitcoin export,
 # so an operator edit and the marker cannot silently diverge.
 SC_EFFECTIVE_NETWORK="$({
     awk -F= '

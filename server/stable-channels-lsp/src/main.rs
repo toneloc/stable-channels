@@ -1,3 +1,4 @@
+mod access;
 mod auth;
 mod backfill;
 mod channel_audit;
@@ -29,11 +30,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use axum::routing::post;
+use axum::routing::{post, MethodRouter};
 use axum::Router;
 use clap::Parser;
 use ldk_server_client::client::LdkServerClient;
 use ldk_server_client::config as ldk_config;
+use ldk_server_client::ldk_server_grpc::api::GetPermissionsRequest;
+use sc_protos::access::{
+    CREATE_TOKEN_PATH, LIST_TOKENS_PATH, LOGIN_PATH, LOGOUT_PATH, REVOKE_TOKEN_PATH, WHO_AM_I_PATH,
+};
 use sc_protos::revenue::{GET_REVENUE_PATH, REFUND_TRADE_FEE_PATH};
 use sc_protos::stable::{
     AUDIT_LOG_PATH, CANCEL_QUEUED_SPLICE_PATH, EDIT_STABLE_CHANNEL_PATH, GET_PRICE_PATH,
@@ -44,9 +49,9 @@ use sc_protos::stable::{
 use ldk_server_client::ldk_server_grpc::endpoints::{
     BOLT11_RECEIVE_PATH, BOLT11_SEND_PATH, BOLT12_RECEIVE_PATH, BOLT12_SEND_PATH,
     CLOSE_CHANNEL_PATH, CONNECT_PEER_PATH, DISCONNECT_PEER_PATH, EXPORT_PATHFINDING_SCORES_PATH,
-    FORCE_CLOSE_CHANNEL_PATH, GET_PAYMENT_DETAILS_PATH, GRAPH_GET_CHANNEL_PATH,
-    GRAPH_GET_NODE_PATH, GRAPH_LIST_CHANNELS_PATH, GRAPH_LIST_NODES_PATH,
-    LIST_FORWARDED_PAYMENTS_PATH, LIST_PAYMENTS_PATH, LIST_PEERS_PATH, ONCHAIN_RECEIVE_PATH,
+    FORCE_CLOSE_CHANNEL_PATH, GET_BALANCES_PATH, GET_NODE_INFO_PATH, GET_PAYMENT_DETAILS_PATH,
+    GRAPH_GET_CHANNEL_PATH, GRAPH_GET_NODE_PATH, GRAPH_LIST_CHANNELS_PATH, GRAPH_LIST_NODES_PATH,
+    LIST_CHANNELS_PATH, LIST_FORWARDED_PAYMENTS_PATH, LIST_PAYMENTS_PATH, LIST_PEERS_PATH, ONCHAIN_RECEIVE_PATH,
     ONCHAIN_SEND_PATH, OPEN_CHANNEL_PATH, SIGN_MESSAGE_PATH, SPLICE_IN_PATH, SPLICE_OUT_PATH,
     SPONTANEOUS_SEND_PATH, UPDATE_CHANNEL_CONFIG_PATH, VERIFY_SIGNATURE_PATH,
 };
@@ -59,7 +64,7 @@ use tracing_subscriber::EnvFilter;
 use crate::config::Config;
 use crate::state::AppState;
 
-/// Longest wait between attempts to load the channel list at startup.
+/// Longest wait between startup attempts to load the channel list, or to learn the daemon's own token.
 const STARTUP_RECONCILE_MAX_RETRY_SECS: u64 = 60;
 
 #[derive(Parser, Debug)]
@@ -93,11 +98,12 @@ async fn main() -> Result<()> {
     let tls_config = tls::get_or_generate_tls_config(Some(tls_opts), &cfg.storage.disk.dir_path)
         .map_err(|e| anyhow::anyhow!(e))?;
 
-    let api_key = ensure_local_api_key(&cfg)?;
-    info!(
-        "SC daemon api_key located at {}",
-        cfg.local_api_key_path().display()
-    );
+    if let Some(path) = old_api_key_file(&cfg) {
+        info!(
+            "{} is no longer used: the GUI logs in with an LDK Server token; the file can be deleted",
+            path.display()
+        );
+    }
 
     set_audit_log_path(
         cfg.audit_log_path()
@@ -105,8 +111,8 @@ async fn main() -> Result<()> {
             .ok_or_else(|| anyhow::anyhow!("audit_log_path is not valid UTF-8"))?,
     );
 
-    let (ldk_server, ldk_addr) = build_ldk_server_client(&cfg)?;
-    info!("LDK Server gRPC endpoint: {}", ldk_addr);
+    let (ldk_server, ldk_endpoint) = build_ldk_server_client(&cfg)?;
+    info!("LDK Server gRPC endpoint: {}", ldk_endpoint.base_url);
 
     let ldk_log_file = cfg.resolve_ldk_log_file();
     match &ldk_log_file {
@@ -149,9 +155,13 @@ async fn main() -> Result<()> {
     );
     stable_manager.enforce_max_stabilization = cfg.enforce_max_stabilization;
 
+    let ldk_server = Arc::new(ldk_client::LdkClient::new(ldk_server));
+    let tokens = access::tokens::LdkTokens::new(Arc::new(ldk_endpoint), Arc::clone(&ldk_server));
     let state = AppState {
-        ldk_server: Arc::new(ldk_client::LdkClient::new(ldk_server)),
-        api_key: Arc::new(api_key),
+        ldk_server,
+        tokens: Arc::new(tokens),
+        access: Arc::default(),
+        gui_token_id: Arc::default(),
         data_dir: data_dir.clone(),
         network: cfg.node.network.clone(),
         db: db_arc,
@@ -199,6 +209,8 @@ async fn main() -> Result<()> {
             }
         });
     }
+    // GUI logins open once LDK Server says who the daemon's token is; the REST server starts now regardless.
+    tokio::spawn(open_gui_logins(state.clone()));
     event_loop::spawn(state.clone());
     stability_tick::spawn(state.clone());
     queued_splice::spawn(state.clone());
@@ -227,108 +239,83 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Every route the daemon serves; the wallet routes added after the auth layer are exempt from it.
+/// Every route behind the session layer, by name, with its handler; each name needs an entry in the permission table.
+const ROUTES: &[(&str, fn() -> MethodRouter<AppState>)] = &[
+    (GET_NODE_INFO_PATH, || post(handlers::proxy::get_node_info)),
+    (GET_BALANCES_PATH, || post(handlers::proxy::get_balances)),
+    (LIST_CHANNELS_PATH, || post(handlers::proxy::list_channels)),
+    // peers
+    (LIST_PEERS_PATH, || post(handlers::peers::list_peers)),
+    (CONNECT_PEER_PATH, || post(handlers::peers::connect_peer)),
+    (DISCONNECT_PEER_PATH, || post(handlers::peers::disconnect_peer)),
+    // payments
+    (LIST_PAYMENTS_PATH, || post(handlers::payments::list_payments)),
+    (GET_PAYMENT_DETAILS_PATH, || post(handlers::payments::get_payment_details)),
+    (LIST_FORWARDED_PAYMENTS_PATH, || post(handlers::payments::list_forwarded_payments)),
+    // lightning
+    (BOLT11_RECEIVE_PATH, || post(handlers::lightning::bolt11_receive)),
+    (BOLT11_SEND_PATH, || post(handlers::lightning::bolt11_send)),
+    (BOLT12_RECEIVE_PATH, || post(handlers::lightning::bolt12_receive)),
+    (BOLT12_SEND_PATH, || post(handlers::lightning::bolt12_send)),
+    (SPONTANEOUS_SEND_PATH, || post(handlers::lightning::spontaneous_send)),
+    // onchain
+    (ONCHAIN_RECEIVE_PATH, || post(handlers::onchain::onchain_receive)),
+    (ONCHAIN_SEND_PATH, || post(handlers::onchain::onchain_send)),
+    // channels
+    (OPEN_CHANNEL_PATH, || post(handlers::channels::open_channel)),
+    (CLOSE_CHANNEL_PATH, || post(handlers::channels::close_channel)),
+    (FORCE_CLOSE_CHANNEL_PATH, || post(handlers::channels::force_close_channel)),
+    (SPLICE_IN_PATH, || post(handlers::channels::splice_in)),
+    (SPLICE_OUT_PATH, || post(handlers::channels::splice_out)),
+    (UPDATE_CHANNEL_CONFIG_PATH, || post(handlers::channels::update_channel_config)),
+    // graph
+    (GRAPH_LIST_CHANNELS_PATH, || post(handlers::graph::graph_list_channels)),
+    (GRAPH_GET_CHANNEL_PATH, || post(handlers::graph::graph_get_channel)),
+    (GRAPH_LIST_NODES_PATH, || post(handlers::graph::graph_list_nodes)),
+    (GRAPH_GET_NODE_PATH, || post(handlers::graph::graph_get_node)),
+    // tools
+    (SIGN_MESSAGE_PATH, || post(handlers::tools::sign_message)),
+    (VERIFY_SIGNATURE_PATH, || post(handlers::tools::verify_signature)),
+    (EXPORT_PATHFINDING_SCORES_PATH, || post(handlers::tools::export_pathfinding_scores)),
+    // SC-specific
+    (GET_PRICE_PATH, || post(handlers::price::get_price)),
+    (LIST_STABLE_CHANNELS_PATH, || post(handlers::stable_channels::list_stable_channels)),
+    (EDIT_STABLE_CHANNEL_PATH, || post(handlers::stable_channels::edit_stable_channel)),
+    (RELEASE_STABILITY_PAYMENT_PATH, || post(handlers::stable_channels::release_stability_payment)),
+    (REGISTER_PUSH_PATH, || post(handlers::register_push::register_push)),
+    (AUDIT_LOG_PATH, || post(handlers::audit_log::audit_log)),
+    (LIST_CHANNEL_LEDGER_EVENTS_PATH, || post(handlers::channel_ledger::list_channel_ledger_events)),
+    (LDK_LOG_PATH, || post(handlers::ldk_log::ldk_log)),
+    (LIST_SETTLEMENT_PAYMENTS_PATH, || post(handlers::stable_channels::list_settlement_payments)),
+    (GET_REVENUE_PATH, || post(handlers::revenue::get_revenue)),
+    (REFUND_TRADE_FEE_PATH, || post(handlers::revenue::refund_trade_fee)),
+    (QUEUE_SPLICE_IN_PATH, || post(handlers::queued_splices::queue_splice_in)),
+    (LIST_QUEUED_SPLICES_PATH, || post(handlers::queued_splices::list_queued_splices)),
+    (CANCEL_QUEUED_SPLICE_PATH, || post(handlers::queued_splices::cancel_queued_splice)),
+    // sessions
+    (LOGOUT_PATH, || post(access::handlers::logout)),
+    (WHO_AM_I_PATH, || post(access::handlers::who_am_i)),
+    // tokens
+    (LIST_TOKENS_PATH, || post(access::manage::list_tokens)),
+    (CREATE_TOKEN_PATH, || post(access::manage::create_token)),
+    (REVOKE_TOKEN_PATH, || post(access::manage::revoke_token)),
+];
+
+/// Every route the daemon serves; Login and the wallet routes, added after the session layer, are exempt from it.
 fn build_router(state: AppState) -> Router {
-    Router::new()
-        .route("/GetNodeInfo", post(handlers::proxy::get_node_info))
-        .route("/GetBalances", post(handlers::proxy::get_balances))
-        .route("/ListChannels", post(handlers::proxy::list_channels))
-        // peers
-        .route(&format!("/{}", LIST_PEERS_PATH), post(handlers::peers::list_peers))
-        .route(&format!("/{}", CONNECT_PEER_PATH), post(handlers::peers::connect_peer))
-        .route(&format!("/{}", DISCONNECT_PEER_PATH), post(handlers::peers::disconnect_peer))
-        // payments
-        .route(&format!("/{}", LIST_PAYMENTS_PATH), post(handlers::payments::list_payments))
-        .route(&format!("/{}", GET_PAYMENT_DETAILS_PATH), post(handlers::payments::get_payment_details))
-        .route(&format!("/{}", LIST_FORWARDED_PAYMENTS_PATH), post(handlers::payments::list_forwarded_payments))
-        // lightning
-        .route(&format!("/{}", BOLT11_RECEIVE_PATH), post(handlers::lightning::bolt11_receive))
-        .route(&format!("/{}", BOLT11_SEND_PATH), post(handlers::lightning::bolt11_send))
-        .route(&format!("/{}", BOLT12_RECEIVE_PATH), post(handlers::lightning::bolt12_receive))
-        .route(&format!("/{}", BOLT12_SEND_PATH), post(handlers::lightning::bolt12_send))
-        .route(&format!("/{}", SPONTANEOUS_SEND_PATH), post(handlers::lightning::spontaneous_send))
-        // onchain
-        .route(&format!("/{}", ONCHAIN_RECEIVE_PATH), post(handlers::onchain::onchain_receive))
-        .route(&format!("/{}", ONCHAIN_SEND_PATH), post(handlers::onchain::onchain_send))
-        // channels
-        .route(&format!("/{}", OPEN_CHANNEL_PATH), post(handlers::channels::open_channel))
-        .route(&format!("/{}", CLOSE_CHANNEL_PATH), post(handlers::channels::close_channel))
-        .route(&format!("/{}", FORCE_CLOSE_CHANNEL_PATH), post(handlers::channels::force_close_channel))
-        .route(&format!("/{}", SPLICE_IN_PATH), post(handlers::channels::splice_in))
-        .route(&format!("/{}", SPLICE_OUT_PATH), post(handlers::channels::splice_out))
-        .route(&format!("/{}", UPDATE_CHANNEL_CONFIG_PATH), post(handlers::channels::update_channel_config))
-        // graph
-        .route(&format!("/{}", GRAPH_LIST_CHANNELS_PATH), post(handlers::graph::graph_list_channels))
-        .route(&format!("/{}", GRAPH_GET_CHANNEL_PATH), post(handlers::graph::graph_get_channel))
-        .route(&format!("/{}", GRAPH_LIST_NODES_PATH), post(handlers::graph::graph_list_nodes))
-        .route(&format!("/{}", GRAPH_GET_NODE_PATH), post(handlers::graph::graph_get_node))
-        // tools
-        .route(&format!("/{}", SIGN_MESSAGE_PATH), post(handlers::tools::sign_message))
-        .route(&format!("/{}", VERIFY_SIGNATURE_PATH), post(handlers::tools::verify_signature))
-        .route(&format!("/{}", EXPORT_PATHFINDING_SCORES_PATH), post(handlers::tools::export_pathfinding_scores))
-        // SC-specific
-        .route(
-            &format!("/{}", GET_PRICE_PATH),
-            post(handlers::price::get_price),
-        )
-        .route(
-            &format!("/{}", LIST_STABLE_CHANNELS_PATH),
-            post(handlers::stable_channels::list_stable_channels),
-        )
-        .route(
-            &format!("/{}", EDIT_STABLE_CHANNEL_PATH),
-            post(handlers::stable_channels::edit_stable_channel),
-        )
-        .route(
-            &format!("/{}", RELEASE_STABILITY_PAYMENT_PATH),
-            post(handlers::stable_channels::release_stability_payment),
-        )
-        .route(
-            &format!("/{}", REGISTER_PUSH_PATH),
-            post(handlers::register_push::register_push),
-        )
-        .route(
-            &format!("/{}", AUDIT_LOG_PATH),
-            post(handlers::audit_log::audit_log),
-        )
-        .route(
-            &format!("/{}", LIST_CHANNEL_LEDGER_EVENTS_PATH),
-            post(handlers::channel_ledger::list_channel_ledger_events),
-        )
-        .route(
-            &format!("/{}", LDK_LOG_PATH),
-            post(handlers::ldk_log::ldk_log),
-        )
-        .route(
-            &format!("/{}", LIST_SETTLEMENT_PAYMENTS_PATH),
-            post(handlers::stable_channels::list_settlement_payments),
-        )
-        .route(
-            &format!("/{}", GET_REVENUE_PATH),
-            post(handlers::revenue::get_revenue),
-        )
-        .route(
-            &format!("/{}", REFUND_TRADE_FEE_PATH),
-            post(handlers::revenue::refund_trade_fee),
-        )
-        .route(
-            &format!("/{}", QUEUE_SPLICE_IN_PATH),
-            post(handlers::queued_splices::queue_splice_in),
-        )
-        .route(
-            &format!("/{}", LIST_QUEUED_SPLICES_PATH),
-            post(handlers::queued_splices::list_queued_splices),
-        )
-        .route(
-            &format!("/{}", CANCEL_QUEUED_SPLICE_PATH),
-            post(handlers::queued_splices::cancel_queued_splice),
-        )
+    let mut router = Router::new();
+    for (route, handler) in ROUTES {
+        router = router.route(&format!("/{route}"), handler());
+    }
+    router
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            auth::auth_middleware,
+            access::middleware::session_layer,
         ))
+        // The token in Login's body is its proof, so it sits outside the session layer and caps its body itself.
+        .route(&format!("/{LOGIN_PATH}"), post(access::handlers::login))
         // Legacy push registration for deployed wallets: unsigned JSON, no HMAC.
-        // Registered AFTER the auth layer so it is exempt from it (axum layers only
+        // Registered AFTER the session layer so it is exempt from it (axum layers only
         // wrap routes added before them). Audit-flagged REGISTER_PUSH_LEGACY_*.
         .route(
             "/api/register-push",
@@ -350,94 +337,44 @@ fn build_router(state: AppState) -> Router {
             "/api/register-email",
             post(handlers::register_email::register_email),
         )
-        // Defense-in-depth body cap covering every route, including the endpoints outside the auth layer
-        // that never reach the auth middleware's own capped read.
+        // Defense-in-depth body cap covering every route, including the endpoints outside the session layer
+        // that never reach its own capped read.
         .layer(axum::extract::DefaultBodyLimit::max(auth::MAX_AUTH_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
 
-/// Size of the SC daemon's api key in bytes.
-const API_KEY_LEN: usize = 32;
-
-/// Read or auto-generate the api_key file. Returns the hex-encoded bytes used as the HMAC key.
-fn ensure_local_api_key(cfg: &Config) -> Result<Vec<u8>> {
+/// The api_key file the daemon used before token logins, if it is still on disk; it is no longer read.
+fn old_api_key_file(cfg: &Config) -> Option<PathBuf> {
     let path = cfg.local_api_key_path();
-    // symlink_metadata, so a dangling symlink counts as present and is never written through.
-    let raw = match std::fs::symlink_metadata(&path) {
-        Ok(_) => read_api_key(&path)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let mut key = vec![0u8; API_KEY_LEN];
-            use ring::rand::SecureRandom;
-            let rng = ring::rand::SystemRandom::new();
-            rng.fill(&mut key)
-                .map_err(|_| anyhow::anyhow!("SecureRandom::fill failed"))?;
+    std::fs::symlink_metadata(&path).is_ok().then_some(path)
+}
 
-            if let Some(parent) = path.parent() {
-                secret_file::create_private_dir_all(parent).with_context(|| {
-                    format!(
-                        "Failed to create parent dir for api_key: {}",
-                        parent.display()
-                    )
-                })?;
-            }
-            secret_file::write_new(&path, &key, 0o600)
-                .with_context(|| format!("Failed to write {}", path.display()))?;
-            info!("generated new SC api_key at {}", path.display());
-            key
-        },
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("Failed to check api_key file {}", path.display()))
-        },
+/// Asks LDK Server about the daemon's own token until it answers, then opens GUI logins.
+async fn open_gui_logins(state: AppState) {
+    let mut retry = Duration::from_secs(1);
+    let own = loop {
+        match state.ldk_server.get_permissions(GetPermissionsRequest {}).await {
+            Ok(response) => match response.macaroon {
+                Some(info) => break access::tokens::TokenFacts::from(info),
+                None => warn!(
+                    "LDK Server's answer about the daemon's token had no details; GUI logins wait, retrying in {:?}",
+                    retry
+                ),
+            },
+            Err(error) => warn!(
+                "could not ask LDK Server about the daemon's token; GUI logins wait, retrying in {:?}: {}",
+                retry, error.message
+            ),
+        }
+        tokio::time::sleep(retry).await;
+        retry = (retry * 2).min(Duration::from_secs(STARTUP_RECONCILE_MAX_RETRY_SECS));
     };
-
-    Ok(bytes_to_lower_hex(&raw).into_bytes())
+    access::start(&state, own).await;
 }
 
-/// Read a stored api key, refusing one that is not exactly `API_KEY_LEN` bytes, and make it readable by its owner only.
-fn read_api_key(path: &std::path::Path) -> Result<Vec<u8>> {
-    use std::io::Read;
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("Failed to read api_key file {}", path.display()))?;
-    let mut raw = Vec::with_capacity(API_KEY_LEN + 1);
-    // One byte past the expected size is enough to tell a longer file apart.
-    (&file)
-        .take(API_KEY_LEN as u64 + 1)
-        .read_to_end(&mut raw)
-        .with_context(|| format!("Failed to read api_key file {}", path.display()))?;
-    if raw.len() != API_KEY_LEN {
-        let size = if raw.len() > API_KEY_LEN {
-            format!("more than {API_KEY_LEN} bytes")
-        } else {
-            format!("{} bytes", raw.len())
-        };
-        anyhow::bail!(
-            "api_key file {} holds {size}, expected exactly {API_KEY_LEN}; refusing to start. \
-             Stop the daemon, delete the file and start again to generate a new key, then give the new key to the operator GUI",
-            path.display()
-        );
-    }
-    match secret_file::make_owner_only(&file) {
-        Ok(Some(old_mode)) => warn!(
-            "api_key file {} was open to its group or other users (mode {:o}); set it to {:o}, owner only. \
-             If anyone else may have read it, generate a new key: stop the daemon, delete the file and start again",
-            path.display(),
-            old_mode,
-            old_mode & 0o700
-        ),
-        Ok(None) => {},
-        Err(error) => warn!(
-            "could not make api_key file {} owner only: {}",
-            path.display(),
-            error
-        ),
-    }
-    Ok(raw)
-}
-
-/// Build the gRPC client and return it together with the resolved base URL.
-fn build_ldk_server_client(cfg: &Config) -> Result<(LdkServerClient, String)> {
+/// Build the gRPC client and return it together with where it connects (base URL and cert).
+fn build_ldk_server_client(cfg: &Config) -> Result<(LdkServerClient, access::tokens::LdkEndpoint)> {
     let ldk_cfg_opt = if let Some(p) = &cfg.ldk_server.config_path {
         Some(ldk_config::load_config(&PathBuf::from(p)).map_err(|e| anyhow::anyhow!(e))?)
     } else {
@@ -460,33 +397,72 @@ fn build_ldk_server_client(cfg: &Config) -> Result<(LdkServerClient, String)> {
     let cert_pem = std::fs::read(&cert_path)
         .with_context(|| format!("Failed to read LDK Server cert at {}", cert_path.display()))?;
 
-    let api_key = if let Some(p) = &cfg.ldk_server.api_key_path {
-        let bytes = std::fs::read(p)
-            .with_context(|| format!("Failed to read api_key file {}", p))?;
-        bytes_to_lower_hex(&bytes)
-    } else {
-        ldk_config::resolve_api_key(None, ldk_cfg_ref)
-            .map_err(|e| anyhow::anyhow!(e))?
-            .ok_or_else(|| anyhow::anyhow!("Could not resolve LDK Server api_key"))?
-    };
+    if let Some(p) = &cfg.ldk_server.api_key_path {
+        warn!(
+            "[ldk_server] api_key_path = {} is ignored: LDK Server now uses macaroons (set macaroon_path, or config_path to use its admin.macaroon)",
+            p
+        );
+    }
+    let macaroon = resolve_ldk_macaroon(cfg.ldk_server.macaroon_path.as_deref(), ldk_cfg_ref)?;
 
-    let client = LdkServerClient::new(base_url.clone(), api_key, &cert_pem)
+    let client = LdkServerClient::new(base_url.clone(), macaroon, &cert_pem)
         .map_err(|e| anyhow::anyhow!("LdkServerClient::new failed: {}", e))?;
-    Ok((client, base_url))
+    Ok((client, access::tokens::LdkEndpoint { base_url, cert_pem }))
 }
 
-fn bytes_to_lower_hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{:02x}", b));
+/// LDK Server's macaroon: the `macaroon_path` file if set, else `admin.macaroon` in LDK Server's storage dir.
+fn resolve_ldk_macaroon(macaroon_path: Option<&str>, ldk_cfg: Option<&ldk_config::Config>) -> Result<String> {
+    if let Some(p) = macaroon_path {
+        return read_macaroon_file(std::path::Path::new(p));
     }
-    s
+    let default_path = ldk_config::resolve_macaroon_path(ldk_cfg).map_err(|e| anyhow::anyhow!(e))?;
+    ldk_config::resolve_macaroon(None, ldk_cfg).map_err(|e| anyhow::anyhow!(e))?.ok_or_else(|| match default_path {
+        Some(path) => anyhow::anyhow!(
+            "LDK Server macaroon not found at {} (start LDK Server once to create it, or set [ldk_server] macaroon_path)",
+            path.display()
+        ),
+        None => anyhow::anyhow!("Could not locate LDK Server's macaroon; set [ldk_server] macaroon_path or config_path"),
+    })
+}
+
+fn read_macaroon_file(path: &std::path::Path) -> Result<String> {
+    use std::io::Read;
+    // Hex doubles the size; the slack covers a trailing newline.
+    let limit = ldk_server_client::macaroon::MAX_MACAROON_BYTES * 2 + 16;
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("Failed to open LDK Server macaroon file {}", path.display()))?;
+    let mut raw = Vec::new();
+    file.take(limit as u64 + 1)
+        .read_to_end(&mut raw)
+        .with_context(|| format!("Failed to read LDK Server macaroon file {}", path.display()))?;
+    if raw.len() > limit {
+        anyhow::bail!("LDK Server macaroon file {} is larger than {} bytes", path.display(), limit);
+    }
+    let token = std::str::from_utf8(&raw)
+        .map(str::trim)
+        .map_err(|_| anyhow::anyhow!("LDK Server macaroon file {} is not a hex macaroon (an old api_key file?)", path.display()))?;
+    ldk_server_client::macaroon::parse_reusable_macaroon(token)
+        .map_err(|e| anyhow::anyhow!("Invalid LDK Server macaroon in {}: {}", path.display(), e))?;
+    Ok(token.to_owned())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
+    use std::collections::HashSet;
+
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use ldk_server_client::ldk_server_grpc::error::ErrorCode;
+    use ldk_server_client::ldk_server_grpc::permissions::{ALL_PERMISSIONS, READONLY_PERMISSIONS};
+    use prost::Message;
+    use sc_protos::access::{required, session_header, LoginRequest, Requirement, WhoAmIResponse, SESSION_UNKNOWN};
+    use tower::ServiceExt;
+
+    use crate::access::testing::{
+        fresh_nonce, login, offline_state, offline_state_before_logins, open_as, post, refusal, sign, signed_post,
+        test_macaroon, FakeLdk,
+    };
 
     fn config_with_storage(dir: &std::path::Path) -> Config {
         let mut cfg: Config = toml::from_str(
@@ -504,100 +480,10 @@ mod tests {
         cfg
     }
 
-    fn mode_of(path: &std::path::Path) -> u32 {
-        std::fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777
-    }
-
-    #[test]
-    fn a_generated_api_key_is_32_bytes_readable_by_its_owner_only_in_a_private_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = config_with_storage(&dir.path().join("data"));
-
-        let key = ensure_local_api_key(&cfg).unwrap();
-
-        let path = cfg.local_api_key_path();
-        let raw = std::fs::read(&path).unwrap();
-        assert_eq!(raw.len(), API_KEY_LEN);
-        assert_eq!(key, bytes_to_lower_hex(&raw).into_bytes());
-        assert_eq!(mode_of(&path), 0o600);
-        assert_eq!(mode_of(path.parent().unwrap()), 0o700);
-        assert_eq!(mode_of(&dir.path().join("data")), 0o700);
-        assert_eq!(ensure_local_api_key(&cfg).unwrap(), key, "the stored key is reused");
-    }
-
-    #[test]
-    fn a_stored_api_key_open_to_its_group_or_others_is_made_owner_only_and_still_used() {
-        for old_mode in [0o644, 0o664, 0o640] {
-            let dir = tempfile::tempdir().unwrap();
-            let cfg = config_with_storage(dir.path());
-            let path = cfg.local_api_key_path();
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(&path, [0x42u8; API_KEY_LEN]).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(old_mode)).unwrap();
-
-            let key = ensure_local_api_key(&cfg).unwrap();
-
-            assert_eq!(key, bytes_to_lower_hex(&[0x42u8; API_KEY_LEN]).into_bytes());
-            assert_eq!(mode_of(&path), 0o600, "from {old_mode:o}");
-        }
-    }
-
-    #[test]
-    fn a_stored_api_key_of_the_wrong_size_stops_startup() {
-        for size in [0, 1, API_KEY_LEN - 1, API_KEY_LEN + 1, 4096] {
-            let dir = tempfile::tempdir().unwrap();
-            let cfg = config_with_storage(dir.path());
-            let path = cfg.local_api_key_path();
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(&path, vec![0x42u8; size]).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-
-            let error = ensure_local_api_key(&cfg).unwrap_err().to_string();
-
-            assert!(error.contains("expected exactly 32"), "size {size}: {error}");
-            assert_eq!(std::fs::read(&path).unwrap().len(), size, "the file is left for the operator");
-        }
-    }
-
-    /// A state that never reaches LDK Server: enough to route requests.
-    fn offline_state(dir: &std::path::Path) -> AppState {
-        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
-        tls::get_or_generate_tls_config(None, dir.to_str().unwrap()).unwrap();
-        let cert = std::fs::read(dir.join("tls.crt")).unwrap();
-        let db = Arc::new(Database::open(dir).unwrap());
-        AppState {
-            ldk_server: Arc::new(ldk_client::LdkClient::new(
-                LdkServerClient::new("localhost:1".into(), String::new(), &cert).unwrap(),
-            )),
-            api_key: Arc::new(vec![0x42; API_KEY_LEN]),
-            data_dir: dir.to_path_buf(),
-            network: "regtest".into(),
-            db: Arc::clone(&db),
-            push: Arc::new(tokio::sync::Mutex::new(push::PushService::new(
-                &Default::default(),
-                dir,
-            ))),
-            push_registrations: Arc::new(push::registrations::Registrations::new(dir)),
-            emails: None,
-            stable_manager: Arc::new(tokio::sync::Mutex::new(
-                stable_manager::StableChannelManager::new(db, dir.to_path_buf()),
-            )),
-            geoip: geoip::load(None),
-            geoip_record_ips: false,
-            geoip_retention_secs: 0,
-            revenue: Arc::new(revenue::RevenueStore::default()),
-            ldk_log_file: None,
-            last_event_before_start_ms: None,
-            funding_outpoints: Arc::default(),
-        }
-    }
-
     #[tokio::test]
     async fn register_email_needs_no_admin_auth_but_keeps_the_body_cap() {
-        use axum::http::{Request, StatusCode};
-        use tower::ServiceExt;
         let dir = tempfile::tempdir().unwrap();
-        let router = build_router(offline_state(dir.path()));
+        let router = build_router(offline_state(dir.path(), &FakeLdk::new()));
         let post = |path: &str, body: Vec<u8>| {
             Request::post(path)
                 .body(axum::body::Body::from(body))
@@ -612,7 +498,7 @@ mod tests {
         assert_eq!(
             admin.status(),
             StatusCode::UNAUTHORIZED,
-            "admin routes need X-Auth"
+            "admin routes need a session"
         );
         // With emails.db off the handler itself answers 503, so this status proves the request got past auth to it.
         let reached = router
@@ -631,17 +517,414 @@ mod tests {
         assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
+    fn route_names() -> impl Iterator<Item = &'static str> {
+        ROUTES.iter().map(|(route, _)| *route)
+    }
+
+    #[tokio::test]
+    async fn admin_routes_need_a_session() {
+        use bitcoin_hashes::hmac::{Hmac, HmacEngine};
+        use bitcoin_hashes::{sha256, Hash, HashEngine};
+        let dir = tempfile::tempdir().unwrap();
+        let router = build_router(offline_state(dir.path(), &FakeLdk::new()));
+        // What the old daemon accepted: HMAC over ts and body, keyed with the hex of its 32-byte api_key.
+        let ts = access::unix_now();
+        let mut engine: HmacEngine<sha256::Hash> = HmacEngine::new("42".repeat(32).as_bytes());
+        engine.input(&ts.to_be_bytes());
+        let old_header = format!("HMAC {}:{:x}", ts, Hmac::<sha256::Hash>::from_engine(engine));
+        let unknown_session = session_header("00112233445566778899aabbccddeeff", ts, &fresh_nonce(), &"0".repeat(64));
+
+        for auth in [None, Some(old_header.as_str()), Some(unknown_session.as_str())] {
+            let (status, bytes) = post(&router, "/GetNodeInfo", auth, vec![]).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{auth:?}");
+            assert_eq!(refusal(&bytes), (ErrorCode::AuthError, SESSION_UNKNOWN.to_string()), "{auth:?}");
+        }
+    }
+
     #[test]
-    fn a_dangling_api_key_symlink_stops_startup_without_writing_through_it() {
+    fn every_route_behind_the_session_layer_is_in_the_permission_table() {
+        let routes: Vec<&str> = route_names().collect();
+        assert_eq!(routes.iter().collect::<HashSet<_>>().len(), routes.len(), "a route is listed twice");
+        for route in routes {
+            match required(route) {
+                Some(Requirement::Permission(permission)) => {
+                    assert!(ALL_PERMISSIONS.contains(&permission), "{route} needs {permission}, which LDK doesn't know")
+                }
+                Some(Requirement::AnySession) => {}
+                other => panic!("{route} is behind the session layer but the table says {other:?}"),
+            }
+        }
+        assert!(route_names().any(|r| r == "Logout") && route_names().any(|r| r == "WhoAmI"));
+        assert!(!route_names().any(|r| r == "Login"), "Login proves itself and sits outside the layer");
+    }
+
+    #[test]
+    fn the_ldk_backed_rows_match_ldk_server() {
+        // Copied from method_authorization in ldk-server/src/macaroons/authorization.rs at aa2d60f5.
+        let ldk_rows: &[(&str, &str)] = &[
+            ("GetNodeInfo", "node:read"),
+            ("GetBalances", "node:read"),
+            ("ExportPathfindingScores", "node:read"),
+            ("OnchainReceive", "onchain:receive"),
+            ("OnchainSend", "onchain:send"),
+            ("Bolt11Receive", "invoices:create"),
+            ("Bolt12Receive", "invoices:create"),
+            ("Bolt11Send", "payments:send"),
+            ("Bolt12Send", "payments:send"),
+            ("SpontaneousSend", "payments:send"),
+            ("SpliceOut", "payments:send"),
+            ("GetPaymentDetails", "payments:read"),
+            ("ListPayments", "payments:read"),
+            ("ListForwardedPayments", "payments:read"),
+            ("ListChannels", "channels:read"),
+            ("OpenChannel", "channels:manage"),
+            ("UpdateChannelConfig", "channels:manage"),
+            ("CloseChannel", "channels:manage"),
+            ("SpliceIn", "channels:manage"),
+            ("ForceCloseChannel", "channels:force_close"),
+            ("ListPeers", "peers:read"),
+            ("ConnectPeer", "peers:manage"),
+            ("DisconnectPeer", "peers:manage"),
+            ("SignMessage", "messages:sign"),
+            ("VerifySignature", "messages:verify"),
+            ("GraphListChannels", "graph:read"),
+            ("GraphGetChannel", "graph:read"),
+            ("GraphListNodes", "graph:read"),
+            ("GraphGetNode", "graph:read"),
+        ];
+        for (route, permission) in ldk_rows {
+            assert_eq!(required(route), Some(Requirement::Permission(permission)), "{route}");
+            assert!(route_names().any(|r| r == *route), "{route} is proxied but not served");
+        }
+    }
+
+    #[tokio::test]
+    async fn login_then_whoami_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeLdk::new();
+        let token = fake.add(1, "night-shift", &["admin"]);
+        let router = build_router(offline_state(dir.path(), &fake));
+
+        let session = login(&router, &token).await;
+        assert_eq!(session.token_name, "night-shift");
+        let (status, bytes) = post(&router, "/WhoAmI", Some(&sign(&session, "WhoAmI", b"")), vec![]).await;
+        assert_eq!(status, StatusCode::OK, "{:?}", refusal(&bytes));
+        let me = WhoAmIResponse::decode(&bytes[..]).unwrap();
+        assert_eq!(me.token_id, session.token_id);
+        assert_eq!((me.token_name.as_str(), me.permissions), ("night-shift", vec!["admin".to_string()]));
+
+        let (status, _) = post(&router, "/Logout", Some(&sign(&session, "Logout", b"")), vec![]).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, bytes) = post(&router, "/WhoAmI", Some(&sign(&session, "WhoAmI", b"")), vec![]).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(refusal(&bytes), (ErrorCode::AuthError, SESSION_UNKNOWN.to_string()), "logged out");
+    }
+
+    #[tokio::test]
+    async fn a_read_only_session_is_refused_before_the_handler_runs() {
+        use sc_protos::stable::EditStableChannelRequest;
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeLdk::new();
+        let token = fake.add(2, "auditor", &READONLY_PERMISSIONS);
+        let state = offline_state(dir.path(), &fake);
+        let user_channel_id = "5e1d0c4b3a29f8e7d6c5b4a392817060";
+        state.db.save_channel("chan-7f3a", user_channel_id, 125.0, 0, 50_000, Some("before")).unwrap();
+        let rows = |state: &AppState| format!("{:?}", state.db.load_all_channels().unwrap());
+        let (rows_before, events_before) = (rows(&state), state.db.max_ledger_event_id().unwrap());
+        let router = build_router(state.clone());
+        let session = login(&router, &token).await;
+
+        let edit = EditStableChannelRequest {
+            channel_id: "chan-7f3a".into(),
+            expected_usd: Some(1.0),
+            note: Some("after".into()),
+        };
+        let body = edit.encode_to_vec();
+        let auth = sign(&session, "EditStableChannel", &body);
+        let (status, bytes) = post(&router, "/EditStableChannel", Some(&auth), body).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(refusal(&bytes), (ErrorCode::AuthError, "this token lacks channels:manage".to_string()));
+        assert_eq!(rows(&state), rows_before);
+        assert_eq!(state.db.max_ledger_event_id().unwrap(), events_before);
+    }
+
+    #[tokio::test]
+    async fn a_signature_covers_the_route_it_was_made_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeLdk::new();
+        let token = fake.add(3, "operator", &["admin"]);
+        let router = build_router(offline_state(dir.path(), &fake));
+        let session = login(&router, &token).await;
+
+        let (status, bytes) = post(&router, "/WhoAmI", Some(&sign(&session, "Logout", b"")), vec![]).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(refusal(&bytes), (ErrorCode::AuthError, "request signature does not match".to_string()));
+    }
+
+    #[tokio::test]
+    async fn until_ldk_answers_about_the_daemon_token_logins_wait_and_wallet_routes_still_serve() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeLdk::new();
+        let token = fake.add(4, "operator", &["admin"]);
+        let state = offline_state_before_logins(dir.path(), &fake);
+        let router = build_router(state.clone());
+
+        let body = LoginRequest { token: token.clone() }.encode_to_vec();
+        let (status, bytes) = post(&router, "/Login", None, body).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(refusal(&bytes), (ErrorCode::InternalServerError, "Can't reach LDK Server".to_string()));
+        let (status, bytes) = post(&router, "/GetNodeInfo", None, vec![]).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(refusal(&bytes), (ErrorCode::AuthError, SESSION_UNKNOWN.to_string()));
+        let (status, _) = post(&router, "/api/register-email", None, b"{}".to_vec()).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "the wallet route's own handler answered");
+
+        open_as(&state, &fake, &["admin"]);
+        let session = login(&router, &token).await;
+        assert_eq!(session.permissions, ["admin"]);
+    }
+
+    #[tokio::test]
+    async fn a_daemon_token_that_is_not_admin_caps_every_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeLdk::new();
+        let token = fake.add(5, "operator", &["admin"]);
+        let state = offline_state_before_logins(dir.path(), &fake);
+        open_as(&state, &fake, &["node:read", "channels:read", "macaroons:manage"]);
+        let router = build_router(state);
+
+        let session = login(&router, &token).await;
+
+        assert_eq!(session.permissions, ["channels:read", "macaroons:manage", "node:read"]);
+        let (status, bytes) = post(&router, "/OnchainSend", Some(&sign(&session, "OnchainSend", b"")), vec![]).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(refusal(&bytes), (ErrorCode::AuthError, "this token lacks onchain:send".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_daemon_token_without_macaroons_manage_lets_no_one_log_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeLdk::new();
+        let token = fake.add(5, "operator", &["admin"]);
+        let state = offline_state_before_logins(dir.path(), &fake);
+        open_as(&state, &fake, &["node:read", "channels:read"]);
+        let router = build_router(state);
+
+        let (status, bytes) = post(&router, "/Login", None, LoginRequest { token }.encode_to_vec()).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "LDK Server won't list tokens to this daemon token");
+        let expected = (ErrorCode::AuthError, "LDK Server refused this token (wrong, revoked or expired)".to_string());
+        assert_eq!(refusal(&bytes), expected);
+    }
+
+    #[tokio::test]
+    async fn proxy_calls_go_out_with_the_callers_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeLdk::new();
+        let token = fake.add(6, "operator", &["admin"]);
+        let router = build_router(offline_state(dir.path(), &fake));
+
+        let (status, bytes) = signed_post(&router, &token, "GetNodeInfo", vec![]).await;
+
+        assert_ne!(status, StatusCode::OK);
+        let (_, message) = refusal(&bytes);
+        // The caller's client points at localhost:2 and the daemon's at localhost:1.
+        assert!(message.contains("localhost:2"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn splice_in_still_uses_the_daemon_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeLdk::new();
+        let token = fake.add(7, "operator", &["admin"]);
+        let router = build_router(offline_state(dir.path(), &fake));
+        let body = ldk_server_client::ldk_server_grpc::api::SpliceInRequest { user_channel_id: "9".into(), ..Default::default() }
+            .encode_to_vec();
+
+        let (status, bytes) = signed_post(&router, &token, "SpliceIn", body).await;
+
+        assert_ne!(status, StatusCode::OK);
+        let (_, message) = refusal(&bytes);
+        assert!(message.contains("localhost:1"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn stable_channel_locations_need_peers_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeLdk::new();
+        let channels_only = fake.add(8, "channels", &["channels:read"]);
+        let readonly = fake.add(9, "readonly", &READONLY_PERMISSIONS);
+        let mut state = offline_state(dir.path(), &fake);
+        state.geoip_record_ips = true;
+        let node = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798".to_string();
+        state.db.record_peer_sighting(&node, "1.2.3.4", None, 10).unwrap();
+        state.stable_manager.lock().await.stable_channels.push(stable_channels::types::StableChannel {
+            counterparty: node.parse().unwrap(),
+            ..Default::default()
+        });
+        let router = build_router(state);
+
+        let locations = |bytes: &[u8]| {
+            let resp = sc_protos::stable::ListStableChannelsResponse::decode(bytes).unwrap();
+            assert_eq!(resp.channels.len(), 1);
+            resp.channels[0].recent_locations.len()
+        };
+        let (status, bytes) = signed_post(&router, &channels_only, "ListStableChannels", vec![]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(locations(&bytes), 0);
+        let (status, bytes) = signed_post(&router, &readonly, "ListStableChannels", vec![]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(locations(&bytes), 1);
+    }
+
+    #[tokio::test]
+    async fn login_refusals_never_echo_the_token_and_the_body_is_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeLdk::new();
+        fake.add(6, "operator", &["admin"]);
+        let router = build_router(offline_state(dir.path(), &fake));
+        let unlisted = test_macaroon(b"0f1e2d3c4b5a69788796a5b4c3d2e1f0");
+
+        for token in ["not a token".to_string(), unlisted.clone()] {
+            let body = LoginRequest { token: token.clone() }.encode_to_vec();
+            let (status, bytes) = post(&router, "/Login", None, body).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            let (code, message) = refusal(&bytes);
+            assert_eq!(code, ErrorCode::AuthError);
+            assert_eq!(message, "LDK Server refused this token (wrong, revoked or expired)");
+            assert!(!message.contains(&token));
+        }
+
+        let declared = Request::post("/Login")
+            .header(axum::http::header::CONTENT_LENGTH, (auth::MAX_AUTH_BODY_BYTES + 1).to_string())
+            .body(Body::from(LoginRequest { token: unlisted }.encode_to_vec()))
+            .unwrap();
+        let response = router.clone().oneshot(declared).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let (status, _) = post(&router, "/Login", None, vec![b'x'; auth::MAX_AUTH_BODY_BYTES + 1]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "a body over the cap is not read in full");
+    }
+
+    #[test]
+    fn an_old_api_key_file_is_noted_and_left_on_disk() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = config_with_storage(dir.path());
+        assert_eq!(old_api_key_file(&cfg), None);
+
         let path = cfg.local_api_key_path();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let target = dir.path().join("elsewhere");
-        std::os::unix::fs::symlink(&target, &path).unwrap();
+        std::fs::write(&path, [0x42u8; 32]).unwrap();
 
-        assert!(ensure_local_api_key(&cfg).is_err());
+        assert_eq!(old_api_key_file(&cfg), Some(path.clone()));
+        assert_eq!(std::fs::read(&path).unwrap(), [0x42u8; 32]);
+    }
 
-        assert!(!target.exists());
+    fn ldk_config_with_storage(dir: &std::path::Path) -> ldk_config::Config {
+        let path = dir.join("ldk-server.toml");
+        let text = format!(
+            "[node]\nnetwork = \"regtest\"\ngrpc_service_address = \"127.0.0.1:3536\"\n[storage.disk]\ndir_path = \"{}\"\n",
+            dir.display()
+        );
+        std::fs::write(&path, text).unwrap();
+        ldk_config::load_config(&path).unwrap()
+    }
+
+    fn write_admin_macaroon(storage: &std::path::Path, contents: &str) -> PathBuf {
+        let path = storage.join("regtest").join("macaroons").join("admin.macaroon");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn a_config_still_naming_the_old_api_key_connects_with_ldk_servers_admin_macaroon() {
+        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+        let dir = tempfile::tempdir().unwrap();
+        let ldk_dir = dir.path().join("ldk");
+        std::fs::create_dir_all(&ldk_dir).unwrap();
+        ldk_config_with_storage(&ldk_dir);
+        tls::get_or_generate_tls_config(None, ldk_dir.to_str().unwrap()).unwrap();
+        write_admin_macaroon(&ldk_dir, &test_macaroon(b"admin"));
+        let old_key = ldk_dir.join("regtest").join("api_key");
+        std::fs::write(&old_key, [0x42u8; 32]).unwrap();
+        let mut cfg = config_with_storage(&dir.path().join("sc"));
+        cfg.ldk_server.config_path = Some(ldk_dir.join("ldk-server.toml").to_str().unwrap().to_owned());
+        cfg.ldk_server.api_key_path = Some(old_key.to_str().unwrap().to_owned());
+
+        let (_, endpoint) = build_ldk_server_client(&cfg).unwrap();
+
+        assert_eq!(endpoint.base_url, "127.0.0.1:3536");
+    }
+
+    #[test]
+    fn the_ldk_server_macaroon_comes_from_macaroon_path_with_its_newline_trimmed() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = test_macaroon(b"sc-daemon");
+        let path = dir.path().join("sc-daemon.macaroon");
+        std::fs::write(&path, format!("{token}\n")).unwrap();
+
+        let resolved = resolve_ldk_macaroon(Some(path.to_str().unwrap()), None).unwrap();
+
+        assert_eq!(resolved, token);
+    }
+
+    #[test]
+    fn without_macaroon_path_the_admin_macaroon_in_ldk_servers_storage_dir_is_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let ldk_cfg = ldk_config_with_storage(dir.path());
+        let admin = test_macaroon(b"admin");
+        write_admin_macaroon(dir.path(), &format!("{admin}\n"));
+
+        assert_eq!(resolve_ldk_macaroon(None, Some(&ldk_cfg)).unwrap(), admin);
+
+        let scoped = test_macaroon(b"scoped");
+        let scoped_path = dir.path().join("scoped.macaroon");
+        std::fs::write(&scoped_path, &scoped).unwrap();
+        let resolved = resolve_ldk_macaroon(Some(scoped_path.to_str().unwrap()), Some(&ldk_cfg)).unwrap();
+        assert_eq!(resolved, scoped, "macaroon_path wins over LDK Server's admin.macaroon");
+    }
+
+    #[test]
+    fn a_missing_admin_macaroon_stops_startup_and_names_where_it_looked() {
+        let dir = tempfile::tempdir().unwrap();
+        let ldk_cfg = ldk_config_with_storage(dir.path());
+        let expected = dir.path().join("regtest").join("macaroons").join("admin.macaroon");
+
+        let error = resolve_ldk_macaroon(None, Some(&ldk_cfg)).unwrap_err().to_string();
+
+        assert!(error.contains(&expected.display().to_string()), "{error}");
+    }
+
+    #[test]
+    fn an_old_api_key_file_is_not_accepted_as_a_macaroon() {
+        let dir = tempfile::tempdir().unwrap();
+        let ldk_cfg = ldk_config_with_storage(dir.path());
+        let old_key = dir.path().join("regtest").join("api_key");
+        std::fs::create_dir_all(old_key.parent().unwrap()).unwrap();
+        for raw in [vec![0xdeu8; 32], vec![0x42u8; 32]] {
+            std::fs::write(&old_key, &raw).unwrap();
+
+            let error = resolve_ldk_macaroon(Some(old_key.to_str().unwrap()), Some(&ldk_cfg))
+                .unwrap_err()
+                .to_string();
+
+            assert!(error.contains(&old_key.display().to_string()), "{error}");
+        }
+        let admin_path = write_admin_macaroon(dir.path(), "4242");
+        let error = resolve_ldk_macaroon(None, Some(&ldk_cfg)).unwrap_err().to_string();
+        assert!(error.contains(&admin_path.display().to_string()), "{error}");
+    }
+
+    #[test]
+    fn an_oversized_macaroon_file_is_refused_before_parsing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.macaroon");
+        std::fs::write(&path, "a".repeat(ldk_server_client::macaroon::MAX_MACAROON_BYTES * 2 + 17)).unwrap();
+
+        let error = resolve_ldk_macaroon(Some(path.to_str().unwrap()), None).unwrap_err().to_string();
+
+        assert!(error.contains("larger than"), "{error}");
     }
 }

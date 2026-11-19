@@ -1,8 +1,14 @@
 use dioxus::prelude::*;
 
+use sc_rest_client::ldk_server_grpc::endpoints::{
+	GRAPH_GET_CHANNEL_PATH, GRAPH_GET_NODE_PATH, GRAPH_LIST_CHANNELS_PATH, GRAPH_LIST_NODES_PATH,
+};
+
 use crate::actions;
 use crate::state::{AppCtx, Op};
-use crate::ui::widgets::{Card, Empty, Field, Gate, Hover, Icon, IdCopy, InfoTip, Kv, Pill, Spinner, TextInput, Th};
+use crate::ui::widgets::{
+	any_permission_of, Card, Empty, Field, Gate, Hover, Icon, IdCopy, InfoTip, Kv, NoAccess, Pill, Spinner, TextInput, Th,
+};
 
 const HELP_SHORT_CHANNEL_ID: &str =
 	"Compact channel locator based on block height, transaction index, and output index.";
@@ -28,15 +34,29 @@ pub fn NetworkGraph() -> Element {
 	if !ctx.is_connected() {
 		return rsx! { Gate {} };
 	}
+	// Each section calls one graph route; only the ones this token may call are shown.
+	let routes = [GRAPH_LIST_CHANNELS_PATH, GRAPH_GET_CHANNEL_PATH, GRAPH_LIST_NODES_PATH, GRAPH_GET_NODE_PATH];
+	let [list_channels, get_channel, list_nodes, get_node] = routes.map(|route| ctx.can(route));
+	if !(list_channels || get_channel || list_nodes || get_node) {
+		return rsx! { Card { NoAccess { permission: any_permission_of(&routes) } } };
+	}
 	rsx! {
 		div { class: "grid-2",
 			div { class: "stack", style: "gap: 18px;",
-				ChannelsSection {}
-				ChannelLookup {}
+				if list_channels {
+					ChannelsSection {}
+				}
+				if get_channel {
+					ChannelLookup {}
+				}
 			}
 			div { class: "stack", style: "gap: 18px;",
-				NodesSection {}
-				NodeLookup {}
+				if list_nodes {
+					NodesSection {}
+				}
+				if get_node {
+					NodeLookup {}
+				}
 			}
 		}
 	}

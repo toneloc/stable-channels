@@ -2,6 +2,7 @@
 
 use axum::body::Bytes;
 use axum::extract::State;
+use axum::Extension;
 use axum::response::Response;
 
 use sc_protos::stable::{
@@ -12,6 +13,7 @@ use sc_protos::stable::{
 };
 use stable_channels::price_feeds::get_fresh_cached_price_no_fetch;
 
+use crate::access::sessions::Caller;
 use crate::handlers::{decode_body, error_response, ok_response};
 use crate::stable_manager::{EditOutcome, ReleaseOutcome};
 use crate::state::AppState;
@@ -38,6 +40,7 @@ fn recent_locations(db: &stable_channels::db::Database, record_ips: bool, node_i
 
 pub async fn list_stable_channels(
     State(state): State<AppState>,
+    Extension(caller): Extension<Caller>,
     body: Bytes,
 ) -> Response {
     if let Err(resp) = decode_body::<ListStableChannelsRequest>(&body) {
@@ -48,6 +51,8 @@ pub async fn list_stable_channels(
     // One read for every row; a missing entry reports 0 so old readers see nothing new.
     let created_at = state.db.channel_created_at().unwrap_or_default();
 
+    // Where a user connects from is peer data: it needs peers:read.
+    let may_see_locations = sc_protos::access::allows(&caller.permissions, "peers:read");
     let mgr = state.stable_manager.lock().await;
     let channels = mgr
         .stable_channels
@@ -61,7 +66,7 @@ pub async fn list_stable_channels(
             note: sc.note.clone().unwrap_or_default(),
             is_stable_receiver: sc.is_stable_receiver,
             user_channel_id: format!("{}", sc.user_channel_id),
-            recent_locations: recent_locations(&state.db, state.geoip_record_ips, &sc.counterparty.to_string()),
+            recent_locations: recent_locations(&state.db, state.geoip_record_ips && may_see_locations, &sc.counterparty.to_string()),
             created_at: created_at.get(&sc.user_channel_id.to_string()).copied().unwrap_or(0),
         })
         .collect::<Vec<_>>();

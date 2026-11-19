@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Enable missing detailed history only in the image built with LDK bd95e187.
+"""Enable missing detailed history only in the image built with LDK aa2d60f5.
 
 Do not call this from the host pre-start hook: older pinned LDK images reject
 the setting. Parse TOML, insert one line, then prove the sole semantic change.
@@ -120,7 +120,7 @@ def main(argv):
         reason = str(error) if isinstance(error, MigrationError) else "file access or metadata preservation failed"
         print(f"LDK forwarded-history migration refused: {reason}. LDK Server was not started. "
               "Stop the app and back up its data. Validate the config and add "
-              "forwarded_payment_tracking_mode = \"detailed\" under [node] manually for LDK bd95e187, "
+              "forwarded_payment_tracking_mode = \"detailed\" under [node] manually for LDK aa2d60f5, "
               "or provide a writable directory mount with the existing file's ownership/permissions. "
               "See umbrel/README.md before retrying or downgrading.", file=sys.stderr)
         return 1
