@@ -250,6 +250,55 @@ class LspSpliceRecordTest {
     }
 
     @Test
+    fun aLaterLspSpliceNamingTheSameSpliceOutDoesNotRestartItsDay() {
+        // An RBF of the LSP's splice, or a new one, names the same splice-out again with a new
+        // txid. An older LSP splice that named no Move does not count.
+        val day = SpliceEventRecorder.LSP_SPLICE_PENDING_MAX_AGE_SECS
+        val now = nowSecs
+        val earlier = OutPoint("34".repeat(32), 1u)
+        assertTrue(
+            record(
+                negotiated.copy(newFundingTxo = earlier),
+                value = valueBefore,
+                now = now - 3 * day,
+            )
+        )
+        assertTrue(
+            record(
+                Event.ChannelReady(channel, "7", "peer", earlier),
+                value = valueAfter,
+                onFunding = earlier.txid,
+                now = now - 2 * day,
+            )
+        )
+        val id = spliceOut()
+        val rbf = OutPoint("56".repeat(32), 1u)
+        assertTrue(record(negotiated, lspSplice = true, value = valueBefore, now = now - 7_200))
+        assertTrue(
+            record(
+                negotiated.copy(newFundingTxo = rbf),
+                lspSplice = true,
+                value = valueBefore,
+                now = now - 3_600,
+            )
+        )
+        age(id, 3_600)
+        assertTrue(db.hasPendingSplice())
+        assertEquals("pending", payment(id).status)
+
+        db.writableDatabase.execSQL(
+            "UPDATE lsp_splices SET created_at = created_at - ? WHERE txid = ?",
+            arrayOf(day, txid),
+        )
+        assertFalse(db.hasPendingSplice())
+        assertEquals(
+            "the day counts from the first LSP splice that named it",
+            "failed",
+            payment(id).status,
+        )
+    }
+
+    @Test
     fun withoutThePushAMoveWaitingForItsTransactionTakesTheNegotiationAsBefore() {
         val id = move()
         assertTrue(record(negotiated, value = valueBefore))
