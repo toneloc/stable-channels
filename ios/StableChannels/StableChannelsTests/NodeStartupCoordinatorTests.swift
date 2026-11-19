@@ -1001,6 +1001,12 @@ final class NodeStartupCoordinatorTests: XCTestCase {
         return dir
     }
 
+    /// A node that stalls on fee estimation, on its own wallet folder: its start opens the wallet database
+    /// and backfills prices into it, so it must never use the installed one.
+    private func makeStallingNodeOnTempWallet() throws -> FeeStallingNodeService {
+        try FeeStallingNodeService(dataDir: makeWalletDir(seedPhrase: Self.restoredWords))
+    }
+
     private func seedPhrase(in walletDir: URL) throws -> String {
         try String(contentsOf: walletDir.appendingPathComponent("seed_phrase"), encoding: .utf8)
     }
@@ -1120,15 +1126,16 @@ final class NodeStartupCoordinatorTests: XCTestCase {
 
     /// A launch that background paused between provider attempts hands the wallet dir back,
     /// so the suspended app never keeps it from the notification extension.
-    func testLaunchPausedBetweenAttempts_releasesTheWalletDir() async {
+    func testLaunchPausedBetweenAttempts_releasesTheWalletDir() async throws {
         NodeDirLock.shared.release()
+        let node = try makeStallingNodeOnTempWallet()
         var appState: AppState?
         let coordinator = makeCoordinator(sleep: { duration in
             guard duration == Constants.nodeStartRetryDelay else { return }
             appState?.performBackgroundStop()
         })
         appState = AppState(
-            nodeService: FeeStallingNodeService(),
+            nodeService: node,
             networkMonitor: MockNetworkMonitor(initialStatus: .online),
             nodeStartup: coordinator
         )
@@ -1270,8 +1277,8 @@ final class NodeStartupCoordinatorTests: XCTestCase {
         }
     }
 
-    func testBackgroundStopDuringLaunch_doesNotProduceTerminalError() async {
-        let node = FeeStallingNodeService()
+    func testBackgroundStopDuringLaunch_doesNotProduceTerminalError() async throws {
+        let node = try makeStallingNodeOnTempWallet()
         var appState: AppState?
         let coordinator = makeCoordinator(sleep: { duration in
             guard duration == Constants.nodeStartRetryDelay else { return }
