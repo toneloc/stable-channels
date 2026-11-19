@@ -1302,7 +1302,22 @@ mod tests {
 		assert!(!release.is_for(&QueuedSpliceInfo { last_attempt_at: 2_130, ..call.clone() }), "a new call, or the node's answer");
 		assert!(!release.is_for(&QueuedSpliceInfo { created_at: 5_000, ..call.clone() }), "a new request on the channel");
 		assert!(!release.is_for(&QueuedSpliceInfo { pending_on_node: false, ..call.clone() }), "nothing pending");
-		assert!(!release.is_for(&QueuedSpliceInfo { user_channel_id: "8".into(), ..call }), "another channel");
+		assert!(!release.is_for(&QueuedSpliceInfo { user_channel_id: "8".into(), ..call.clone() }), "another channel");
+		let signed = QueuedSpliceInfo { status: "negotiated".into(), funding_txo: "bb:1".into(), ..call };
+		assert!(!release.is_for(&signed), "the node signed the call after the operator checked it");
+		assert!(QueuedRelease::for_call(&signed, true).is_for(&signed), "a release opened on the signed call is for it");
+	}
+
+	#[test]
+	fn a_release_ticked_before_the_node_signed_the_call_sends_nothing() {
+		use sc_rest_client::sc_protos::stable::ListQueuedSplicesResponse;
+		let call = queued_row("splicing", true, 3_000);
+		let release = QueuedRelease::for_call(&call, true);
+		let signed = QueuedSpliceInfo { status: "negotiated".into(), funding_txo: "bb:1".into(), ..call.clone() };
+		let listed = |row: QueuedSpliceInfo| ListQueuedSplicesResponse { splices: vec![row] };
+		assert!(actions::queued_release_request(&release, &listed(call)).is_some());
+		assert_eq!(actions::queued_release_request(&release, &listed(signed.clone())), None);
+		assert_eq!(armed_release(Some(&release), &[signed]), None, "the confirmation closes");
 	}
 
 	#[test]

@@ -678,12 +678,13 @@ impl Default for LogViewState {
 	}
 }
 
-/// An open Release confirmation on the Queued splice-ins card. It belongs to one call: the channel, the request (`created_at`, which a re-queue changes) and the call (`last_attempt_at`, which a new call or the node's answer changes), so a tick cannot arm another row or a later call on the same channel.
+/// An open Release confirmation on the Queued splice-ins card. It belongs to one call as the operator saw it: the channel, the request (`created_at`, which a re-queue changes), the call (`last_attempt_at`, which a new call or the node's answer changes) and the splice the node reported signed for it (`funding_txo`), so a tick cannot arm another row, a later call on the same channel, or a call the node signed after the operator checked it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct QueuedRelease {
 	pub user_channel_id: String,
 	pub created_at: i64,
 	pub last_attempt_at: i64,
+	pub funding_txo: String,
 	pub confirmed: bool,
 }
 
@@ -694,6 +695,7 @@ impl QueuedRelease {
 			user_channel_id: row.user_channel_id.clone(),
 			created_at: row.created_at,
 			last_attempt_at: row.last_attempt_at,
+			funding_txo: row.funding_txo.clone(),
 			confirmed,
 		}
 	}
@@ -704,6 +706,7 @@ impl QueuedRelease {
 			&& row.user_channel_id == self.user_channel_id
 			&& row.created_at == self.created_at
 			&& row.last_attempt_at == self.last_attempt_at
+			&& row.funding_txo == self.funding_txo
 	}
 }
 

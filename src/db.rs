@@ -425,6 +425,8 @@ pub struct QueuedSplice {
     pub status: String,
     /// Attempts that ended in a failure.
     pub attempts: u32,
+    /// The failed attempts in a row that the node refused; any other failure resets it.
+    pub refusals: u32,
     pub last_error: Option<String>,
     /// Why the phone is not being pushed right now; cleared when a push goes out or a call is made.
     pub wake_note: Option<String>,
@@ -484,7 +486,7 @@ pub enum QueueSpliceOutcome {
     ManualPending(ManualSplice),
 }
 
-const QUEUED_SPLICE_COLUMNS: &str = "rowid, user_channel_id, counterparty, amount_sats, status, attempts, last_error, wake_note, funding_txo, wake_sent_at, last_attempt_at, channel_funding_txo, channel_value_before, lsp_sats_before, pending_on_node, created_at, updated_at, negotiated_at";
+const QUEUED_SPLICE_COLUMNS: &str = "rowid, user_channel_id, counterparty, amount_sats, status, attempts, last_error, wake_note, funding_txo, wake_sent_at, last_attempt_at, channel_funding_txo, channel_value_before, lsp_sats_before, pending_on_node, created_at, updated_at, negotiated_at, refusals";
 
 fn queued_splice_row(row: &rusqlite::Row<'_>) -> SqliteResult<QueuedSplice> {
     Ok(QueuedSplice {
@@ -506,6 +508,7 @@ fn queued_splice_row(row: &rusqlite::Row<'_>) -> SqliteResult<QueuedSplice> {
         created_at: row.get(15)?,
         updated_at: row.get(16)?,
         negotiated_at: row.get(17)?,
+        refusals: row.get::<_, i64>(18)?.max(0) as u32,
     })
 }
 
@@ -1045,9 +1048,12 @@ impl Database {
                 lsp_sats_before INTEGER,
                 pending_on_node INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL
+                updated_at INTEGER NOT NULL,
+                refusals INTEGER NOT NULL DEFAULT 0
             );",
         )?;
+        // Tables made before the column; ignore the error if it is there already.
+        let _ = conn.execute("ALTER TABLE queued_splices ADD COLUMN refusals INTEGER NOT NULL DEFAULT 0", []);
 
         // A splice-in the operator made by hand, with the funding the channel was on: a queued request
         // for the channel waits until the channel has moved past it, so the hand-made splice is not
@@ -1502,11 +1508,12 @@ impl Database {
         )
     }
 
-    /// The node negotiated a splice while the call of request `request_id` was out. Every row whose call is pending records it, whatever its status, since a signed splice keeps the call through a later negotiation failure; only a row still `splicing` moves to `negotiated`, so a stalled or cancelled one keeps its status. A request replaced since it was read is left alone.
+    /// The node negotiated a splice while the call of request `request_id` was out. Every row whose call is pending records it, whatever its status, since a signed splice keeps the call through a later negotiation failure; a row still `splicing` moves to `negotiated`, and so does one stalled because the node had not reported the call, dropping that stall's note. A cancelled row keeps its status. A request replaced since it was read is left alone.
     pub fn note_queued_splice_negotiated(&self, user_channel_id: &str, request_id: i64, funding_txo: &str, now: i64) -> SqliteResult<Option<QueuedSplice>> {
         self.update_queued_splice(
             "UPDATE queued_splices
-             SET status = CASE WHEN status = 'splicing' THEN 'negotiated' ELSE status END,
+             SET status = CASE WHEN status = 'splicing' OR (status = 'stalled' AND funding_txo IS NULL) THEN 'negotiated' ELSE status END,
+                 last_error = CASE WHEN status = 'stalled' AND funding_txo IS NULL THEN NULL ELSE last_error END,
                  funding_txo = ?3, negotiated_at = ?4, updated_at = ?4
              WHERE user_channel_id = ?1 AND rowid = ?2 AND pending_on_node = 1 AND status != 'locked'",
             params![user_channel_id, request_id, funding_txo, now],
@@ -1538,7 +1545,7 @@ impl Database {
         )
     }
 
-    /// Count a failed attempt on request `request_id` while it is still in `from_status`: the node answered or no call was made, so nothing of it is pending. The row goes back to `failed` for its next try, however many have failed. A request replaced since it was read is left alone.
+    /// Count a failed attempt on request `request_id` while it is still in `from_status`: the node answered or no call was made, so nothing of it is pending. The row goes back to `failed` for its next try, however many have failed. A request replaced since it was read is left alone. The node's refusals in a row start again from none.
     pub fn fail_queued_splice(
         &self,
         user_channel_id: &str,
@@ -1547,12 +1554,36 @@ impl Database {
         error: &str,
         now: i64,
     ) -> SqliteResult<Option<QueuedSplice>> {
+        self.fail_queued_splice_with(user_channel_id, request_id, from_status, error, false, now)
+    }
+
+    /// [`Self::fail_queued_splice`] for an attempt the node refused: one more refusal in a row.
+    pub fn refuse_queued_splice(
+        &self,
+        user_channel_id: &str,
+        request_id: i64,
+        from_status: &str,
+        error: &str,
+        now: i64,
+    ) -> SqliteResult<Option<QueuedSplice>> {
+        self.fail_queued_splice_with(user_channel_id, request_id, from_status, error, true, now)
+    }
+
+    fn fail_queued_splice_with(
+        &self,
+        user_channel_id: &str,
+        request_id: i64,
+        from_status: &str,
+        error: &str,
+        refused: bool,
+        now: i64,
+    ) -> SqliteResult<Option<QueuedSplice>> {
         self.update_queued_splice(
             "UPDATE queued_splices
-             SET attempts = attempts + 1, status = 'failed',
+             SET attempts = attempts + 1, status = 'failed', refusals = CASE WHEN ?6 THEN refusals + 1 ELSE 0 END,
                  pending_on_node = 0, last_error = ?4, wake_note = NULL, last_attempt_at = ?5, updated_at = ?5
              WHERE user_channel_id = ?1 AND rowid = ?2 AND status = ?3",
-            params![user_channel_id, request_id, from_status, error, now],
+            params![user_channel_id, request_id, from_status, error, now, refused],
             user_channel_id,
         )
     }
@@ -9005,6 +9036,64 @@ mod tests {
     }
 
     #[test]
+    fn only_refusals_in_a_row_are_counted_and_any_other_failure_ends_the_run() {
+        let db = Database::open_in_memory().unwrap();
+        db.queue_splice_in("7", "peer", 50_000, 100, 0, "", None).unwrap();
+        let request_id = db.load_queued_splice("7").unwrap().unwrap().request_id;
+        let call = |at| db.mark_queued_splice_splicing("7", request_id, Some("aa:0"), 500_000, 400_000, at).unwrap().unwrap();
+        call(101);
+        assert_eq!(db.refuse_queued_splice("7", request_id, "splicing", "splice_in: busy", 102).unwrap().unwrap().refusals, 1);
+        call(103);
+        let twice = db.refuse_queued_splice("7", request_id, "splicing", "splice_in: busy", 104).unwrap().unwrap();
+        assert_eq!((twice.attempts, twice.refusals), (2, 2));
+        db.mark_queued_splice_waking("7", request_id, 105).unwrap();
+        let timed_out = db.fail_queued_splice("7", request_id, "waking", "the phone did not come online", 106).unwrap().unwrap();
+        assert_eq!((timed_out.attempts, timed_out.refusals), (3, 0));
+        db.queue_splice_in("7", "peer", 50_000, 200, 0, "", None).unwrap();
+        assert_eq!(db.load_queued_splice("7").unwrap().unwrap().refusals, 0, "a new request starts with none");
+    }
+
+    #[test]
+    fn a_queued_splices_table_from_before_the_refusals_column_gets_it() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let conn = Connection::open(dir.path().join(DB_FILENAME)).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE queued_splices (
+                    user_channel_id TEXT PRIMARY KEY, counterparty TEXT NOT NULL, amount_sats INTEGER NOT NULL,
+                    status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, wake_note TEXT,
+                    funding_txo TEXT, negotiated_at INTEGER, wake_sent_at INTEGER, last_attempt_at INTEGER,
+                    channel_funding_txo TEXT, channel_value_before INTEGER, lsp_sats_before INTEGER,
+                    pending_on_node INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+                );
+                INSERT INTO queued_splices (user_channel_id, counterparty, amount_sats, status, attempts, last_error, created_at, updated_at)
+                VALUES ('7', 'peer', 50000, 'failed', 4, 'splice_in: busy', 100, 100);",
+            )
+            .unwrap();
+        }
+        let db = Database::open(dir.path()).unwrap();
+        let row = db.load_queued_splice("7").unwrap().unwrap();
+        assert_eq!((row.attempts, row.refusals), (4, 0));
+    }
+
+    #[test]
+    fn a_signing_ends_the_stall_of_a_call_the_node_had_not_reported_but_not_one_already_signed() {
+        let db = Database::open_in_memory().unwrap();
+        db.queue_splice_in("7", "peer", 50_000, 100, 0, "", None).unwrap();
+        let request_id = db.load_queued_splice("7").unwrap().unwrap().request_id;
+        db.mark_queued_splice_splicing("7", request_id, Some("aa:0"), 500_000, 400_000, 101).unwrap();
+        db.stall_queued_splice_pending("7", request_id, "the node has not reported the splice-in call", 700).unwrap().unwrap();
+        let signed = db.note_queued_splice_negotiated("7", request_id, "bb:1", 701).unwrap().unwrap();
+        assert_eq!((signed.status.as_str(), signed.last_error.as_deref(), signed.funding_txo.as_deref()), ("negotiated", None, Some("bb:1")));
+        db.stall_queued_splice_pending("7", request_id, "a splice was signed (bb:1) but has not locked", 20_000).unwrap().unwrap();
+        let replayed = db.note_queued_splice_negotiated("7", request_id, "bb:1", 20_001).unwrap().unwrap();
+        assert_eq!(
+            (replayed.status.as_str(), replayed.last_error.as_deref()),
+            ("stalled", Some("a splice was signed (bb:1) but has not locked"))
+        );
+    }
+
+    #[test]
     fn queued_splice_lifecycle_from_call_to_lock() {
         let db = Database::open_in_memory().unwrap();
         db.queue_splice_in("7", "peer", 50_000, 100, 0, "", None).unwrap();
@@ -9065,10 +9154,10 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let QueueSpliceOutcome::Queued(row) = db.queue_splice_in("7", "peer", 50_000, 100, 0, "", None).unwrap() else { panic!("queued") };
         db.mark_queued_splice_splicing("7", row.request_id, Some("aa:0"), 500_000, 400_000, 101).unwrap();
-        // A stalled row with its call pending records the outpoint and stays stalled.
+        // A row stalled with its call pending records the outpoint, and the signing ends the stall.
         db.stall_queued_splice_pending("7", row.request_id, "no answer", 102).unwrap();
         let stalled = db.note_queued_splice_negotiated("7", row.request_id, "bb:1", 103).unwrap().unwrap();
-        assert_eq!((stalled.status.as_str(), stalled.funding_txo.as_deref(), stalled.negotiated_at, stalled.pending_on_node), ("stalled", Some("bb:1"), Some(103), true));
+        assert_eq!((stalled.status.as_str(), stalled.funding_txo.as_deref(), stalled.negotiated_at, stalled.pending_on_node), ("negotiated", Some("bb:1"), Some(103), true));
         // So does a cancelled one whose call is pending.
         db.cancel_queued_splice("7", Some("by the operator"), false, "the splice negotiation failed", 104).unwrap();
         let cancelled = db.note_queued_splice_negotiated("7", row.request_id, "cc:2", 105).unwrap().unwrap();
