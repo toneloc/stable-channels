@@ -577,9 +577,38 @@ final class SpliceEventRecorderTests: XCTestCase {
         try service.spliceRepo.recordEvent(negotiated(newFunding, valueSats: 100_000), lspSplice: true)
         try ageOut(first)
         try ageOut(second)
-        _ = try service.spliceRepo.hasPendingSplice()
+        XCTAssertFalse(try service.spliceRepo.hasPendingSplice())
         XCTAssertEqual(try row(first).status, "expired", "two waiting, so the LSP's splice names neither")
         XCTAssertEqual(try row(second).status, "expired")
+        XCTAssertFalse(try service.spliceRepo.moveSpends(userChannelId: ucid, fundingTxid: oldFunding))
+    }
+
+    func testAnExpiredSpliceOutTheLspsSpliceNamesStillHoldsTheCloseBackUntilThatSpliceLocks() throws {
+        let move = try begin(.spliceOut)
+        try ageOut(move)
+        _ = try service.spliceRepo.hasPendingSplice()
+        XCTAssertEqual(try row(move).status, "expired")
+        XCTAssertFalse(try service.spliceRepo.moveSpends(userChannelId: ucid, fundingTxid: oldFunding))
+
+        try service.spliceRepo.recordEvent(negotiated(newFunding, valueSats: 100_000), lspSplice: true)
+        XCTAssertTrue(try service.spliceRepo.moveSpends(userChannelId: ucid, fundingTxid: oldFunding))
+        try service.spliceRepo.recordEvent(ready(eventFunding: newFunding, valueSats: 100_000))
+        XCTAssertFalse(try service.spliceRepo.moveSpends(userChannelId: ucid, fundingTxid: oldFunding))
+    }
+
+    func testASpliceInTheLspsSpliceNamesIsKeptUntilThatSpliceLocks() throws {
+        // A sweep spends the funding output too, so it holds the close back the same way; the ready
+        // event cannot give it the splice, since the LSP's grows the channel as well.
+        let move = try begin(.spliceIn)
+        try service.spliceRepo.recordEvent(negotiated(newFunding, valueSats: 100_000), lspSplice: true)
+        try ageOut(move)
+        XCTAssertTrue(try service.spliceRepo.hasPendingSplice())
+        XCTAssertTrue(try service.spliceRepo.moveSpends(userChannelId: ucid, fundingTxid: oldFunding))
+        XCTAssertEqual(
+            try service.spliceRepo.recordEvent(ready(eventFunding: newFunding, valueSats: 150_000)), .locked
+        )
+        XCTAssertFalse(try service.spliceRepo.hasPendingSplice())
+        XCTAssertEqual(try row(move).status, "expired")
     }
 
     func testAChannelNoSmallerAtTheReadyEventKeepsTheSpliceTheLsps() throws {
@@ -628,10 +657,12 @@ final class SpliceEventRecorderTests: XCTestCase {
         XCTAssertNil(try row(second).txid)
     }
 
-    func testASpliceOutThatFailedMeanwhileIsNotGivenTheSplice() throws {
+    func testAFailureLeavesAMoveTheLspsSpliceNamedAndAFailedOneIsNotGivenTheSplice() throws {
         let move = try begin(.spliceOut)
         try service.spliceRepo.recordEvent(negotiated(newFunding, valueSats: 100_000), lspSplice: true)
         XCTAssertTrue(service.spliceRepo.failPendingSplice(rowId: move))
+        XCTAssertEqual(try row(move).status, "pending", "a negotiation was recorded for it, so the failure is not its")
+        try service.rawSQL.execute("UPDATE payments SET status = 'failed' WHERE id = ?", params: [.integer(move)])
         XCTAssertEqual(
             try service.spliceRepo.recordEvent(ready(eventFunding: newFunding, valueSats: 49_000)), .locked
         )

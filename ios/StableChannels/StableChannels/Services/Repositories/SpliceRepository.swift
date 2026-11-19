@@ -286,16 +286,26 @@ final class SpliceRepository {
 
     /// Whether a move of ours that has not failed or expired spends `fundingTxid`, the channel's funding
     /// output as LDK reports it. LDK reports the pre-splice output until the splice locks, which comes
-    /// after it confirms (#456).
+    /// after it confirms (#456). An expired Move a negotiated LSP splice named still may.
     func moveSpends(userChannelId: String, fundingTxid: String) throws -> Bool {
         try !rawSQL.query(
             """
             SELECT 1 FROM splice_operations s JOIN payments p ON p.id = s.payment_row_id
-            WHERE s.user_channel_id = ? AND s.previous_funding_txid = ? AND p.status IN ('pending', 'completed')
+            WHERE s.user_channel_id = ?1 AND s.previous_funding_txid = ?2
+              AND (p.status IN ('pending', 'completed')
+                   OR (p.status = 'expired' AND \(SpliceEventRecorder.heldByLspSpliceSQL("p.id", since: "?3"))))
             LIMIT 1
             """,
-            params: [.text(userChannelId), .text(fundingTxid)]
+            params: [
+                .text(userChannelId), .text(fundingTxid),
+                .integer(Self.lspSpliceHoldSince(Int64(Date().timeIntervalSince1970)))
+            ]
         ).isEmpty
+    }
+
+    /// Negotiated LSP splices newer than this hold the Move they named (see `heldByLspSpliceSQL`).
+    private static func lspSpliceHoldSince(_ now: Int64) -> Int64 {
+        now - SpliceEventRecorder.lspSplicePendingMaxAgeSecs
     }
 
     func getPendingSpliceTxid() throws -> String? {
@@ -339,12 +349,9 @@ final class SpliceRepository {
               AND payment_type IN \(SpliceEventRecorder.spliceTypesSQL)
               AND txid IS NULL
               AND created_at < ?1
-              AND NOT EXISTS (
-                  SELECT 1 FROM lsp_splices l
-                  WHERE l.move_row_id = payments.id AND l.status = 'negotiated' AND l.created_at > ?2
-              )
+              AND NOT \(SpliceEventRecorder.heldByLspSpliceSQL("payments.id", since: "?2"))
             """,
-            params: [.integer(now - 600), .integer(now - SpliceEventRecorder.lspSplicePendingMaxAgeSecs)]
+            params: [.integer(now - 600), .integer(Self.lspSpliceHoldSince(now))]
         )
         let rows = try rawSQL.query(SpliceEventRecorder.hasPendingSpliceSQL)
         return !rows.isEmpty
@@ -379,6 +386,7 @@ final class SpliceRepository {
     @discardableResult
     func failPendingSplice(rowId: Int64? = nil) -> Bool {
         do {
+            // A Move a negotiated LSP splice named was negotiated, so the failure is not its.
             try rawSQL.execute(
                 """
                 UPDATE payments
@@ -391,8 +399,12 @@ final class SpliceRepository {
                       AND (?1 IS NULL OR id = ?1)
                     ORDER BY id DESC LIMIT 1
                 )
+                  AND NOT \(SpliceEventRecorder.heldByLspSpliceSQL("payments.id", since: "?2"))
                 """,
-                params: [rowId.map { .integer($0) } ?? .null]
+                params: [
+                    rowId.map { .integer($0) } ?? .null,
+                    .integer(Self.lspSpliceHoldSince(Int64(Date().timeIntervalSince1970)))
+                ]
             )
             return true
         } catch {

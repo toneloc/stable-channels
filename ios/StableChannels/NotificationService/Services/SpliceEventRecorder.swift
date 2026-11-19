@@ -203,6 +203,18 @@ enum SpliceEventRecorder {
     /// How long a negotiated LSP splice holds the books repair back.
     static let lspSplicePendingMaxAgeSecs: Int64 = 24 * 60 * 60
 
+    /// Whether the Move `row` is the one a negotiated LSP splice newer than `since` (epoch seconds)
+    /// named: its ready event has yet to say whether that splice was the Move's own splice-out, so
+    /// until then the Move may still spend the channel's funding output, and no failure is its.
+    static func heldByLspSpliceSQL(_ row: String, since: String) -> String {
+        """
+        EXISTS (
+            SELECT 1 FROM lsp_splices l
+            WHERE l.move_row_id = \(row) AND l.status = 'negotiated' AND l.created_at > \(since)
+        )
+        """
+    }
+
     /// A replayed ready event may carry funding its first receipt lacked.
     static let attachFundingSQL = """
     UPDATE splice_events SET txid = ?5, vout = ?6

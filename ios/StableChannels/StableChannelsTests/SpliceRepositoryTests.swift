@@ -499,6 +499,26 @@ final class SpliceFailureRecoveryTests: XCTestCase {
         XCTAssertFalse(app.isSweeping)
     }
 
+    func testAFailedNegotiationOutsideThePushWindowLeavesAMoveTheLspsSpliceNamed() throws {
+        // The Move's negotiation was recorded as the LSP's splice, so the failure is not its own:
+        // it keeps waiting for the ready event.
+        let rowId = try db.spliceRepo.recordPendingSplice(
+            paymentType: .spliceOut, amountMsat: 50_000_000, amountUSD: 25, btcPrice: 50000,
+            address: "bc1qtest", selfSend: false, channel: channel
+        )
+        try db.spliceRepo.recordEvent(SpliceEventReceipt(
+            kind: .negotiated, userChannelId: "7", channelId: "channel",
+            identityTxid: txid, funding: OutPoint(txid: txid, vout: 0), channelValueSats: 100_000
+        ), lspSplice: true)
+        let named = try db.rawSQL.query("SELECT move_row_id FROM lsp_splices WHERE txid = ?", params: [.text(txid)])
+        XCTAssertEqual(named.first?.optInt64(0), rowId)
+        let ack = EventAckToken()
+        app.handleSpliceNegotiationFailed(channelId: "channel", userChannelId: "7", ackToken: ack)
+        XCTAssertTrue(ack.shouldAck)
+        let status = try db.rawSQL.query("SELECT status FROM payments WHERE id = ?", params: [.integer(rowId)])
+        XCTAssertEqual(status.first?.string(0), "pending")
+    }
+
     func testAFailedNegotiationOfTheAppsOwnMoveStillFailsItsRow() throws {
         try app.beginSpliceOut(amountSats: 50_000, address: "bc1qtest", channel: channel)
         LspSpliceExpectation.note(app.lspSpliceDefaults)

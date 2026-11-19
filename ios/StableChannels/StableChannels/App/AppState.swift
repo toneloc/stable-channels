@@ -3248,7 +3248,8 @@ class AppState {
             } else if expectsLspSplice {
                 // No Move of the app's own is in flight and the LSP's splice is expected, so the
                 // negotiation that failed is taken to be the LSP's. A Move left without its
-                // transaction still expires on its own after 10 minutes.
+                // transaction expires on its own after 10 minutes, or once the LSP's splice it
+                // waits on locks.
                 AuditService.log("LSP_SPLICE_FAILED", data: [
                     "channel_id": "\(channelId)",
                     "user_channel_id": "\(userChannelId)"
