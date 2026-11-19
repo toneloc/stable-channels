@@ -375,9 +375,10 @@ fn armed_release(release: Option<&QueuedRelease>, rows: &[QueuedSpliceInfo]) -> 
 	rows.iter().find(|row| release.is_for(row)).map(|row| (row.clone(), release.confirmed))
 }
 
-/// The row's note: its last error, and why the phone could not be reached when a later push failed.
+/// The row's note: its last error, and why the phone could not be reached when a later push failed, unless the error already says so.
 fn queued_splice_note(row: &QueuedSpliceInfo) -> String {
-	[row.last_error.as_str(), row.wake_note.as_str()].into_iter().filter(|text| !text.is_empty()).collect::<Vec<_>>().join(" · ")
+	let wake_note = if row.last_error.contains(row.wake_note.as_str()) { "" } else { row.wake_note.as_str() };
+	[row.last_error.as_str(), wake_note].into_iter().filter(|text| !text.is_empty()).collect::<Vec<_>>().join(" · ")
 }
 
 #[component]
@@ -1367,6 +1368,8 @@ mod tests {
 		assert_eq!(queued_splice_note(&failed), "splice-in refused · no usable push token");
 		assert_eq!(queued_splice_note(&QueuedSpliceInfo { last_error: String::new(), ..failed.clone() }), "no usable push token");
 		assert_eq!(queued_splice_note(&QueuedSpliceInfo { wake_note: String::new(), ..failed.clone() }), "splice-in refused");
+		let stalled = QueuedSpliceInfo { last_error: "no splice-in call could be made within 86400s of queueing: no usable push token".into(), ..failed.clone() };
+		assert_eq!(queued_splice_note(&stalled), stalled.last_error, "a stall that names the reason does not repeat it");
 		let html = channels_html(QueuedSpliceInfo { updated_at: crate::format::now_secs() as i64, ..failed }, true);
 		assert!(html.contains("splice-in refused · no usable push token"));
 	}

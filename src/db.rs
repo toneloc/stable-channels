@@ -1598,7 +1598,7 @@ impl Database {
         )
     }
 
-    /// A row with no call pending (never called, or waiting to be called again) is stalled so the operator is alerted; it is still tried when the phone shows up, but no longer pushed for.
+    /// A row with no call pending (never called, or waiting to be called again) is stalled so the operator is alerted; it is still tried on the schedule.
     pub fn stall_queued_splice(&self, user_channel_id: &str, request_id: i64, error: &str, now: i64) -> SqliteResult<Option<QueuedSplice>> {
         self.update_queued_splice(
             "UPDATE queued_splices SET status = 'stalled', last_error = ?3, updated_at = ?4

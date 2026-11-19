@@ -507,7 +507,9 @@ pub(crate) async fn run_once(
         }
         let usable = channel.is_usable;
         if matches!(row.status.as_str(), "queued" | "failed") && now >= since_call(&row) + QUEUED_ALERT_SECS {
+            // The next pass tries it from its new state, so a failure then is counted.
             stall_uncalled(db, &row, now);
+            continue;
         }
         match row.status.as_str() {
             "queued" | "failed" | "stalled" => {
@@ -561,19 +563,26 @@ async fn follow_pending_call(
 
 /// Stall a pending call the node has not answered within [`PENDING_ALERT_SECS`], or whose signed splice has not locked within [`NEGOTIATED_ALERT_SECS`] of the signing. The card shows it stalled with the reason, and the ledger gets one row for the call. The row keeps its call, so nothing else changes: it still locks, and the phone is still pushed for it.
 fn alert_pending_call(db: &Database, row: &QueuedSplice, called_at: i64, now: i64) {
-    let alert = match row.funding_txo.as_deref() {
-        Some(txo) if now >= row.negotiated_at.unwrap_or(called_at) + NEGOTIATED_ALERT_SECS => format!(
-            "a splice was signed ({txo}) but has not locked within {NEGOTIATED_ALERT_SECS}s; it locks once its transaction has confirmed and the phone is online"
+    // Each alert has its own ledger row: a call stalled before the node reported it can stall again once signed.
+    let (alert, key) = match row.funding_txo.as_deref() {
+        Some(txo) if now >= row.negotiated_at.unwrap_or(called_at) + NEGOTIATED_ALERT_SECS => (
+            format!(
+                "a splice was signed ({txo}) but has not locked within {NEGOTIATED_ALERT_SECS}s; it locks once its transaction has confirmed and the phone is online"
+            ),
+            format!("signed:{called_at}:{txo}"),
         ),
-        None if now >= called_at + PENDING_ALERT_SECS => format!(
-            "the node has not reported the splice-in call within {PENDING_ALERT_SECS}s; it may still be pending there, or may never have reached it. Release it once you have checked that the node holds no splice for this channel"
+        None if now >= called_at + PENDING_ALERT_SECS => (
+            format!(
+                "the node has not reported the splice-in call within {PENDING_ALERT_SECS}s; it may still be pending there, or may never have reached it. Release it once you have checked that the node holds no splice for this channel"
+            ),
+            format!("pending:{called_at}"),
         ),
         _ => return,
     };
     match db.stall_queued_splice_pending(&row.user_channel_id, row.request_id, &alert, now) {
         Ok(Some(stalled)) => {
             warn!("[queued_splice] Splice attempted Try {}: stalled on {}: {}; the phone is still pushed for it", try_number(row), row.user_channel_id, alert);
-            audit("QUEUED_SPLICE_STALLED", &stalled, &[("dedup_key", dedup_key("stalled", &stalled, format_args!("pending:{called_at}")))]);
+            audit("QUEUED_SPLICE_STALLED", &stalled, &[("dedup_key", dedup_key("stalled", &stalled, key))]);
         }
         Ok(None) => {}
         Err(error) => db_failed("stall_queued_splice_pending", &row.user_channel_id, error),
@@ -2388,6 +2397,31 @@ mod tests {
         assert!(stalled.last_error.as_deref().unwrap().contains("of the last try: waiting for the phone's push cooldown"));
         assert_eq!(names(&capture()), ["QUEUED_SPLICE_STALLED"]);
     }
+    #[tokio::test]
+    async fn a_call_stalled_before_the_node_reported_it_gets_its_own_ledger_row_when_it_stalls_again_signed() {
+        let _guard = guard();
+        let db = database();
+        let ldk = node(true);
+        let dir = tempfile::tempdir().unwrap();
+        let push = service(FakeSender::new(true), dir.path(), &[]);
+        called(&db, &ldk, &push, 100).await;
+        stable_channels::audit::enable_test_capture();
+
+        pass(&db, &ldk, &push, 100 + PENDING_ALERT_SECS).await;
+        assert_eq!(row(&db).status, "stalled");
+        let signed_at = 100 + PENDING_ALERT_SECS + 1;
+        on_splice_negotiated(&db, USER_CHANNEL_ID_DECIMAL, &txo(TX_B, 1), signed_at);
+        assert_eq!(row(&db).status, "negotiated");
+        pass(&db, &ldk, &push, signed_at + NEGOTIATED_ALERT_SECS).await;
+        let stalled = row(&db);
+        assert_eq!(stalled.status, "stalled");
+        assert!(stalled.last_error.as_deref().unwrap().starts_with("a splice was signed"));
+        let keys: Vec<Value> =
+            capture().into_iter().filter(|(name, _)| name == "QUEUED_SPLICE_STALLED").map(|(_, event)| event["dedup_key"].clone()).collect();
+        assert_eq!(keys.len(), 2);
+        assert_ne!(keys[0], keys[1], "the ledger keeps both alerts");
+    }
+
     #[tokio::test]
     async fn a_negotiation_is_recorded_on_a_row_stalled_or_cancelled_with_its_call_pending_so_a_later_failure_releases_nothing() {
         let _guard = guard();
