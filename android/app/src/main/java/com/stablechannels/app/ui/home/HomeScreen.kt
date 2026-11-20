@@ -330,7 +330,7 @@ fun HomeScreen(
                     modifier = Modifier.fillMaxWidth(),
                     colors =
                         CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant
                         ),
                     elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
                 ) {
@@ -338,7 +338,7 @@ fun HomeScreen(
                         (if (isBusyOnchainState)
                                 Modifier.clickable { onchainExpanded = !onchainExpanded }
                             else Modifier)
-                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                            .padding(horizontal = 16.dp, vertical = 12.dp)
                     ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -415,7 +415,7 @@ fun HomeScreen(
                                             confirmations = receive.confirmations,
                                             requiredConfirmations =
                                                 AppState.requiredConfirmationsForType(
-                                                    receive.paymentType,
+                                                    receive.paymentType
                                                 ),
                                             btcPrice = btcPrice,
                                             sign = "+",
@@ -520,7 +520,7 @@ fun HomeScreen(
                                                 confirmations = receive.confirmations,
                                                 requiredConfirmations =
                                                     AppState.requiredConfirmationsForType(
-                                                        receive.paymentType,
+                                                        receive.paymentType
                                                     ),
                                                 btcPrice = btcPrice,
                                                 sign = "+",
@@ -558,7 +558,7 @@ fun HomeScreen(
                                                 // as distinct.
                                                 containerColor =
                                                     MaterialTheme.colorScheme.secondary.copy(
-                                                        alpha = 0.15f,
+                                                        alpha = 0.15f
                                                     ),
                                                 contentColor = MaterialTheme.colorScheme.secondary,
                                             ),
@@ -607,7 +607,7 @@ fun HomeScreen(
                                         confirmations = receive.confirmations,
                                         requiredConfirmations =
                                             AppState.requiredConfirmationsForType(
-                                                receive.paymentType,
+                                                receive.paymentType
                                             ),
                                         btcPrice = btcPrice,
                                         sign = "+",
@@ -897,7 +897,7 @@ private fun PendingRow(
             IconButton(
                 onClick = {
                     context.openInAppBrowser(
-                        "https://mempool.space/tx/${txid.substringBefore(":")}",
+                        "https://mempool.space/tx/${txid.substringBefore(":")}"
                     )
                 },
                 modifier = Modifier.size(28.dp),

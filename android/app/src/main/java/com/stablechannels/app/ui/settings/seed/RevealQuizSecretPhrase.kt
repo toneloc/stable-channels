@@ -154,7 +154,7 @@ fun RevealQuizSecretPhrase(mnemonic: String, onDone: () -> Unit, modifier: Modif
             title = { Text("Copy Secret Recovery Phrase?") },
             text = {
                 Text(
-                    "Your clipboard is accessible to other apps. For your protection, it will be automatically cleared in ${ClipboardUtils.CLEAR_DELAY_SECONDS} seconds.",
+                    "Your clipboard is accessible to other apps. For your protection, it will be automatically cleared in ${ClipboardUtils.CLEAR_DELAY_SECONDS} seconds."
                 )
             },
             confirmButton = {
@@ -165,7 +165,7 @@ fun RevealQuizSecretPhrase(mnemonic: String, onDone: () -> Unit, modifier: Modif
                         haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                         copiedSeed = true
                         copyCount++
-                    },
+                    }
                 ) {
                     Text("Copy to Clipboard")
                 }
