@@ -8,7 +8,7 @@ import androidx.compose.ui.window.DialogWindowProvider
 import androidx.core.view.WindowCompat
 import com.stablechannels.app.ui.theme.LocalDarkTheme
 
-// Edge-to-edge for a Dialog or ModalBottomSheet window. Android 15+ enforces
+// Edge-to-edge for a Compose Dialog window. Android 15+ enforces
 // transparent system bars, so the (deprecated) color setters only run on older
 // versions, where they are still the only way to clear the bars.
 @Composable
@@ -16,21 +16,12 @@ internal fun DialogEdgeToEdgeEffect() {
     val view = LocalView.current
     val isDark = LocalDarkTheme.current
     DisposableEffect(view, isDark) {
-        var context = view.context
-        var dialog: android.app.Dialog? = null
-        while (context is android.content.ContextWrapper) {
-            if (context is android.app.Dialog) {
-                dialog = context
-                break
-            }
-            context = context.baseContext
-        }
         // A Compose Dialog's view sits in a DialogWindowProvider, not a Dialog context.
         val window =
             generateSequence(view.parent) { it.parent }
                 .filterIsInstance<DialogWindowProvider>()
                 .firstOrNull()
-                ?.window ?: dialog?.window
+                ?.window
         if (window != null) {
             WindowCompat.setDecorFitsSystemWindows(window, false)
             // A dialog window still fits inside the system bars unless told not to, which pushes
@@ -43,8 +34,6 @@ internal fun DialogEdgeToEdgeEffect() {
                             android.view.WindowManager.LayoutParams
                                 .LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
                     }
-            } else {
-                window.addFlags(android.view.WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS)
             }
             val insetsController = WindowCompat.getInsetsController(window, view)
             insetsController.isAppearanceLightStatusBars = !isDark

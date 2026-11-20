@@ -104,7 +104,10 @@ fun RevealQuizSecretPhrase(mnemonic: String, onDone: () -> Unit, modifier: Modif
                     modifier = Modifier.padding(horizontal = 20.dp).padding(top = 4.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    CapsuleAction(onClick = { showCopyWarning = true }, Modifier.weight(1f)) {
+                    CapsuleAction(
+                        onClick = { if (isRevealed) showCopyWarning = true },
+                        Modifier.weight(1f),
+                    ) {
                         Icon(
                             imageVector =
                                 if (copiedSeed) Icons.Filled.Check else Icons.Outlined.ContentCopy,

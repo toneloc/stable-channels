@@ -36,7 +36,6 @@ import com.stablechannels.app.domain.EmailPromptStoring
 import com.stablechannels.app.models.PaymentRecord
 import com.stablechannels.app.models.TradeRecord
 import com.stablechannels.app.services.EmailPromptStore
-import com.stablechannels.app.ui.components.DialogEdgeToEdgeEffect
 import com.stablechannels.app.ui.components.StatusCapsule
 import com.stablechannels.app.ui.email.rememberEmailSettingsModel
 import com.stablechannels.app.ui.history.OrderDetailBottomSheet
@@ -739,7 +738,6 @@ fun HomeScreen(
             containerColor = if (isDark) Color.Black else Color.White,
             contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) },
         ) {
-            DialogEdgeToEdgeEffect()
             Box(modifier = Modifier.fillMaxHeight(0.9f)) {
                 SendScreen(appState) { showSend = false }
             }
@@ -752,7 +750,6 @@ fun HomeScreen(
             containerColor = if (isDark) Color.Black else Color.White,
             contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) },
         ) {
-            DialogEdgeToEdgeEffect()
             Box(modifier = Modifier.fillMaxHeight(0.9f)) {
                 ReceiveScreen(appState) { showReceive = false }
             }
@@ -765,7 +762,6 @@ fun HomeScreen(
             containerColor = if (isDark) Color.Black else Color.White,
             contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) },
         ) {
-            DialogEdgeToEdgeEffect()
             Box(modifier = Modifier.fillMaxHeight(0.9f)) {
                 BuyScreen(appState, prefillAmountUSD = prefillTradeAmount) {
                     showBuy = false
@@ -781,7 +777,6 @@ fun HomeScreen(
             containerColor = if (isDark) Color.Black else Color.White,
             contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) },
         ) {
-            DialogEdgeToEdgeEffect()
             Box(modifier = Modifier.fillMaxHeight(0.9f)) {
                 SellScreen(appState, prefillAmountUSD = prefillTradeAmount) {
                     showSell = false
