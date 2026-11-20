@@ -3254,6 +3254,13 @@ class AppState {
                     "channel_id": "\(channelId)",
                     "user_channel_id": "\(userChannelId)"
                 ])
+            } else if try databaseService.spliceRepo.lspSpliceHoldsFailableSplice(rowId: pendingSplice?.rowId) {
+                // An LSP splice named the Move, so the negotiation that failed is not the Move's:
+                // it stays pending until that splice locks.
+                AuditService.log("LSP_SPLICE_FAILED", data: [
+                    "channel_id": "\(channelId)",
+                    "user_channel_id": "\(userChannelId)"
+                ])
             } else {
                 guard databaseService.spliceRepo.failPendingSplice(rowId: pendingSplice?.rowId) else {
                     throw DatabaseError.executeFailed("Could not persist splice failure")

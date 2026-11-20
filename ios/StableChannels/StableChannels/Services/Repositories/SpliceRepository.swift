@@ -391,24 +391,45 @@ final class SpliceRepository {
                 """
                 UPDATE payments
                 SET status = 'failed'
-                WHERE id = (
-                    SELECT id FROM payments
-                    WHERE payment_type IN \(SpliceEventRecorder.spliceTypesSQL)
-                      AND status IN ('pending', 'expired')
-                      AND txid IS NULL
-                      AND (?1 IS NULL OR id = ?1)
-                    ORDER BY id DESC LIMIT 1
-                )
+                WHERE id = (\(Self.failableSpliceSQL))
                   AND NOT \(SpliceEventRecorder.heldByLspSpliceSQL("payments.id", since: "?2"))
                 """,
-                params: [
-                    rowId.map { .integer($0) } ?? .null,
-                    .integer(Self.lspSpliceHoldSince(Int64(Date().timeIntervalSince1970)))
-                ]
+                params: Self.failableSpliceParams(rowId)
             )
             return true
         } catch {
             return false
         }
+    }
+
+    /// Whether the Move `failPendingSplice(rowId:)` would fail is held by an LSP splice that named
+    /// it. The failure is then not the Move's, so the Move stays pending and `failPendingSplice`
+    /// leaves it alone.
+    func lspSpliceHoldsFailableSplice(rowId: Int64? = nil) throws -> Bool {
+        try !rawSQL.query(
+            """
+            SELECT 1 FROM payments
+            WHERE id = (\(Self.failableSpliceSQL))
+              AND \(SpliceEventRecorder.heldByLspSpliceSQL("payments.id", since: "?2"))
+            """,
+            params: Self.failableSpliceParams(rowId)
+        ).isEmpty
+    }
+
+    /// The pre-negotiation splice row ?1, or the latest one when ?1 is NULL.
+    private static let failableSpliceSQL = """
+    SELECT id FROM payments
+    WHERE payment_type IN \(SpliceEventRecorder.spliceTypesSQL)
+      AND status IN ('pending', 'expired')
+      AND txid IS NULL
+      AND (?1 IS NULL OR id = ?1)
+    ORDER BY id DESC LIMIT 1
+    """
+
+    private static func failableSpliceParams(_ rowId: Int64?) -> [SQLValue] {
+        [
+            rowId.map { .integer($0) } ?? .null,
+            .integer(lspSpliceHoldSince(Int64(Date().timeIntervalSince1970)))
+        ]
     }
 }

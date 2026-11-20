@@ -512,11 +512,14 @@ final class SpliceFailureRecoveryTests: XCTestCase {
         ), lspSplice: true)
         let named = try db.rawSQL.query("SELECT move_row_id FROM lsp_splices WHERE txid = ?", params: [.text(txid)])
         XCTAssertEqual(named.first?.optInt64(0), rowId)
+        app.isSweeping = true
         let ack = EventAckToken()
         app.handleSpliceNegotiationFailed(channelId: "channel", userChannelId: "7", ackToken: ack)
         XCTAssertTrue(ack.shouldAck)
         let status = try db.rawSQL.query("SELECT status FROM payments WHERE id = ?", params: [.integer(rowId)])
         XCTAssertEqual(status.first?.string(0), "pending")
+        XCTAssertNotEqual(app.statusMessage, "Splice failed")
+        XCTAssertTrue(app.isSweeping, "the Move still waits on the LSP's splice")
     }
 
     func testAFailedNegotiationOfTheAppsOwnMoveStillFailsItsRow() throws {
