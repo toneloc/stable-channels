@@ -12,11 +12,11 @@ import com.stablechannels.app.domain.seed.SeedAccessPolicy
 import com.stablechannels.app.ui.components.DialogEdgeToEdgeEffect
 
 /**
- * Full-screen secure window for the phrase: FLAG_SECURE keeps it out of screenshots and the recents
- * thumbnail, and leaving the app closes it.
+ * Full-screen secure window for the reveal quiz and phrase: FLAG_SECURE keeps it out of screenshots
+ * and the recents thumbnail, and leaving the app closes it.
  */
 @Composable
-fun RevealSecretPhraseDialog(mnemonic: String, onDismiss: () -> Unit) {
+fun RevealSecretPhraseDialog(mnemonicProvider: () -> String?, onDismiss: () -> Unit) {
     ObserveSeedLifecyclePhase { if (SeedAccessPolicy.shouldCloseSeedScreens(it)) onDismiss() }
     Dialog(
         onDismissRequest = onDismiss,
@@ -30,9 +30,9 @@ fun RevealSecretPhraseDialog(mnemonic: String, onDismiss: () -> Unit) {
     ) {
         DialogEdgeToEdgeEffect()
         Surface(Modifier.fillMaxSize(), color = RevealColors.groupedBackground) {
-            RevealQuizSecretPhrase(
-                mnemonic = mnemonic,
-                onDone = onDismiss,
+            RevealRecoveryPhraseScreen(
+                mnemonicProvider = mnemonicProvider,
+                onClose = onDismiss,
                 modifier = Modifier.safeDrawingPadding(),
             )
         }
