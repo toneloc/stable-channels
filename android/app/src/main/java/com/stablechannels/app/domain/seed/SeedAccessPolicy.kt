@@ -25,4 +25,17 @@ object SeedAccessPolicy {
 
     /** An auth reply that lands after the app left must not open a seed screen. */
     fun canOpenSeedScreen(after: AppLifecyclePhase): Boolean = !shouldCloseSeedScreens(after)
+
+    /** The reveal row is disabled until a phrase is saved. */
+    fun canRevealPhrase(mnemonic: String?): Boolean = !mnemonic.isNullOrEmpty()
+
+    /**
+     * Every path that shows or replaces the seed goes through here. [authenticate] runs only when
+     * [requiresAuth]; [phaseAfter] is read once it returns, so a late reply opens nothing.
+     */
+    suspend fun authorize(
+        requiresAuth: Boolean,
+        authenticate: suspend () -> Boolean,
+        phaseAfter: () -> AppLifecyclePhase,
+    ): Boolean = (!requiresAuth || authenticate()) && canOpenSeedScreen(after = phaseAfter())
 }

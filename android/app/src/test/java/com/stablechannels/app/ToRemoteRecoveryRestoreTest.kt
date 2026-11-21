@@ -37,10 +37,12 @@ class ToRemoteRecoveryRestoreTest {
      * A restore stops the node, resets the recovery, then starts the node with the restored seed. A
      * recovery run in between gets no keys, not those of the wallet still in memory (#364).
      */
+    @Suppress("UNCHECKED_CAST")
     @Test
     fun noKeysWhileTheNodeIsStopped() {
         val state = AppState(RuntimeEnvironment.getApplication())
-        nodeField("savedMnemonic").set(state.nodeService, "abandon ".repeat(11) + "about")
+        (nodeField("_savedMnemonic").get(state.nodeService) as MutableStateFlow<String?>).value =
+            "abandon ".repeat(11) + "about"
         assertNull(toRemoteKeys(state))
 
         markNodeRunning(state)
