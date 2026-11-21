@@ -1969,10 +1969,10 @@ class AppState {
 
         case .channelReady(let channelId, let userChannelId, _, _):
             nodeService.refreshChannels()
-            let channels = nodeService.channels
-            persistSpliceEvent(SpliceEventReceipt(event: event) {
-                SpliceEventReceipt.liveFunding(in: channels, userChannelId: $0, channelId: $1)
-            }, ackToken: ackToken)
+            persistSpliceEvent(
+                SpliceEventReceipt(event: event, channels: nodeService.channels),
+                ackToken: ackToken, lspSplice: expectsLspSplice
+            )
 
             stableChannel.channelId = channelId
             refreshBalances()
@@ -2993,14 +2993,23 @@ class AppState {
         ])
 
         let txidStr = "\(newFundingTxo.txid)"
+        nodeService.refreshChannels()
         let receipt = SpliceEventReceipt(
             kind: .negotiated, userChannelId: userChannelId, channelId: channelId,
-            identityTxid: txidStr, funding: newFundingTxo
+            identityTxid: txidStr, funding: newFundingTxo, channels: nodeService.channels
         )
-        guard persistSpliceEvent(receipt, ackToken: ackToken) else { return }
+        guard persistSpliceEvent(receipt, ackToken: ackToken, lspSplice: expectsLspSplice) else { return }
         // The recorder matched this event to the operation that started it. A replay for a
         // finished or unknown operation must not take over the in-memory splice state or monitor.
         guard (try? databaseService?.spliceRepo.isPendingSplice(txid: txidStr)) == true else {
+            if (try? databaseService?.spliceRepo.isLspSplice(txid: txidStr)) == true {
+                // The LSP's own splice: no Move of the user's, so only the funding and the balances
+                // change.
+                fundingTxid = txidStr
+                refreshBalances()
+                updateStableBalances()
+                return
+            }
             AuditService.log("SPLICE_TXID_UNMATCHED", data: [
                 "channel_id": "\(channelId)",
                 "user_channel_id": "\(userChannelId)",
@@ -3019,16 +3028,38 @@ class AppState {
         startSpliceConfirmationMonitor(txid: txidStr)
     }
 
+    /// Where the extension notes the LSP's splice push.
+    @ObservationIgnored var lspSpliceDefaults = UserDefaults(suiteName: Constants.appGroupIdentifier)
+
+    private var expectsLspSplice: Bool {
+        SpliceOwnership.expectsLspSplice(lspSpliceDefaults, moveInFlight: pendingSplice != nil)
+    }
+
     /// Commits a splice event before NodeService acknowledges it; on failure the event stays in
-    /// LDK and is redelivered.
+    /// LDK and is redelivered. `lspSplice` says the splice is known to be the LSP's.
     @discardableResult
-    private func persistSpliceEvent(_ receipt: SpliceEventReceipt?, ackToken: EventAckToken?) -> Bool {
+    private func persistSpliceEvent(
+        _ receipt: SpliceEventReceipt?,
+        ackToken: EventAckToken?,
+        lspSplice: Bool = false
+    ) -> Bool {
         guard let receipt else { return true }
         do {
             guard let databaseService else {
                 throw DatabaseError.executeFailed("Database unavailable for splice history")
             }
-            try databaseService.spliceRepo.recordEvent(receipt)
+            if let change = try databaseService.spliceRepo.recordEvent(receipt, lspSplice: lspSplice) {
+                let name = switch change {
+                case .negotiated: "LSP_SPLICE_NEGOTIATED"
+                case .locked: "LSP_SPLICE_LOCKED"
+                case .wasSpliceOut: "LSP_SPLICE_WAS_SPLICE_OUT"
+                }
+                AuditService.log(name, data: [
+                    "channel_id": receipt.channelId,
+                    "user_channel_id": receipt.userChannelId,
+                    "txid": receipt.fundingTxid ?? ""
+                ])
+            }
             return true
         } catch {
             ackToken?.shouldAck = false
@@ -3092,6 +3123,22 @@ class AppState {
                     txid: capturedTxid, channelId: "\(channelId)", userChannelId: "\(userChannelId)"
                 )
                 Task { [weak self] in await self?.retryPendingSpliceFailureChecks() }
+            } else if expectsLspSplice {
+                // No Move of the app's own is in flight and the LSP's splice is expected, so the
+                // negotiation that failed is taken to be the LSP's. A Move left without its
+                // transaction expires on its own after 10 minutes, unless an LSP splice named it:
+                // then it waits until that splice locks, at most a day from the first one that did.
+                AuditService.log("LSP_SPLICE_FAILED", data: [
+                    "channel_id": "\(channelId)",
+                    "user_channel_id": "\(userChannelId)"
+                ])
+            } else if try databaseService.spliceRepo.lspSpliceHoldsFailableSplice(rowId: pendingSplice?.rowId) {
+                // An LSP splice named the Move, so the negotiation that failed is not the Move's:
+                // it stays pending until that splice locks.
+                AuditService.log("LSP_SPLICE_FAILED", data: [
+                    "channel_id": "\(channelId)",
+                    "user_channel_id": "\(userChannelId)"
+                ])
             } else {
                 guard databaseService.spliceRepo.failPendingSplice(rowId: pendingSplice?.rowId) else {
                     throw DatabaseError.executeFailed("Could not persist splice failure")

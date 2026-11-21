@@ -70,8 +70,12 @@ final class LSPSpliceInHandler: PaymentHandler {
             case .spliceNegotiated, .channelReady, .spliceNegotiationFailed:
                 // Commit splice details before acking; a failure while a splice is pending is
                 // left for the foreground.
-                guard SpliceEventAcknowledgement.backgroundMayAcknowledge(event, db: db, node: node)
-                else { break eventLoop }
+                guard SpliceEventAcknowledgement.backgroundMayAcknowledge(
+                    event, db: db, node: node,
+                    lspSplice: SpliceOwnership.expectsLspSplice(
+                        UserDefaults(suiteName: Constants.appGroup), handlingSplicePush: true
+                    )
+                ) else { break eventLoop }
                 try? node.eventHandled()
                 wait.see(event, at: Date()) { userChannelId in
                     node.listChannels().first { $0.userChannelId == userChannelId }?.fundingTxo?.txid

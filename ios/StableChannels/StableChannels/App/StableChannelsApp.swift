@@ -97,6 +97,9 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
     ) {
         print("[Push] Background push received: \(userInfo)")
+        if LspSpliceExpectation.isSplicePush(userInfo) {
+            LspSpliceExpectation.note(UserDefaults(suiteName: Constants.appGroupIdentifier))
+        }
 
         // Post to NotificationCenter so AppState can handle it
         NotificationCenter.default.post(name: .pushPaymentNotification, object: userInfo)
