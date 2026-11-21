@@ -9,6 +9,7 @@ import com.google.firebase.messaging.FirebaseMessaging
 import com.stablechannels.app.models.*
 import com.stablechannels.app.push.CpuHold
 import com.stablechannels.app.push.FCMService
+import com.stablechannels.app.push.LspSpliceExpectation
 import com.stablechannels.app.push.LspSpliceHoldBridge
 import com.stablechannels.app.push.StabilityProcessingService
 import com.stablechannels.app.push.lspSpliceLocked
@@ -1568,11 +1569,7 @@ class AppState(private val context: Context) : ViewModel() {
 
     private fun lspChannelFundingTxid(): String? {
         val lspPubkey = LspPreferencesManager.getLspPubkey(context)
-        return nodeService.node
-            ?.listChannels()
-            ?.firstOrNull { it.counterpartyNodeId == lspPubkey }
-            ?.fundingTxo
-            ?.txid
+        return nodeService.node?.listChannels()?.lspFunding(lspPubkey)?.txid
     }
 
     /**
@@ -2272,7 +2269,18 @@ class AppState(private val context: Context) : ViewModel() {
                 nodeService.refreshChannels()
                 val db =
                     databaseService ?: throw IllegalStateException("Splice history unavailable")
-                SpliceEventRecorder.record(db, event) { ready ->
+                // As at its negotiation, the LSP's splice locking within the window of its push is
+                // not given to a Move the app lost track of.
+                SpliceEventRecorder.record(
+                    db,
+                    event,
+                    lspSplice =
+                        LspSpliceExpectation.expectsLspSplice(
+                            context,
+                            moveInFlight = pendingSplice != null,
+                        ),
+                    channelValue = ::liveChannelValue,
+                ) { ready ->
                     nodeService.channels
                         .singleOrNull {
                             it.userChannelId == ready.userChannelId &&
@@ -2367,7 +2375,25 @@ class AppState(private val context: Context) : ViewModel() {
             is Event.SpliceNegotiated -> {
                 val db =
                     databaseService ?: throw IllegalStateException("Splice history unavailable")
-                SpliceEventRecorder.record(db, event) { null }
+                // A 0-conf splice may have locked already, so the value before it is the last
+                // listing that still showed the old funding.
+                val seen = liveChannelValue(event.userChannelId, event.channelId)
+                nodeService.refreshChannels()
+                // With no Move of its own in flight, a splice negotiated within the window of the
+                // LSP's push is the LSP's; a Move the app lost track of is not given it.
+                SpliceEventRecorder.record(
+                    db,
+                    event,
+                    lspSplice =
+                        LspSpliceExpectation.expectsLspSplice(
+                            context,
+                            moveInFlight = pendingSplice != null,
+                        ),
+                    channelValue = ::liveChannelValue,
+                    channelValueSeen = { _, _ -> seen },
+                ) {
+                    null
+                }
                 handleSplicePending(
                     event.channelId,
                     event.userChannelId,
@@ -2409,6 +2435,17 @@ class AppState(private val context: Context) : ViewModel() {
                         capturedGeneration,
                         capturedPaymentRowId,
                     )
+                } else if (
+                    capturedPaymentRowId == null &&
+                        (LspSpliceExpectation.expectsLspSplice(context) ||
+                            databaseService?.lspSpliceHoldsAMove() == true)
+                ) {
+                    // No Move of the app's own is negotiating. Inside the LSP's push window the
+                    // splice that failed is taken to be the LSP's, and a Move an LSP splice named
+                    // waits for that splice: neither is failed for it, and its lock stays. A Move
+                    // left over from an earlier run expires on its own. Outside the window, after
+                    // a relaunch, the leftover is failed below, as before.
+                    AuditService.log("LSP_SPLICE_FAILED", mapOf("channel_id" to event.channelId))
                 } else {
                     // Pre-negotiation failure. The row still failed regardless of what's current
                     // now. The generation guard here is defensive rather than closing a real race:
@@ -3248,6 +3285,10 @@ class AppState(private val context: Context) : ViewModel() {
         return true
     }
 
+    /** The channel's value as last listed, for the size of an LSP splice. */
+    private fun liveChannelValue(userChannelId: String, channelId: String): ChannelValue? =
+        nodeService.channels.channelValue(userChannelId, channelId)
+
     private fun handleSplicePending(
         channelId: String,
         userChannelId: String,
@@ -3256,6 +3297,12 @@ class AppState(private val context: Context) : ViewModel() {
         val txid = newFundingTxo.split(":").firstOrNull() ?: newFundingTxo
         val row = databaseService?.getSplice(txid)?.takeIf { it.status == "pending" }
         if (row == null) {
+            if (databaseService?.getLspSplice(txid) != null) {
+                // The LSP's splice, recorded on its own; nothing of the user's moves, and the
+                // books follow the channel once it is ready on the new funding.
+                refreshBalances()
+                return
+            }
             AuditService.log(
                 "SPLICE_TXID_UNMATCHED",
                 mapOf(
@@ -5491,6 +5538,15 @@ class AppState(private val context: Context) : ViewModel() {
         if (
             try {
                 db.hasPendingSplice()
+            } catch (_: Exception) {
+                true
+            }
+        )
+            return
+        // A splice the LSP is making changes the channel under the books; repair once it locks.
+        if (
+            try {
+                db.hasPendingLspSplice()
             } catch (_: Exception) {
                 true
             }
