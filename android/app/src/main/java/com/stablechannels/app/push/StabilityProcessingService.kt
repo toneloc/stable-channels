@@ -21,6 +21,8 @@ import com.stablechannels.app.services.StabilityService
 import com.stablechannels.app.services.TradeControlApplyStatus
 import com.stablechannels.app.services.TradeControlMessage
 import com.stablechannels.app.services.TradeProtocol
+import com.stablechannels.app.services.channelValue
+import com.stablechannels.app.services.lspFunding
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.LspPreferencesManager
 import com.stablechannels.app.util.NamedPrice
@@ -510,7 +512,7 @@ class StabilityProcessingService : Service() {
                         persistSpliceEventFrom(
                             node,
                             event,
-                            lspSplice = LspSpliceExpectation.isExpected(this),
+                            lspSplice = LspSpliceExpectation.expectsLspSplice(this),
                         ) {
                             node.eventHandled()
                         }
@@ -682,24 +684,20 @@ class StabilityProcessingService : Service() {
     /** The live value of a channel and the funding it is on, for the size of an LSP splice. */
     private fun channelValueOf(node: Node): (String, String) -> ChannelValue? =
         { userChannelId, channelId ->
-            node
-                .listChannels()
-                .singleOrNull { it.userChannelId == userChannelId && it.channelId == channelId }
-                ?.let { ChannelValue(it.fundingTxo?.txid, it.channelValueSats.toLong()) }
+            node.listChannels().channelValue(userChannelId, channelId)
         }
 
     /** Remembers every channel's value on the funding it is on now. */
     private fun noteChannelsSeen(node: Node) {
         channelsSeen =
             node.listChannels().associate {
-                (it.userChannelId to it.channelId) to
-                    ChannelValue(it.fundingTxo?.txid, it.channelValueSats.toLong())
+                (it.userChannelId to it.channelId) to it.channelValue()
             }
     }
 
     /** The funding outpoint of the channel with the LSP, if there is one. */
     private fun lspChannelFunding(node: Node, lspPubkey: String): OutPoint? =
-        node.listChannels().firstOrNull { it.counterpartyNodeId == lspPubkey }?.fundingTxo
+        node.listChannels().lspFunding(lspPubkey)
 
     /**
      * Connects to the LSP until the channel with it is usable, which is what the LSP's job waits
@@ -794,12 +792,28 @@ class StabilityProcessingService : Service() {
                         node.eventHandled()
                     }
                     is Event.SpliceNegotiated -> {
-                        persistSpliceEventFrom(node, event, lspSplice = true) {
+                        persistSpliceEventFrom(
+                            node,
+                            event,
+                            lspSplice =
+                                LspSpliceExpectation.expectsLspSplice(
+                                    this,
+                                    handlingSplicePush = true,
+                                ),
+                        ) {
                             node.eventHandled()
                         }
                     }
                     is Event.ChannelReady -> {
-                        persistSpliceEventFrom(node, event, lspSplice = true) {
+                        persistSpliceEventFrom(
+                            node,
+                            event,
+                            lspSplice =
+                                LspSpliceExpectation.expectsLspSplice(
+                                    this,
+                                    handlingSplicePush = true,
+                                ),
+                        ) {
                             node.eventHandled()
                         }
                         if (lockedNow()) wait.onLocked(System.currentTimeMillis())
@@ -1130,7 +1144,7 @@ class StabilityProcessingService : Service() {
                         persistSpliceEventFrom(
                             node,
                             event,
-                            lspSplice = LspSpliceExpectation.isExpected(this),
+                            lspSplice = LspSpliceExpectation.expectsLspSplice(this),
                         ) {
                             node.eventHandled()
                         }

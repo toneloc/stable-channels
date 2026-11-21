@@ -125,6 +125,20 @@ class LspSpliceRecordTest {
     }
 
     @Test
+    fun aReadyEventForTheLspsSpliceIsNotGivenToASpliceInWaiting() {
+        val id = move()
+        assertTrue(record(negotiated, lspSplice = true, value = valueBefore))
+        // Outside the window, or with the Move in flight, its ready event is not known to be the
+        // LSP's; its transaction is.
+        assertTrue(record(ready, value = valueAfter, now = 1_010))
+        // The check binds a Move whatever transaction a ready event captured for it.
+        assertTrue(db.hasPendingSplice())
+        assertNull(payment(id).txid)
+        assertEquals("pending", payment(id).status)
+        assertEquals("locked", db.getLspSplice(txid)!!.status)
+    }
+
+    @Test
     fun aLockThatLandsBeforeTheNegotiationIsHandledTakesTheValueBeforeFromTheListingSeenLast() {
         // 0-conf: the node already lists the channel on the new funding at its new size.
         assertTrue(

@@ -4,6 +4,7 @@ import android.content.ContentValues
 import android.database.sqlite.SQLiteDatabase
 import androidx.core.database.getLongOrNull
 import androidx.core.database.sqlite.transaction
+import org.lightningdevkit.ldknode.ChannelDetails
 import org.lightningdevkit.ldknode.Event
 import org.lightningdevkit.ldknode.OutPoint
 
@@ -31,6 +32,25 @@ data class LspSplice(
 
 /** A channel's value as the node listed it, with the funding it was on at the time. */
 data class ChannelValue(val fundingTxid: String?, val valueSats: Long)
+
+/** The channel's value on the funding it is on now. */
+internal fun ChannelDetails.channelValue(): ChannelValue =
+    ChannelValue(fundingTxo?.txid, channelValueSats.toLong())
+
+/** The value of the one listed channel with these IDs, if there is one. */
+internal fun List<ChannelDetails>.channelValue(
+    userChannelId: String,
+    channelId: String,
+): ChannelValue? = singleOrNull {
+    it.userChannelId == userChannelId && it.channelId == channelId
+}
+    ?.channelValue()
+
+/** The funding outpoint of the channel with the LSP, if there is one. */
+internal fun List<ChannelDetails>.lspFunding(lspPubkey: String): OutPoint? = firstOrNull {
+    it.counterpartyNodeId == lspPubkey
+}
+    ?.fundingTxo
 
 /** Durable operation identity and event receipt, shared by the foreground and push service. */
 object SpliceEventRecorder {
@@ -76,13 +96,6 @@ object SpliceEventRecorder {
             )
         """
         )
-        val columns =
-            db.rawQuery("PRAGMA table_info(lsp_splices)", null).use { c ->
-                buildList { while (c.moveToNext()) add(c.getString(1)) }
-            }
-        if ("move_row_id" !in columns) {
-            db.execSQL("ALTER TABLE lsp_splices ADD COLUMN move_row_id INTEGER")
-        }
     }
 
     /** Called in the same transaction that creates the pending history entry, before LDK. */
@@ -434,7 +447,10 @@ object SpliceEventRecorder {
         return Settled(moveRowId.takeIf { shrank && waiting })
     }
 
-    /** With [matchPending] false only an operation already carrying the transaction is found. */
+    /**
+     * With [matchPending] false, or for an LSP splice already recorded, only an operation already
+     * carrying the transaction is found: a Move still waiting for its own is not given the LSP's.
+     */
     private fun findOperation(
         db: SQLiteDatabase,
         kind: String,
@@ -458,7 +474,7 @@ object SpliceEventRecorder {
                     buildList { while (c.moveToNext()) add(c.getLong(0)) }
                 }
         if (exact.isNotEmpty()) return exact.singleOrNull()
-        if (!matchPending) return null
+        if (!matchPending || txid != null && lspSplice(db, txid) != null) return null
 
         // LDK keeps the channel ID across a splice, so a ready event must also prove funding
         // changed from the saved outpoint, or an initial channel-ready replay would look like a

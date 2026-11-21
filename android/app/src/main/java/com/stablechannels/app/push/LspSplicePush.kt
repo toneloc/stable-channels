@@ -88,6 +88,17 @@ object LspSpliceExpectation {
             nowMs,
         )
 
+    /**
+     * Whether a splice is taken to be the LSP's: while its push is handled, or inside the window
+     * after it, and never while a Move of the user's is in flight. The one rule the app and the
+     * background both use.
+     */
+    fun expectsLspSplice(
+        context: Context,
+        handlingSplicePush: Boolean = false,
+        moveInFlight: Boolean = false,
+    ): Boolean = !moveInFlight && (handlingSplicePush || isExpected(context))
+
     /** From the push until the window ends; a clock set back before the push expects nothing. */
     internal fun expectedWithin(pushedAtMs: Long, nowMs: Long): Boolean =
         pushedAtMs > 0L && nowMs >= pushedAtMs && nowMs - pushedAtMs < WINDOW_MS

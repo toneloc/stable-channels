@@ -1569,11 +1569,7 @@ class AppState(private val context: Context) : ViewModel() {
 
     private fun lspChannelFundingTxid(): String? {
         val lspPubkey = LspPreferencesManager.getLspPubkey(context)
-        return nodeService.node
-            ?.listChannels()
-            ?.firstOrNull { it.counterpartyNodeId == lspPubkey }
-            ?.fundingTxo
-            ?.txid
+        return nodeService.node?.listChannels()?.lspFunding(lspPubkey)?.txid
     }
 
     /**
@@ -2278,7 +2274,11 @@ class AppState(private val context: Context) : ViewModel() {
                 SpliceEventRecorder.record(
                     db,
                     event,
-                    lspSplice = pendingSplice == null && LspSpliceExpectation.isExpected(context),
+                    lspSplice =
+                        LspSpliceExpectation.expectsLspSplice(
+                            context,
+                            moveInFlight = pendingSplice != null,
+                        ),
                     channelValue = ::liveChannelValue,
                 ) { ready ->
                     nodeService.channels
@@ -2384,7 +2384,11 @@ class AppState(private val context: Context) : ViewModel() {
                 SpliceEventRecorder.record(
                     db,
                     event,
-                    lspSplice = pendingSplice == null && LspSpliceExpectation.isExpected(context),
+                    lspSplice =
+                        LspSpliceExpectation.expectsLspSplice(
+                            context,
+                            moveInFlight = pendingSplice != null,
+                        ),
                     channelValue = ::liveChannelValue,
                     channelValueSeen = { _, _ -> seen },
                 ) {
@@ -2431,10 +2435,16 @@ class AppState(private val context: Context) : ViewModel() {
                         capturedGeneration,
                         capturedPaymentRowId,
                     )
-                } else if (capturedPaymentRowId == null) {
-                    // No Move of the app's own is negotiating, so the splice that failed was the
-                    // LSP's: no row of the user's is failed for it. A Move left over from an
-                    // earlier run is not guessed at either; it expires on its own.
+                } else if (
+                    capturedPaymentRowId == null &&
+                        (LspSpliceExpectation.expectsLspSplice(context) ||
+                            databaseService?.lspSpliceHoldsAMove() == true)
+                ) {
+                    // No Move of the app's own is negotiating. Inside the LSP's push window the
+                    // splice that failed is taken to be the LSP's, and a Move an LSP splice named
+                    // waits for that splice: neither is failed for it, and its lock stays. A Move
+                    // left over from an earlier run expires on its own. Outside the window, after
+                    // a relaunch, the leftover is failed below, as before.
                     AuditService.log("LSP_SPLICE_FAILED", mapOf("channel_id" to event.channelId))
                 } else {
                     // Pre-negotiation failure. The row still failed regardless of what's current
@@ -3277,9 +3287,7 @@ class AppState(private val context: Context) : ViewModel() {
 
     /** The channel's value as last listed, for the size of an LSP splice. */
     private fun liveChannelValue(userChannelId: String, channelId: String): ChannelValue? =
-        nodeService.channels
-            .singleOrNull { it.userChannelId == userChannelId && it.channelId == channelId }
-            ?.let { ChannelValue(it.fundingTxo?.txid, it.channelValueSats.toLong()) }
+        nodeService.channels.channelValue(userChannelId, channelId)
 
     private fun handleSplicePending(
         channelId: String,

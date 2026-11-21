@@ -554,19 +554,74 @@ class SpliceEventRecoveryTest {
     }
 
     @Test
-    fun aFailureWithNoMoveOfTheAppsOwnLeavesALeftoverOperationAlone() {
+    fun insideThePushWindowAFailureWithNoMoveOfTheAppsOwnLeavesALeftoverOperationAlone() {
         val id = pending()
         val state = appState()
         setChannel(state, "7")
         resume(state)
         assertTrue("the leftover still blocks a new Move", state.isSpliceInFlight)
         // The LSP's splice failed; the app is negotiating nothing of its own.
+        LspSpliceExpectation.note(context)
         handle(state, Event.SpliceNegotiationFailed(channel, "7", "peer"))
         assertEquals("pending", payment(id).status)
         assertTrue(db.hasPendingSplice())
         // The leftover expires on its own, as before.
         expire(id)
         assertFalse(db.hasPendingSplice())
+    }
+
+    @Test
+    fun afterARelaunchOutsideThePushWindowAFailureFailsTheLeftoverAsBefore() {
+        val id = pending()
+        val state = appState()
+        setChannel(state, "7")
+        resume(state)
+        assertTrue(state.isSpliceInFlight)
+        handle(state, Event.SpliceNegotiationFailed(channel, "7", "peer"))
+        assertEquals("failed", payment(id).status)
+        assertFalse(state.isSpliceInFlight)
+    }
+
+    @Test
+    fun outsideThePushWindowAFailureLeavesAMoveAnLspSpliceNamedForADay() {
+        val id = pending()
+        assertTrue(SpliceEventRecorder.record(db, negotiated, lspSplice = true) { null })
+        val named =
+            db.readableDatabase
+                .rawQuery("SELECT move_row_id FROM lsp_splices WHERE txid = ?", arrayOf(txid))
+                .use { if (it.moveToFirst()) it.getLong(0) else null }
+        assertEquals(id, named)
+        val state = appState()
+        setChannel(state, "7")
+        resume(state)
+        assertTrue(state.isSpliceInFlight)
+        handle(state, Event.SpliceNegotiationFailed(channel, "7", "peer"))
+        assertEquals("pending", payment(id).status)
+        assertTrue("the Move still waits on the LSP's splice", state.isSpliceInFlight)
+        // A day after the LSP splice named it, the Move is no longer held.
+        db.writableDatabase.execSQL(
+            "UPDATE lsp_splices SET created_at = created_at - ?",
+            arrayOf(SpliceEventRecorder.LSP_SPLICE_PENDING_MAX_AGE_SECS + 60),
+        )
+        handle(state, Event.SpliceNegotiationFailed(channel, "7", "peer"))
+        assertEquals("failed", payment(id).status)
+        assertFalse(state.isSpliceInFlight)
+    }
+
+    @Test
+    fun aSpliceIsTakenForTheLspsWhileItsPushIsHandledOrInsideItsWindowAndNeverWithAMoveInFlight() {
+        assertFalse(LspSpliceExpectation.expectsLspSplice(context))
+        assertTrue(LspSpliceExpectation.expectsLspSplice(context, handlingSplicePush = true))
+        assertFalse(
+            LspSpliceExpectation.expectsLspSplice(
+                context,
+                handlingSplicePush = true,
+                moveInFlight = true,
+            )
+        )
+        LspSpliceExpectation.note(context)
+        assertTrue(LspSpliceExpectation.expectsLspSplice(context))
+        assertFalse(LspSpliceExpectation.expectsLspSplice(context, moveInFlight = true))
     }
 
     @Test
