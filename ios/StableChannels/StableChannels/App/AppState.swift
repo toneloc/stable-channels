@@ -107,6 +107,8 @@ class AppState {
     // MARK: - Services
 
     let nodeService: any AppNodeService
+    /// The wallet folder, owned by the node service so both always open the same wallet.
+    private var walletDir: URL { nodeService.dataDir }
     let priceService = PriceService()
     let priceChartService: any PriceChartFetching = PriceChartService.shared
     var priceHistoryProvider: any PriceHistoryProviding
@@ -674,7 +676,7 @@ class AppState {
     }
 
     private func initializeDatabaseServices() throws {
-        let db = try makeDatabase(Constants.userDataDir)
+        let db = try makeDatabase(walletDir)
         databaseService = db
         nodeService.databaseService = databaseService
         priceHistoryProvider = PriceHistoryService(databaseService: db)
@@ -857,7 +859,7 @@ class AppState {
         // while the lock is not held (e.g. after a startup failure released
         // it), and wiping under a live NSE node would corrupt its state.
         guard await NodeDirLock.shared.acquireReportingTimeout(
-            dataDir: Constants.userDataDir,
+            dataDir: walletDir,
             timeout: Constants.nodeDirLockTimeoutSecs,
             caller: "restoreWalletFromMnemonic",
             log: AuditService.log
@@ -889,7 +891,7 @@ class AppState {
 
         do {
             // The restored words replace the wiped seed at once, so no later start can create a new wallet.
-            try NodeService.saveSeedPhrase(words)
+            try nodeService.saveSeedPhrase(words)
             try initializeDatabaseServices()
             seedHistoricalPrices()
             Task {
@@ -1004,9 +1006,9 @@ class AppState {
     }
 
     private func wipeWalletPersistence() {
-        NodeService.wipeWalletData()
+        nodeService.wipeWalletData()
 
-        let dir = Constants.userDataDir
+        let dir = walletDir
         let filesToDelete = [
             DatabaseService.dbFilename,
             "\(DatabaseService.dbFilename)-wal",
@@ -1094,7 +1096,7 @@ class AppState {
         // database init, node start). Kernel-enforced; outlasts a live NSE.
         let lockStart = Date()
         guard await NodeDirLock.shared.acquireReportingTimeout(
-            dataDir: Constants.userDataDir,
+            dataDir: walletDir,
             timeout: Constants.nodeDirLockTimeoutSecs,
             caller: "AppState.start",
             log: AuditService.log
@@ -1159,8 +1161,8 @@ class AppState {
         subscribeToPushNotifications()
 
         // Check for existing wallet (keys_seed from default path, OR seed_phrase from mnemonic path)
-        let seedPath = Constants.userDataDir.appendingPathComponent("keys_seed")
-        let seedPhrasePath = Constants.userDataDir.appendingPathComponent("seed_phrase")
+        let seedPath = walletDir.appendingPathComponent("keys_seed")
+        let seedPhrasePath = walletDir.appendingPathComponent("seed_phrase")
         if FileManager.default.fileExists(atPath: seedPath.path)
             || FileManager.default.fileExists(atPath: seedPhrasePath.path) {
             if !networkMonitor.isOnline {
@@ -1524,7 +1526,7 @@ class AppState {
     private func migrateDataDirIfNeeded() {
         let oldDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("StableChannels").appendingPathComponent("user")
-        let newDir = Constants.userDataDir
+        let newDir = walletDir
         let fm = FileManager.default
 
         // Only migrate if old seed exists and new seed does not
@@ -1727,7 +1729,7 @@ class AppState {
         print("[App] Restarting node from foreground")
         // Reclaim the wallet dir before writing gossip back into the LDK DB.
         guard await NodeDirLock.shared.acquireReportingTimeout(
-            dataDir: Constants.userDataDir,
+            dataDir: walletDir,
             timeout: Constants.nodeDirLockTimeoutSecs,
             caller: "restartNodeFromForeground",
             log: AuditService.log
@@ -1805,7 +1807,7 @@ class AppState {
     /// Runs gossip upkeep on the LDK DB and audits a failure; callers hold the wallet-dir lock, no node running.
     private func runGossipMaintenance(_ step: String, _ work: (LdkDbMaintenance) throws -> Void) {
         do {
-            try work(LdkDbMaintenance(dataDir: Constants.userDataDir, log: { print("[App] \($0)") }))
+            try work(LdkDbMaintenance(dataDir: walletDir, log: { print("[App] \($0)") }))
         } catch {
             AuditService.log("GOSSIP_MAINTENANCE_FAILED", data: ["step": step, "error": "\(error)"])
         }
@@ -4329,7 +4331,7 @@ class AppState {
         // Backgrounded: leave the wallet dir to the notification extension; the caller keeps the start pending.
         guard !nodeStartup.isPaused else { throw CancellationError() }
         chainURL = try await NodeDirLock.shared.withHeldLock(
-            dataDir: Constants.userDataDir,
+            dataDir: walletDir,
             timeout: Constants.nodeDirLockTimeoutSecs,
             caller: "startNodeWithFailover",
             log: AuditService.log,
@@ -4422,7 +4424,7 @@ class AppState {
     /// mnemonics.
     private func walletSeed() -> Data? {
         if let words = nodeService.savedMnemonic { return ToRemoteKeys.bip39Seed(words) }
-        let data = try? Data(contentsOf: Constants.userDataDir.appendingPathComponent("keys_seed"))
+        let data = try? Data(contentsOf: walletDir.appendingPathComponent("keys_seed"))
         return data?.count == 64 ? data : nil
     }
 
@@ -4466,7 +4468,7 @@ class AppState {
         heartbeatTimer = nil
         mempoolWebSocketService.disconnect()
         nodeService.stop()
-        let dataDir = Constants.userDataDir
+        let dataDir = walletDir
         let built = await Task.detached {
             Result { try OwnForceClose.build(dataDir: dataDir, channelId: channelId, seed: seed) }
         }.value

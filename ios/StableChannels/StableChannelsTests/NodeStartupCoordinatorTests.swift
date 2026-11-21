@@ -712,7 +712,7 @@ final class NodeStartupCoordinatorTests: XCTestCase {
 
         await appState.start()
 
-        XCTAssertEqual(openedDirs, [Constants.userDataDir])
+        XCTAssertEqual(openedDirs, [node.dataDir], "The database opens in the node service's wallet folder")
         XCTAssertEqual(appState.phase, .error("Database init failed: \(TestError.database.localizedDescription)"))
         XCTAssertNil(node.databaseService)
         XCTAssertFalse(NodeDirLock.shared.isHeld, "A failed database open hands the wallet dir back")
@@ -904,11 +904,11 @@ final class NodeStartupCoordinatorTests: XCTestCase {
     /// A restore that finds startup paused once it holds the wallet dir touches no wallet data,
     /// hands the dir back and reports the interruption.
     func testRestoreWhilePaused_deletesNothingAndThrowsInterrupted() async throws {
+        keepInstalledAppUntouched()
         NodeDirLock.shared.release()
-        let seed = try replaceSeedPhrase(with: Self.existingWords)
-        defer { restoreSeedPhrase(seed) }
+        let walletDir = try makeWalletDir(seedPhrase: Self.existingWords)
         let appState = AppState(
-            nodeService: FeeStallingNodeService(),
+            nodeService: FeeStallingNodeService(dataDir: walletDir),
             networkMonitor: MockNetworkMonitor(initialStatus: .online),
             nodeStartup: heldRetries()
         )
@@ -917,7 +917,7 @@ final class NodeStartupCoordinatorTests: XCTestCase {
 
         await assertRestoreInterrupted(appState)
 
-        XCTAssertEqual(try String(contentsOf: seed.url, encoding: .utf8), Self.existingWords)
+        XCTAssertEqual(try seedPhrase(in: walletDir), Self.existingWords)
         XCTAssertFalse(NodeDirLock.shared.isHeld, "The paused restore hands the wallet dir back")
         XCTAssertEqual(appState.phase, .wallet)
     }
@@ -925,16 +925,16 @@ final class NodeStartupCoordinatorTests: XCTestCase {
     /// A restore paused after the wipe keeps the restored words on disk, so the next start opens the
     /// restored wallet instead of creating a new empty one, and reports the interruption.
     func testRestorePausedAfterTheWipe_keepsTheRestoredSeedForTheNextStart() async throws {
+        keepInstalledAppUntouched()
         NodeDirLock.shared.release()
-        let seed = try replaceSeedPhrase(with: Self.existingWords)
-        defer { restoreSeedPhrase(seed) }
+        let walletDir = try makeWalletDir(seedPhrase: Self.existingWords)
         var appState: AppState?
         let coordinator = makeCoordinator(sleep: { duration in
             guard duration == Constants.nodeStartRetryDelay else { return }
             appState?.performBackgroundStop()
         })
         appState = AppState(
-            nodeService: FeeStallingNodeService(),
+            nodeService: FeeStallingNodeService(dataDir: walletDir),
             networkMonitor: MockNetworkMonitor(initialStatus: .online),
             nodeStartup: coordinator
         )
@@ -942,7 +942,7 @@ final class NodeStartupCoordinatorTests: XCTestCase {
 
         if let appState { await assertRestoreInterrupted(appState) }
 
-        XCTAssertEqual(try String(contentsOf: seed.url, encoding: .utf8), Self.restoredWords)
+        XCTAssertEqual(try seedPhrase(in: walletDir), Self.restoredWords)
         XCTAssertFalse(NodeDirLock.shared.isHeld, "No node runs, so the wallet dir is handed back")
         XCTAssertTrue(coordinator.isPaused, "Foreground, not the failed restore, ends the pause")
     }
@@ -960,18 +960,55 @@ final class NodeStartupCoordinatorTests: XCTestCase {
         }
     }
 
-    /// Puts `words` in the app's seed file and returns what was there, for `restoreSeedPhrase`.
-    private func replaceSeedPhrase(with words: String) throws -> (url: URL, original: Data?) {
-        try FileManager.default.createDirectory(at: Constants.userDataDir, withIntermediateDirectories: true)
-        let url = Constants.userDataDir.appendingPathComponent("seed_phrase")
-        let original = try? Data(contentsOf: url)
-        try words.write(to: url, atomically: true, encoding: .utf8)
-        return (url, original)
+    /// A restore clears saved settings the installed app keeps in the app group and standard defaults, and must
+    /// not touch its wallet files: after the test, put those settings back exactly and check the files.
+    private func keepInstalledAppUntouched() {
+        let installedWallet = installedWalletFiles()
+        let group = Constants.appGroupIdentifier
+        let stores = [(UserDefaults(suiteName: group), group), (.standard, Bundle.main.bundleIdentifier ?? "")]
+        let saved = stores.map { $0.0?.persistentDomain(forName: $0.1) ?? [:] }
+        addTeardownBlock { [self] in
+            for ((store, domain), settings) in zip(stores, saved) {
+                guard let defaults = store else { continue }
+                let added = (defaults.persistentDomain(forName: domain) ?? [:]).keys.filter { settings[$0] == nil }
+                added.forEach(defaults.removeObject(forKey:))
+                settings.forEach { defaults.set($1, forKey: $0) }
+            }
+            XCTAssertEqual(installedWalletFiles(), installedWallet, "The installed app's wallet must be untouched")
+        }
     }
 
-    private func restoreSeedPhrase(_ saved: (url: URL, original: Data?)) {
-        try? FileManager.default.removeItem(at: saved.url)
-        if let original = saved.original { try? original.write(to: saved.url) }
+    /// Size and modification date of each file a restore wipes or writes in the installed app's wallet
+    /// folder; read-only, so it is safe to run on a device with a real wallet.
+    private func installedWalletFiles() -> [String: String] {
+        let names = ["keys_seed", "seed_phrase", "ldk_node_data.sqlite", DatabaseService.dbFilename]
+            .flatMap { [$0, "\($0)-wal", "\($0)-shm"] }
+        return names.reduce(into: [:]) { files, name in
+            let url = Constants.userDataDir.appendingPathComponent(name)
+            guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]) else {
+                return
+            }
+            files[name] = "\(values.fileSize ?? 0) \(values.contentModificationDate?.timeIntervalSince1970 ?? 0)"
+        }
+    }
+
+    /// A fresh wallet folder holding `seedPhrase`, removed after the test.
+    private func makeWalletDir(seedPhrase: String) throws -> URL {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("wallet-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        try seedPhrase.write(to: dir.appendingPathComponent("seed_phrase"), atomically: true, encoding: .utf8)
+        return dir
+    }
+
+    /// A node that stalls on fee estimation, on its own wallet folder: its start opens the wallet database
+    /// and backfills prices into it, so it must never use the installed one.
+    private func makeStallingNodeOnTempWallet() throws -> FeeStallingNodeService {
+        try FeeStallingNodeService(dataDir: makeWalletDir(seedPhrase: Self.restoredWords))
+    }
+
+    private func seedPhrase(in walletDir: URL) throws -> String {
+        try String(contentsOf: walletDir.appendingPathComponent("seed_phrase"), encoding: .utf8)
     }
 
     /// LDK's start can't be cancelled: a start that finishes after background stop ran stops its
@@ -1089,15 +1126,16 @@ final class NodeStartupCoordinatorTests: XCTestCase {
 
     /// A launch that background paused between provider attempts hands the wallet dir back,
     /// so the suspended app never keeps it from the notification extension.
-    func testLaunchPausedBetweenAttempts_releasesTheWalletDir() async {
+    func testLaunchPausedBetweenAttempts_releasesTheWalletDir() async throws {
         NodeDirLock.shared.release()
+        let node = try makeStallingNodeOnTempWallet()
         var appState: AppState?
         let coordinator = makeCoordinator(sleep: { duration in
             guard duration == Constants.nodeStartRetryDelay else { return }
             appState?.performBackgroundStop()
         })
         appState = AppState(
-            nodeService: FeeStallingNodeService(),
+            nodeService: node,
             networkMonitor: MockNetworkMonitor(initialStatus: .online),
             nodeStartup: coordinator
         )
@@ -1239,8 +1277,8 @@ final class NodeStartupCoordinatorTests: XCTestCase {
         }
     }
 
-    func testBackgroundStopDuringLaunch_doesNotProduceTerminalError() async {
-        let node = FeeStallingNodeService()
+    func testBackgroundStopDuringLaunch_doesNotProduceTerminalError() async throws {
+        let node = try makeStallingNodeOnTempWallet()
         var appState: AppState?
         let coordinator = makeCoordinator(sleep: { duration in
             guard duration == Constants.nodeStartRetryDelay else { return }
@@ -1350,6 +1388,11 @@ private final class FakeNodeService: AppNodeService {
     var channels: [ChannelDetails] = []
     var savedMnemonic: String?
     var databaseService: DatabaseService?
+    /// Never the installed app's wallet folder.
+    let dataDir = FileManager.default.temporaryDirectory.appendingPathComponent("fake-node-\(UUID().uuidString)")
+
+    func saveSeedPhrase(_: String) throws {}
+    func wipeWalletData() {}
 
     struct StartCall: Equatable {
         let network: Network

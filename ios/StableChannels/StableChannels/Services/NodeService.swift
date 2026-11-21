@@ -171,6 +171,10 @@ protocol NodeServiceProtocol {
 /// The node as AppState and the views reading `appState.nodeService` use it.
 protocol AppNodeService: NodeServiceProtocol, EmailRequestSigning, AnyObject {
     var isStarting: Bool { get }
+    /// The wallet folder the node, its seed and its database live in.
+    var dataDir: URL { get }
+    func saveSeedPhrase(_ words: String) throws
+    func wipeWalletData()
     var databaseService: DatabaseService? { get set }
     func clearSavedMnemonic()
     func refreshChannels()
@@ -243,11 +247,14 @@ class NodeService: AppNodeService {
     private var eventTask: Task<Void, Never>?
 
     weak var databaseService: DatabaseService?
+    /// The wallet folder: seed files, LDK storage and its log.
+    let dataDir: URL
 
-    init() {
+    init(dataDir: URL = Constants.userDataDir) {
+        self.dataDir = dataDir
         // Pre-load saved mnemonic from disk so it's available immediately,
         // even before start() completes (avoids race with early UI display)
-        let path = Constants.userDataDir.appendingPathComponent("seed_phrase")
+        let path = dataDir.appendingPathComponent("seed_phrase")
         if let words = try? String(contentsOfFile: path.path, encoding: .utf8) {
             let trimmed = words.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {
@@ -266,7 +273,7 @@ class NodeService: AppNodeService {
         // Cross-process exclusivity: never open the wallet dir while another
         // process (the NSE) has a node on it. No-op if already held.
         let lease = await NodeDirLock.shared.acquireReportingTimeout(
-            dataDir: Constants.userDataDir,
+            dataDir: dataDir,
             timeout: Constants.nodeDirLockTimeoutSecs,
             caller: "NodeService.start",
             log: AuditService.log
@@ -297,13 +304,11 @@ class NodeService: AppNodeService {
             }
         }
 
-        let dataDir = Constants.userDataDir.path
-
         // Ensure data directory exists
-        try? FileManager.default.createDirectory(atPath: dataDir, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
 
         var config = defaultConfig()
-        config.storageDirPath = dataDir
+        config.storageDirPath = dataDir.path
         config.network = network
         config.trustedPeers0conf = [lspConfig.pubkey]
 
@@ -315,7 +320,7 @@ class NodeService: AppNodeService {
 
         let builder = Builder.fromConfig(config: config)
 
-        let logPath = Constants.userDataDir.appendingPathComponent("ldk-node.log").path
+        let logPath = dataDir.appendingPathComponent("ldk-node.log").path
         builder.setFilesystemLogger(logFilePath: logPath, maxLogLevel: .debug)
 
         builder.setChainSourceEsplora(serverUrl: esploraURL, config: Constants.esploraSyncConfig)
@@ -338,8 +343,8 @@ class NodeService: AppNodeService {
             token: lspConfig.token
         )
 
-        let seedPhrasePath = Constants.userDataDir.appendingPathComponent("seed_phrase")
-        let keySeedPath = Constants.userDataDir.appendingPathComponent("keys_seed")
+        let seedPhrasePath = dataDir.appendingPathComponent("seed_phrase")
+        let keySeedPath = dataDir.appendingPathComponent("keys_seed")
 
         // Determine which mnemonic to use
         let words: String
@@ -353,7 +358,7 @@ class NodeService: AppNodeService {
             words = saved.trimmingCharacters(in: .whitespacesAndNewlines)
         } else if !FileManager.default.fileExists(atPath: keySeedPath.path) {
             // Truly new wallet — no seed_phrase, no keys_seed
-            Self.wipeWalletData()
+            wipeWalletData()
             words = generateEntropyMnemonic(wordCount: nil)
         } else {
             // Pre-upgrade wallet with only keys_seed, no mnemonic available
@@ -363,7 +368,7 @@ class NodeService: AppNodeService {
         // Save mnemonic to file and derive node entropy (now passed to build()).
         let nodeEntropy: NodeEntropy
         if !words.isEmpty {
-            try Self.saveSeedPhrase(words)
+            try saveSeedPhrase(words)
             self.savedMnemonic = words
             nodeEntropy = NodeEntropy.fromBip39Mnemonic(mnemonic: words, passphrase: nil)
         } else {
@@ -824,15 +829,15 @@ class NodeService: AppNodeService {
     }
 
     /// Writes the wallet's seed words, which every later start of the app or the notification extension opens.
-    static func saveSeedPhrase(_ words: String) throws {
-        let path = Constants.userDataDir.appendingPathComponent("seed_phrase")
+    func saveSeedPhrase(_ words: String) throws {
+        let path = dataDir.appendingPathComponent("seed_phrase")
         try words.write(to: path, atomically: true, encoding: .utf8)
     }
 
     /// Wipe all wallet data files (keys_seed, SQLite + journals, seed_phrase)
     /// so a fresh wallet can be created without descriptor conflicts.
-    static func wipeWalletData() {
-        let dir = Constants.userDataDir
+    func wipeWalletData() {
+        let dir = dataDir
         let filesToDelete = [
             "keys_seed",
             "seed_phrase",
