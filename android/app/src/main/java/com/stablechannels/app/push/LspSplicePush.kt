@@ -94,8 +94,10 @@ object LspSpliceExpectation {
 }
 
 /**
- * When the background wait for an LSP splice ends: at a failed negotiation, at the lock plus a
- * settle window for a stability payment that may follow it, or at the deadline.
+ * When the background wait for an LSP splice ends: at the lock plus a settle window for a stability
+ * payment that may follow it, or at the deadline. A failed negotiation is only reported: its event
+ * names no funding, so it may be one left over from an earlier attempt, with the LSP's splice still
+ * to come.
  */
 internal class LspSpliceWait(startMs: Long, waitMs: Long, private val settleMs: Long) {
     enum class Outcome {
@@ -126,7 +128,7 @@ internal class LspSpliceWait(startMs: Long, waitMs: Long, private val settleMs: 
     }
 
     fun isDone(nowMs: Long): Boolean =
-        failed || nowMs >= deadlineMs || lockedAtMs?.let { nowMs >= it + settleMs } == true
+        nowMs >= deadlineMs || lockedAtMs?.let { nowMs >= it + settleMs } == true
 }
 
 /**

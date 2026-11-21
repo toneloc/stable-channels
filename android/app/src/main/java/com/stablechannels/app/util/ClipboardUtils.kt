@@ -19,7 +19,7 @@ import android.os.PersistableBundle
  */
 object ClipboardUtils {
 
-    private const val CLEAR_DELAY_MS = 60_000L
+    const val CLEAR_DELAY_SECONDS = 60L
 
     private val handler = Handler(Looper.getMainLooper())
 
@@ -43,7 +43,7 @@ object ClipboardUtils {
         clipboardManager.setPrimaryClip(clipData)
 
         // Schedule clipboard clearing after 60 seconds
-        handler.postDelayed({ clearClipboard(context) }, CLEAR_DELAY_MS)
+        handler.postDelayed({ clearClipboard(context) }, CLEAR_DELAY_SECONDS * 1_000)
     }
 
     /**

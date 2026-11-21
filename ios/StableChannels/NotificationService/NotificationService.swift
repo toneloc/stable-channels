@@ -168,6 +168,8 @@ class NotificationService: UNNotificationServiceExtension {
         if direction == .lspSpliceIn {
             content.title = LspSpliceNotice.title
             content.body = LspSpliceNotice.body
+            // Noted for whichever process handles the splice: this one or the app.
+            LspSpliceExpectation.note(UserDefaults(suiteName: Constants.appGroup))
         }
 
         logger.log("didReceive: direction=\(direction.rawValue)")

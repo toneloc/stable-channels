@@ -5,7 +5,7 @@ import UserNotifications
 @main
 struct StableChannelsApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @State private var appState = AppState(nodeService: .shared)
+    @State private var appState = AppState(nodeService: NodeService.shared)
 
     var body: some Scene {
         WindowGroup {
@@ -97,6 +97,9 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
     ) {
         print("[Push] Background push received: \(userInfo)")
+        if LspSpliceExpectation.isSplicePush(userInfo) {
+            LspSpliceExpectation.note(UserDefaults(suiteName: Constants.appGroupIdentifier))
+        }
 
         // Post to NotificationCenter so AppState can handle it
         NotificationCenter.default.post(name: .pushPaymentNotification, object: userInfo)

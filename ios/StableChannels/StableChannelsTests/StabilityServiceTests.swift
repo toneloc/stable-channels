@@ -656,8 +656,8 @@ final class StabilityServiceTests: XCTestCase {
             outboundCapacityMsat: 100_000_000,
             nextOutboundHtlcLimitMsat: 0
         )
-        appState.nodeService.channelsOverride = [details]
-        defer { appState.nodeService.channelsOverride = nil }
+        appState.concreteNodeService.channelsOverride = [details]
+        defer { appState.concreteNodeService.channelsOverride = nil }
 
         // When nextOutboundHtlcLimitMsat is 0, min(outbound, nextHtlc) == 0, failing open to prevent trapped funds
         XCTAssertNoThrow(try appState.ensureNoUnsettledSurplus(amountMsat: 95_000_000, price: 100_000.0))
@@ -1601,7 +1601,7 @@ final class StabilityServiceTests: XCTestCase {
             outboundCapacityMsat: 50_000_000
         )
 
-        appState.nodeService.channelsOverride = [otherChan, targetChan]
+        appState.concreteNodeService.channelsOverride = [otherChan, targetChan]
 
         // Dollars from par: $100 at $100k/BTC = 100,000,000 msat.
         // Should select targetChan (50_000_000 msat capacity), NOT otherChan (20_000_000 msat)
@@ -1645,13 +1645,13 @@ final class StabilityServiceTests: XCTestCase {
             channelValueSats: 200_000,
             isChannelReady: true
         )
-        appState.nodeService.channelsOverride = [channel]
-        appState.nodeService.lightningSyncAgeSecsOverride = 10
-        appState.nodeService.signMessageOverride = { _ in "mock-signature" }
+        appState.concreteNodeService.channelsOverride = [channel]
+        appState.concreteNodeService.lightningSyncAgeSecsOverride = 10
+        appState.concreteNodeService.signMessageOverride = { _ in "mock-signature" }
 
         var paymentSentMsat: UInt64?
         var paymentSentTo: PublicKey?
-        appState.nodeService.sendStabilityPaymentOverride = { amountMsat, toNode, _ in
+        appState.concreteNodeService.sendStabilityPaymentOverride = { amountMsat, toNode, _ in
             paymentSentMsat = amountMsat
             paymentSentTo = toNode
             return "mock-payment-id-123"
@@ -1726,11 +1726,11 @@ final class StabilityServiceTests: XCTestCase {
             channelValueSats: 200_000,
             isChannelReady: true
         )
-        appState.nodeService.channelsOverride = [channel]
-        appState.nodeService.lightningSyncAgeSecsOverride = 10
+        appState.concreteNodeService.channelsOverride = [channel]
+        appState.concreteNodeService.lightningSyncAgeSecsOverride = 10
 
         var paymentAttempted = false
-        appState.nodeService.sendStabilityPaymentOverride = { _, _, _ in
+        appState.concreteNodeService.sendStabilityPaymentOverride = { _, _, _ in
             paymentAttempted = true
             return "unexpected-payment-id"
         }
@@ -1780,12 +1780,12 @@ final class StabilityServiceTests: XCTestCase {
             channelValueSats: 200_000,
             isChannelReady: true
         )
-        appState.nodeService.channelsOverride = [channel]
-        appState.nodeService.lightningSyncAgeSecsOverride = 10
-        appState.nodeService.signMessageOverride = { _ in "mock-signature" }
+        appState.concreteNodeService.channelsOverride = [channel]
+        appState.concreteNodeService.lightningSyncAgeSecsOverride = 10
+        appState.concreteNodeService.signMessageOverride = { _ in "mock-signature" }
 
         var paymentSentMsat: UInt64?
-        appState.nodeService.sendStabilityPaymentOverride = { amountMsat, _, _ in
+        appState.concreteNodeService.sendStabilityPaymentOverride = { amountMsat, _, _ in
             paymentSentMsat = amountMsat
             return "mock-payment-id-htlc-limit"
         }

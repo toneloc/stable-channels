@@ -23,9 +23,8 @@ import com.stablechannels.app.services.AuditService
 import com.stablechannels.app.services.BiometricService
 import com.stablechannels.app.services.NodeService
 import com.stablechannels.app.ui.components.InkButton
-import com.stablechannels.app.ui.components.NeutralOutlinedButton
 import com.stablechannels.app.ui.components.NeutralTextButton
-import com.stablechannels.app.util.ClipboardUtils
+import com.stablechannels.app.ui.settings.seed.RevealSecretPhraseDialog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -74,36 +73,28 @@ fun BackupView(appState: AppState) {
     }
 
     Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
-        // Show/hide seed words
         InkButton(
             onClick = {
-                if (showSeedWords) {
-                    // Hiding seed words — no auth needed
-                    showSeedWords = false
-                    seedAuthError = null
-                } else {
-                    val requireAuth =
-                        AppAccessPreferencesManager.shouldRequireAuthForSeedPhrase(context)
-                    if (requireAuth) {
-                        // Showing seed words — require biometric auth
-                        scope.launch {
-                            if (activity != null) {
-                                val authResult =
-                                    BiometricService.authenticate(activity, "View seed phrase")
-                                if (authResult == BiometricService.AuthResult.SUCCESS) {
-                                    showSeedWords = true
-                                    seedAuthError = null
-                                } else {
-                                    seedAuthError = "Authentication required"
-                                }
+                val requireAuth =
+                    AppAccessPreferencesManager.shouldRequireAuthForSeedPhrase(context)
+                if (requireAuth) {
+                    scope.launch {
+                        if (activity != null) {
+                            val authResult =
+                                BiometricService.authenticate(activity, "View seed phrase")
+                            if (authResult == BiometricService.AuthResult.SUCCESS) {
+                                showSeedWords = true
+                                seedAuthError = null
                             } else {
                                 seedAuthError = "Authentication required"
                             }
+                        } else {
+                            seedAuthError = "Authentication required"
                         }
-                    } else {
-                        showSeedWords = true
-                        seedAuthError = null
                     }
+                } else {
+                    showSeedWords = true
+                    seedAuthError = null
                 }
             },
             modifier = Modifier.fillMaxWidth(),
@@ -113,7 +104,7 @@ fun BackupView(appState: AppState) {
                     contentColor = Color.White,
                 ),
         ) {
-            Text(if (showSeedWords) "Hide Seed Words" else "Backup Seed Words")
+            Text("Backup Seed Words")
         }
 
         seedAuthError?.let {
@@ -128,119 +119,7 @@ fun BackupView(appState: AppState) {
         if (showSeedWords) {
             val words = appState.nodeService.savedMnemonic
             if (!words.isNullOrEmpty()) {
-                Spacer(Modifier.height(12.dp))
-                Text(
-                    "Write these words down on paper and store them in a safe place. Never share them. Anyone with these words can access your funds.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFFD97706),
-                )
-                Spacer(Modifier.height(12.dp))
-                val wordList = words.split(" ")
-                val columns = 3
-                val rows = (wordList.size + columns - 1) / columns
-                for (row in 0 until rows) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        for (col in 0 until columns) {
-                            val index = row * columns + col
-                            if (index < wordList.size) {
-                                Surface(
-                                    shape = RoundedCornerShape(8.dp),
-                                    color = MaterialTheme.colorScheme.surfaceVariant,
-                                    modifier = Modifier.weight(1f),
-                                ) {
-                                    Row(
-                                        modifier =
-                                            Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                    ) {
-                                        Text(
-                                            "${index + 1}.",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            modifier = Modifier.width(24.dp),
-                                        )
-                                        Text(
-                                            wordList[index],
-                                            fontFamily = FontFamily.Monospace,
-                                            style = MaterialTheme.typography.bodyMedium,
-                                        )
-                                    }
-                                }
-                            } else {
-                                Spacer(Modifier.weight(1f))
-                            }
-                        }
-                    }
-                    if (row < rows - 1) Spacer(Modifier.height(6.dp))
-                }
-                Spacer(Modifier.height(12.dp))
-                var copied by remember { mutableStateOf(false) }
-                var showClipboardWarning by remember { mutableStateOf(false) }
-                InkButton(
-                    onClick = {
-                        showClipboardWarning = true
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(if (copied) "Copied" else "Copy Seed Words")
-                }
-
-                // Clipboard security confirmation dialog
-                if (showClipboardWarning) {
-                    AlertDialog(
-                        onDismissRequest = { showClipboardWarning = false },
-                        containerColor = MaterialTheme.colorScheme.surface,
-                        tonalElevation = 3.dp,
-                        shape = RoundedCornerShape(20.dp),
-                        icon = {
-                            Surface(
-                                shape = RoundedCornerShape(12.dp),
-                                color = Color(0xFFF59E0B).copy(alpha = 0.12f),
-                                modifier = Modifier.size(48.dp),
-                            ) {
-                                Box(
-                                    contentAlignment = Alignment.Center,
-                                    modifier = Modifier.fillMaxSize(),
-                                ) {
-                                    Text("⚠️", style = MaterialTheme.typography.headlineSmall)
-                                }
-                            }
-                        },
-                        title = {
-                            Text(
-                                "Copy Seed Phrase?",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.SemiBold,
-                            )
-                        },
-                        text = {
-                            Text(
-                                "Clipboard contents may be readable by other apps. The clipboard will be cleared after 60 seconds.",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        },
-                        confirmButton = {
-                            InkButton(
-                                onClick = {
-                                    showClipboardWarning = false
-                                    ClipboardUtils.copySensitive(context, "Seed Phrase", words)
-                                    copied = true
-                                }
-                            ) {
-                                Text("Copy")
-                            }
-                        },
-                        dismissButton = {
-                            NeutralOutlinedButton(onClick = { showClipboardWarning = false }) {
-                                Text("Cancel")
-                            }
-                        },
-                    )
-                }
+                RevealSecretPhraseDialog(mnemonic = words, onDismiss = { showSeedWords = false })
             } else {
                 Spacer(Modifier.height(8.dp))
                 Text(
