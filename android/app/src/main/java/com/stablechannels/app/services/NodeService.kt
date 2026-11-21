@@ -84,6 +84,8 @@ class NodeService(private val context: Context) {
         if (node != null || _isRunning.value) {
             throw AlreadyRunningException()
         }
+        // A restore phrase that fails BIP39 is rejected before the wallet is wiped or overwritten.
+        require(mnemonic == null || isValidMnemonic(mnemonic)) { "Invalid seed words" }
         if (!LdkNodeOwner.tryAcquire(LdkNodeOwner.MAIN_APP)) {
             throw IllegalStateException(
                 "LDK node data is already owned by ${LdkNodeOwner.currentOwner() ?: "another owner"}"
@@ -144,34 +146,30 @@ class NodeService(private val context: Context) {
             val seedPhrasePath = File(Constants.userDataDir(context), "seed_phrase")
             val keySeedPath = File(Constants.userDataDir(context), "keys_seed")
 
-            // Determine which mnemonic to use
+            // Which mnemonic to use; a restore or a truly new wallet starts from wiped data.
+            val wipesData = mnemonic != null || (!seedPhrasePath.exists() && !keySeedPath.exists())
             val words: String =
-                if (mnemonic != null) {
-                    // Restore — wipe ALL wallet data so new seed takes effect
-                    wipeWalletData(context)
-                    mnemonic.trim()
-                } else if (seedPhrasePath.exists()) {
-                    // Existing wallet — re-read saved mnemonic
-                    seedPhrasePath.readText().trim()
-                } else if (!keySeedPath.exists()) {
-                    // Truly new wallet — no seed_phrase, no keys_seed
-                    wipeWalletData(context)
-                    generateEntropyMnemonic(null)
-                } else {
+                when {
+                    mnemonic != null -> mnemonic.trim()
+                    seedPhrasePath.exists() -> seedPhrasePath.readText().trim()
+                    !keySeedPath.exists() -> generateEntropyMnemonic(null)
                     // Pre-upgrade wallet with only keys_seed, no mnemonic available
-                    ""
+                    else -> ""
                 }
 
-            // Save mnemonic to file and derive node entropy (entropy now passed to build()).
+            // Entropy comes before any wipe or write, so a phrase LDK rejects changes nothing.
             val nodeEntropy =
                 if (words.isNotEmpty()) {
-                    seedPhrasePath.writeText(words)
-                    _savedMnemonic.value = words
                     NodeEntropy.fromBip39Mnemonic(words, null)
                 } else {
                     // Pre-upgrade wallet with only keys_seed: derive entropy from that seed file.
                     NodeEntropy.fromSeedPath(keySeedPath.absolutePath)
                 }
+            if (wipesData) wipeWalletData(context)
+            if (words.isNotEmpty()) {
+                seedPhrasePath.writeText(words)
+                _savedMnemonic.value = words
+            }
 
             val startedNode = builder.build(nodeEntropy)
             ldkNode = startedNode
@@ -464,6 +462,12 @@ class NodeService(private val context: Context) {
     }
 
     companion object {
+        /** BIP39 check (words and checksum) that runs before a restore touches any wallet file. */
+        fun isValidMnemonic(phrase: String): Boolean {
+            val words = phrase.trim().split(Regex("\\s+"))
+            return runCatching { MnemonicCode.validate(words) }.isSuccess
+        }
+
         fun wipeWalletData(context: Context) {
             val dir = Constants.userDataDir(context)
             listOf(
