@@ -2794,6 +2794,13 @@ class DatabaseService(context: Context) :
         return txids.singleOrNull()
     }
 
+    /** The LSP's splice on [txid], if the app saw it negotiated. */
+    fun getLspSplice(txid: String): LspSplice? = SpliceEventRecorder.lspSplice(this, txid)
+
+    /** Whether the LSP has a splice negotiated on the channel that has not locked yet. */
+    fun hasPendingLspSplice(nowEpochSecs: Long = System.currentTimeMillis() / 1000L): Boolean =
+        SpliceEventRecorder.hasPendingLspSplice(this, nowEpochSecs)
+
     /** The txid of the pending splice on this channel, if there is exactly one. */
     fun getPendingSpliceTxid(userChannelId: String, channelId: String): String? {
         val txids =
@@ -2821,10 +2828,15 @@ class DatabaseService(context: Context) :
         val noTxidCutoff =
             System.currentTimeMillis() / 1000 - PENDING_SPLICE_WITHOUT_TXID_TIMEOUT_SECS
         // Only an event whose txid can still be assigned proves negotiation; if assignment keeps
-        // refusing the txid, that operation must still expire.
+        // refusing the txid, that operation must still expire. A splice-out whose negotiation may
+        // have been recorded as the LSP's splice waits for the ready event to settle which it was,
+        // for at most a day from the first LSP splice that named it, so a later one (an RBF of it,
+        // or a new splice) cannot extend it.
+        val lspSpliceCutoff =
+            System.currentTimeMillis() / 1000 - SpliceEventRecorder.LSP_SPLICE_PENDING_MAX_AGE_SECS
         writableDatabase.execSQL(
-            "UPDATE payments SET status = 'failed' WHERE status = 'pending' AND payment_type IN ('splice_in','splice_out') AND txid IS NULL AND created_at < ? AND NOT EXISTS (SELECT 1 FROM splice_events e WHERE e.payment_row_id = payments.id AND e.txid IS NOT NULL AND NOT EXISTS (SELECT 1 FROM payments o WHERE o.txid = e.txid AND o.id != payments.id))",
-            arrayOf(noTxidCutoff),
+            "UPDATE payments SET status = 'failed' WHERE status = 'pending' AND payment_type IN ('splice_in','splice_out') AND txid IS NULL AND created_at < ? AND NOT EXISTS (SELECT 1 FROM splice_events e WHERE e.payment_row_id = payments.id AND e.txid IS NOT NULL AND NOT EXISTS (SELECT 1 FROM payments o WHERE o.txid = e.txid AND o.id != payments.id)) AND NOT EXISTS (SELECT 1 FROM lsp_splices l WHERE l.move_row_id = payments.id AND l.status = 'negotiated' AND NOT EXISTS (SELECT 1 FROM lsp_splices f WHERE f.move_row_id = payments.id AND f.created_at <= ?))",
+            arrayOf(noTxidCutoff, lspSpliceCutoff),
         )
         val cursor =
             readableDatabase.rawQuery(
