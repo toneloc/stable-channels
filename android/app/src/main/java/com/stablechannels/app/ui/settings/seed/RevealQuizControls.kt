@@ -1,7 +1,10 @@
 package com.stablechannels.app.ui.settings.seed
 
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -57,34 +60,54 @@ internal fun LearnMoreButton(onClick: () -> Unit, modifier: Modifier = Modifier)
 }
 
 /**
- * Shared frame of the question and feedback steps: progress and [body] scroll at the top, [actions]
- * stay pinned to the bottom.
+ * Scrolling frame of every quiz step: [body] on top and [actions] at the bottom when they fit; at
+ * large text sizes both scroll together, so no button is cut off. [centerBody] centres the body in
+ * the space above the actions.
  */
+@Composable
+internal fun RevealStepFrame(
+    body: @Composable () -> Unit,
+    actions: @Composable () -> Unit,
+    centerBody: Boolean = false,
+) {
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        Column(
+            Modifier.verticalScroll(rememberScrollState()).heightIn(min = maxHeight).fillMaxWidth(),
+            verticalArrangement = Arrangement.SpaceBetween,
+        ) {
+            // An empty first item makes SpaceBetween centre the body between the top and actions.
+            if (centerBody) Spacer(Modifier)
+            body()
+            actions()
+        }
+    }
+}
+
+/** Question and feedback steps: progress and [body] on top, [actions] below. */
 @Composable
 internal fun QuizStepLayout(
     progress: String,
     body: @Composable ColumnScope.() -> Unit,
     actions: @Composable ColumnScope.() -> Unit,
 ) {
-    Column(Modifier.fillMaxSize()) {
-        Column(
-            Modifier.weight(1f)
-                .fillMaxWidth()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 24.dp)
-        ) {
-            Text(
-                progress,
-                modifier = Modifier.padding(top = 16.dp),
-                fontSize = 15.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+    RevealStepFrame(
+        body = {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp)) {
+                Text(
+                    progress,
+                    modifier = Modifier.padding(top = 16.dp),
+                    fontSize = 15.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                body()
+            }
+        },
+        actions = {
+            Column(
+                modifier = Modifier.padding(horizontal = 24.dp).padding(bottom = 20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                content = actions,
             )
-            body()
-        }
-        Column(
-            modifier = Modifier.padding(horizontal = 24.dp).padding(bottom = 20.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            content = actions,
-        )
-    }
+        },
+    )
 }

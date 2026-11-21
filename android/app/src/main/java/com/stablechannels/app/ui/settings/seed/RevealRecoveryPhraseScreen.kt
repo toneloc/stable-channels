@@ -81,10 +81,14 @@ fun RevealRecoveryPhraseScreen(
             contentKey = { it.step },
             label = "revealQuizStep",
         ) { state ->
+            // Taps on a step that is animating out are dropped (see RevealRecoveryQuiz.fromStep).
+            val act: (RevealRecoveryQuiz.() -> RevealRecoveryQuiz) -> Unit = { action ->
+                quiz = quiz.fromStep(state.step, action)
+            }
             when (val step = state.step) {
                 RevealQuizStep.Intro ->
                     RevealQuizIntro(
-                        onGetStarted = { quiz = quiz.startQuiz() },
+                        onGetStarted = { act { startQuiz() } },
                         onLearnMore = learnMore,
                     )
                 is RevealQuizStep.Question ->
@@ -92,7 +96,7 @@ fun RevealRecoveryPhraseScreen(
                         RevealQuizQuestion(
                             question = it,
                             progress = state.progressText(step.index),
-                            onSelectOption = { option -> quiz = quiz.selectOption(option) },
+                            onSelectOption = { option -> act { selectOption(option) } },
                             onLearnMore = learnMore,
                         )
                     }
@@ -102,7 +106,7 @@ fun RevealRecoveryPhraseScreen(
                             question = it,
                             progress = state.progressText(step.questionIndex),
                             isCorrect = step.isCorrect,
-                            onContinue = { quiz = quiz.continueFromFeedback() },
+                            onContinue = { act { continueFromFeedback() } },
                             onLearnMore = learnMore,
                         )
                     }

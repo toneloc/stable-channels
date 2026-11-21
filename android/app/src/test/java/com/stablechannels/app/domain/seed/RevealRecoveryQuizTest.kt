@@ -211,4 +211,17 @@ class RevealRecoveryQuizTest {
         assertEquals(RevealQuizStep.Feedback(0, isCorrect = false), started.selectOption(2).step)
         assertEquals(RevealQuizStep.Feedback(0, isCorrect = false), started.selectOption(-1).step)
     }
+
+    @Test
+    fun `an action from a step that is no longer shown does nothing`() {
+        val secondQuestion = RevealRecoveryQuiz().startQuiz().selectOption(1).continueFromFeedback()
+
+        val fromLeavingScreen =
+            secondQuestion.fromStep(RevealQuizStep.Question(0)) { selectOption(0) }
+        val fromShownScreen =
+            secondQuestion.fromStep(RevealQuizStep.Question(1)) { selectOption(0) }
+
+        assertEquals(secondQuestion, fromLeavingScreen)
+        assertEquals(RevealQuizStep.Feedback(1, isCorrect = true), fromShownScreen.step)
+    }
 }
