@@ -42,8 +42,7 @@ class MainActivity : FragmentActivity() {
 
     private var isLocked by mutableStateOf(false)
     private var isAuthenticating by mutableStateOf(false)
-    private var lastBackgroundedTime: Long = 0L
-    private var isFirstResume = true
+    private val unlockTimer = AppUnlockTimer()
     private var pendingBackgroundStopJob: Job? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -75,7 +74,7 @@ class MainActivity : FragmentActivity() {
 
     override fun onPause() {
         super.onPause()
-        lastBackgroundedTime = System.currentTimeMillis()
+        unlockTimer.onPause()
         if (!::appState.isInitialized) return
         if (AppState.suppressNextBackgroundCycle) {
             // Give the transient share/chooser dialog a short grace window instead of stopping
@@ -108,21 +107,14 @@ class MainActivity : FragmentActivity() {
         pendingBackgroundStopJob?.cancel()
         pendingBackgroundStopJob = null
         AppState.suppressNextBackgroundCycle = false
-        if (quickReturnFromShare) {
-            // Returned within the grace window: the node was never stopped, so skip the
-            // foreground resync that would otherwise refresh the UI.
-        } else if (isFirstResume) {
-            isFirstResume = false
-            appState.restartNodeFromForeground()
-            return
-        } else {
+        // Returned within the share grace window: the node was never stopped, so skip the
+        // foreground resync that would otherwise refresh the UI.
+        if (!quickReturnFromShare) {
             appState.restartNodeFromForeground()
         }
-        if (AppAccessPreferencesManager.isAppUnlockEnabled(this)) {
-            val elapsed = System.currentTimeMillis() - lastBackgroundedTime
-            if (elapsed > 5000L) {
-                isLocked = true
-            }
+        // Checked on every resume, so a share can't skip the next lock check.
+        if (AppAccessPreferencesManager.isAppUnlockEnabled(this) && unlockTimer.awayTooLong()) {
+            isLocked = true
         }
     }
 
