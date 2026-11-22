@@ -12,9 +12,17 @@
 //!
 //! A lock is attributed by what only the LSP's own splice produces. On the LSP's node LDK reports a
 //! negotiated splice only when the node contributed to it: a splice-in of its own, or a splice-out of
-//! its own. A splice the operator makes by hand, in or out, is refused while a request holds the
-//! channel and is noted otherwise, so a negotiation while a request holds the channel is the
-//! request's. Every outpoint negotiated for a request is kept, and the request has locked once the
+//! its own. That is rust-lightning commit 41d9e711c ("Only emit Event::SpliceNegotiated when
+//! contributing"), in the 697a239 that LDK Server bd95e18 builds through ldk-node f375e4d: each emit
+//! in channelmanager.rs is under `splice_negotiated.has_local_contribution`, which counts the node's
+//! own inputs and outputs but never the shared funding input, and the shared output only for the
+//! side that started the splice (interactivetxs.rs); to a splice the phone starts, the node adds only
+//! a splice it had queued itself (`splice_init`). So a splice the phone makes alone is never reported
+//! here. The phone's own LDK is older and reports both sides' splices, so this holds on the LSP's
+//! node only, and an LDK Server bump must keep that commit. A splice the operator makes by hand, in
+//! or out, is refused while a request holds the channel and is noted otherwise, so a negotiation
+//! while a request holds the channel is the request's; a splice made straight on LDK Server, outside
+//! the daemon, is not checked. Every outpoint negotiated for a request is kept, and the request has locked once the
 //! channel is on one of them: a fee bump, or a splice-out the user added to the same transaction,
 //! does not hide it, and nothing has to be looked up. The node's ready event for such an outpoint locks the request too, even when a later
 //! splice has moved the channel on by the time the job looks. When no negotiation was seen (an event
@@ -991,7 +999,7 @@ async fn start_splice(
     }
 }
 
-/// The node refused the call, which is a failed attempt. When the row moved on while the call was out, the node reported a negotiation for the request meanwhile, which on the LSP's node is a splice of its own, signed (a call it ran after all): the row keeps that splice and its pending call, so a refusal of the new call, for that very splice, makes no second call possible. A row the operator cancelled meanwhile, with nothing signed, has nothing pending any more.
+/// The node refused the call, which is a failed attempt. When the row moved on while the call was out, the node reported a negotiation for the request meanwhile, which on the LSP's node is a splice of its own (see the module doc), signed (a call it ran after all): the row keeps that splice and its pending call, so a refusal of the new call, for that very splice, makes no second call possible. A row the operator cancelled meanwhile, with nothing signed, has nothing pending any more.
 fn record_refusal(db: &Database, attempt: &QueuedSplice, error: &str, now: i64) {
     if record_failure(db, attempt, &attempt.status, error, true, now) {
         return;
@@ -1115,7 +1123,7 @@ fn released_for_good(row: &QueuedSplice) -> bool {
     row.status == "cancelled" && !row.pending_on_node && row.last_error.as_deref() != Some(NEGOTIATION_FAILED_ERROR)
 }
 
-/// The node negotiated a splice on the channel. On the LSP's node LDK reports a negotiation only for a splice the node contributed to, and a splice the operator makes by hand (Splice+ or Splice-) is refused while a request holds the channel, so it is the request's splice (or the replaced request's), with one exception: a splice the operator made by hand after the request was released, which left a note. Every row with a call pending records it, whatever its status, since a signed splice keeps the call through a later negotiation failure. A row with no call pending is armed with it: the node ran a call after all that a failure event, a refusal or a release had let go, or that it held until the phone came back, so the row's call is pending again and no second call goes out. A released row is not armed by a splice made by hand since.
+/// The node negotiated a splice on the channel. On the LSP's node LDK reports a negotiation only for a splice the node contributed to (rust-lightning 41d9e711c; see the module doc), and a splice the operator makes by hand (Splice+ or Splice-) is refused while a request holds the channel, so it is the request's splice (or the replaced request's), with one exception: a splice the operator made by hand after the request was released, which left a note. Every row with a call pending records it, whatever its status, since a signed splice keeps the call through a later negotiation failure. A row with no call pending is armed with it: the node ran a call after all that a failure event, a refusal or a release had let go, or that it held until the phone came back, so the row's call is pending again and no second call goes out. A released row is not armed by a splice made by hand since.
 pub(crate) fn on_splice_negotiated(db: &Database, user_channel_id: &str, funding_txo: &str, now: i64) {
     let Some(key) = row_key(user_channel_id) else { return };
     let Some(row) = row_for_event(db, &key) else { return };
@@ -3167,6 +3175,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let push = service(FakeSender::new(true), dir.path(), &[]);
         called(&db, &ldk, &push, 100).await;
+        // The LSP's own splice: its node reports a negotiation only for a splice it contributed to (rust-lightning 41d9e711c), so a splice the user made alone never gets here.
         on_splice_negotiated(&db, USER_CHANNEL_ID_DECIMAL, &txo(TX_B, 1), 101);
         // The user's node added a splice-out of 20,000 sats to the LSP's transaction: the channel grew by less than most of the amount.
         *ldk.channels.lock().unwrap() = vec![channel_sides(true, TX_B, 1, LSP_SATS + AMOUNT_SATS, USER_SATS - 20_000)];

@@ -98,6 +98,8 @@ git -C ldk-server checkout bd95e187b0c08b3fb90fc42a96f0f8a2b6773495
 
 They can live anywhere on disk in any layout. Cargo pulls `ldk-server-client` from upstream at a pinned rev, so no sibling-directory requirement. Run LDK Server at that same rev (the `ldk-server-client` rev in `server/stable-channels-lsp/Cargo.toml`): the daemon and LDK Server must speak the same protobuf format.
 
+The daemon's queued splices also rely on that rev's LDK (rust-lightning 697a239, through ldk-node f375e4d) reporting a splice negotiation only for a splice the node contributed to, which upstream commit 41d9e711c added. Keep that commit when you bump LDK Server. While a queued splice request is open on a channel, splice that channel only with the GUI's Splice+ and Splice-: a splice made straight on LDK Server (its CLI or gRPC) skips the daemon's check and can be taken for the request's splice.
+
 ### 2. Configure LDK Server
 
 In `ldk-server/contrib/ldk-server-config.toml`:

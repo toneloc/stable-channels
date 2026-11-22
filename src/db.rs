@@ -432,7 +432,7 @@ pub struct QueuedSplice {
     pub wake_note: Option<String>,
     /// The outpoint the node last negotiated for this request. A row that holds one keeps its call through a later negotiation failure, since the signed splice may have landed.
     pub funding_txo: Option<String>,
-    /// Every outpoint the node negotiated for this request, oldest first. On the LSP's node a negotiation is reported only for a splice the node contributed to, and the daemon keeps the operator's own splices off a channel a request holds, so the request's splice is whichever of these the channel locks on: a fee bump, or a splice-out the user added to the same transaction, does not hide it.
+    /// Every outpoint the node negotiated for this request, oldest first. On the LSP's node a negotiation is reported only for a splice the node contributed to (rust-lightning 41d9e711c; see the daemon's queued_splice module doc), and the daemon keeps the operator's own splices off a channel a request holds, so the request's splice is whichever of these the channel locks on: a fee bump, or a splice-out the user added to the same transaction, does not hide it.
     pub negotiated_txos: Vec<String>,
     /// When that outpoint was negotiated; cleared with it by the next call.
     pub negotiated_at: Option<i64>,
