@@ -13,7 +13,7 @@ use sc_rest_client::ldk_server_grpc::endpoints::LIST_PAYMENTS_PATH;
 use sc_rest_client::ldk_server_grpc::types::PaymentKind;
 
 const HELP_PAYMENT_ID: &str =
-	"The server-side identifier for this payment record. It is distinct from a payment hash or on-chain transaction id.";
+	"The node's ID for this payment. It is not the payment hash or the TXID.";
 const HELP_PAYMENT_TYPE: &str = "The payment protocol or kind, such as on-chain, BOLT11, BOLT12 offer, BOLT12 refund, spontaneous, trade, stability, or sync.";
 const HELP_PAYMENT_AMOUNT: &str =
 	"The payment amount recorded for this payment. Any fee paid by this node is shown separately when known.";
@@ -22,16 +22,16 @@ const HELP_PAYMENT_FEE: &str =
 const HELP_PAYMENT_DIRECTION: &str = "Inbound means received by this node. Outbound means sent by this node.";
 const HELP_PAYMENT_STATUS: &str = "The payment lifecycle state, such as pending, succeeded, or failed.";
 const HELP_PAYMENT_TIMESTAMP: &str =
-	"The latest update time for this payment. Hover the value for the raw Unix timestamp.";
+	"When this payment last changed. Hover the value for the Unix timestamp.";
 const HELP_PAYMENT_HASH: &str = "The hash locking a Lightning payment. The matching preimage proves settlement.";
 const HELP_PREIMAGE: &str =
 	"The secret value that satisfies the payment hash and proves the Lightning payment settled.";
 const HELP_SECRET: &str =
-	"Payment secret material used to bind or authorize the payment request and protect the recipient.";
+	"The invoice's payment secret, known only to the payer and the recipient.";
 const HELP_OFFER_ID: &str = "Identifier for the BOLT12 offer involved in this payment.";
 const HELP_PAYER_NOTE: &str = "Optional note supplied by the payer in a BOLT12 flow.";
 const HELP_QUANTITY: &str = "Quantity requested from a BOLT12 offer when present.";
-const HELP_TXID: &str = "The Bitcoin transaction identifier for an on-chain payment.";
+const HELP_TXID: &str = "The TXID of this on-chain payment.";
 
 // Per-row snapshot extracted from state.payments.
 #[derive(Clone, PartialEq)]
@@ -128,9 +128,9 @@ pub fn Payments() -> Element {
 		return rsx! {
 			Card {
 				if loading {
-					Empty { icon: "receipt", title: "Loading...", Spinner { large: true } }
+					Empty { icon: "receipt", title: "Loading…", Spinner { large: true } }
 				} else {
-					Empty { icon: "receipt", title: "No payment data available", hint: "Click Refresh to fetch.",
+					Empty { icon: "receipt", title: "No payment data available", hint: "Click Refresh to load",
 						RefreshBtn { busy: loading, onclick: refresh }
 					}
 				}
@@ -188,7 +188,7 @@ pub fn Payments() -> Element {
 			div { class: "toolbar",
 				div { class: "search",
 					Icon { name: "search", size: 15 }
-					TextInput { value: filter, small: true, placeholder: "id, hash or type", oninput: move |v| view.write().payment_filter = v }
+					TextInput { value: filter, small: true, placeholder: "ID, hash or type", oninput: move |v| view.write().payment_filter = v }
 				}
 				select {
 					class: "select sm",
@@ -214,7 +214,7 @@ pub fn Payments() -> Element {
 					SegBtn { active: dir_filter == 0, onclick: move |_| view.write().payment_direction = 0, "In" }
 					SegBtn { active: dir_filter == 1, onclick: move |_| view.write().payment_direction = 1, "Out" }
 				}
-				span { class: "count", "{shown}/{total} payment(s)" }
+				span { class: "count", "{shown} of {total} payment(s)" }
 				div { class: "row", style: "margin-left: auto;",
 					button { class: "btn sm", disabled: shown == 0 || ctx.busy(Op::Export), title: "Export the rows shown", onclick: export,
 						Icon { name: "csv", size: 14 }
@@ -227,17 +227,17 @@ pub fn Payments() -> Element {
 				div { class: "banner",
 					Icon { name: "info", size: 16 }
 					span { class: "grow",
-						"Filters and sorting only cover the {total} payments loaded so far. More exist on the daemon."
+						"Filters and sorting cover only the {total} payments loaded so far. The LSP has more."
 					}
 					LoadAllBtn { busy: busy_any, progress }
 				}
 			}
 			if total == 0 {
 				if !loading {
-					Empty { icon: "receipt", title: "No payments found." }
+					Empty { icon: "receipt", title: "No payments yet" }
 				}
 			} else if shown == 0 {
-				Empty { icon: "search", title: "No loaded payments match these filters." }
+				Empty { icon: "search", title: "No loaded payments match these filters" }
 			} else {
 				div { class: "table-wrap",
 					table { class: "table clickable", style: "min-width: 900px;",
@@ -262,11 +262,11 @@ pub fn Payments() -> Element {
 			}
 			if has_more {
 				div { class: "table-foot",
-					span { "More payments available on the daemon." }
+					span { "The LSP has more payments." }
 					div { class: "row",
 						button { class: "btn sm", disabled: busy_any, onclick: move |_| actions::fetch_payments(ctx, true),
 							if loading { Spinner {} } else { Icon { name: "chevron-down", size: 14 } }
-							"Load More"
+							"Load more"
 						}
 						LoadAllBtn { busy: busy_any, progress }
 					}
@@ -309,13 +309,13 @@ fn PaymentRowView(row: PaymentRow) -> Element {
 			td { class: "right",
 				match row.amount_msat {
 					Some(amount) => rsx! { Amount { msat: amount, strong: true } },
-					None => rsx! { span { class: "faint", "-" } },
+					None => rsx! { span { class: "faint", "—" } },
 				}
 			}
 			td { class: "right",
 				match row.fee_paid_msat {
 					Some(fee) => rsx! { Amount { msat: fee } },
-					None => rsx! { span { class: "faint", "-" } },
+					None => rsx! { span { class: "faint", "—" } },
 				}
 			}
 			td { Pill { tone: status_tone, "{status_text}" } }
@@ -413,12 +413,12 @@ pub fn PaymentDrawer(payment_id: String) -> Element {
 			icon: rsx! { Bubble { icon: "receipt", tone: "blue" } },
 			onclose: move |_| close_drawer(ctx),
 			if loading {
-				crate::ui::widgets::Loading { label: "Loading payment details..." }
+				crate::ui::widgets::Loading { label: "Loading payment details…" }
 			} else {
 				match details {
-					None => rsx! { Empty { icon: "receipt", title: "No payment data." } },
+					None => rsx! { Empty { icon: "receipt", title: "No payment data" } },
 					Some(response) => match response.payment {
-						None => rsx! { Empty { icon: "receipt", title: "Payment not found." } },
+						None => rsx! { Empty { icon: "receipt", title: "Payment not found" } },
 						Some(payment) => {
 							let (status_text, status_tone) = status_style(payment.status);
 							let kind_label = payment.kind.as_ref().map(format_payment_kind).unwrap_or_else(|| "Unknown".to_string());
@@ -427,7 +427,7 @@ pub fn PaymentDrawer(payment_id: String) -> Element {
 								div { class: "drawer-hero",
 									match payment.amount_msat {
 										Some(a) => rsx! { span { class: "hero-amount", Amount { msat: a, strong: true } } },
-										None => rsx! { span { class: "faint", "-" } },
+										None => rsx! { span { class: "faint", "—" } },
 									}
 									div { class: "row", style: "gap: 6px;",
 										Pill { tone: status_tone, "{status_text}" }
@@ -439,14 +439,14 @@ pub fn PaymentDrawer(payment_id: String) -> Element {
 									div { class: "kv",
 										Kv { label: "Payment ID", help: HELP_PAYMENT_ID, IdCopy { value: payment.payment_id.clone(), head: 10, tail: 10 } }
 										Kv { label: "Type", help: HELP_PAYMENT_TYPE, "{kind_label}" }
-										Kv { label: "Fee Paid", help: HELP_PAYMENT_FEE,
+										Kv { label: "Fee paid", help: HELP_PAYMENT_FEE,
 											match payment.fee_paid_msat {
 												Some(f) => rsx! { Amount { msat: f } },
-												None => rsx! { "-" },
+												None => rsx! { "—" },
 											}
 										}
 										Kv { label: "Direction", help: HELP_PAYMENT_DIRECTION, "{direction_label(payment.direction)}" }
-										Kv { label: "Last Updated", help: HELP_PAYMENT_TIMESTAMP, Hover { tip: format!("unix: {ts}"), "{local_datetime(ts)} ({relative_short(ts, now)})" } }
+										Kv { label: "Last updated", help: HELP_PAYMENT_TIMESTAMP, Hover { tip: format!("unix: {ts}"), "{local_datetime(ts)} ({relative_short(ts, now)})" } }
 									}
 								}
 								if let Some(kind) = payment.kind {
@@ -472,15 +472,15 @@ fn PaymentKindDetails(kind: PaymentKind) -> Element {
 		Some(Kind::Onchain(onchain)) => rsx! {
 			div { class: "kv",
 				if onchain.txid.is_empty() {
-					Kv { label: "Txid", help: HELP_TXID, "-" }
+					Kv { label: "TXID", help: HELP_TXID, "—" }
 				} else {
-					DetailId { label: "Txid", help: HELP_TXID, value: onchain.txid.clone() }
+					DetailId { label: "TXID", help: HELP_TXID, value: onchain.txid.clone() }
 				}
 			}
 		},
 		Some(Kind::Bolt11(bolt11)) => rsx! {
 			div { class: "kv",
-				DetailId { label: "Payment Hash", help: HELP_PAYMENT_HASH, value: bolt11.hash.clone() }
+				DetailId { label: "Payment hash", help: HELP_PAYMENT_HASH, value: bolt11.hash.clone() }
 				if let Some(preimage) = bolt11.preimage.clone() {
 					DetailId { label: "Preimage", help: HELP_PREIMAGE, value: preimage }
 				}
@@ -492,7 +492,7 @@ fn PaymentKindDetails(kind: PaymentKind) -> Element {
 		Some(Kind::Bolt12Offer(offer)) => rsx! {
 			div { class: "kv",
 				if let Some(hash) = offer.hash.clone() {
-					DetailId { label: "Payment Hash", help: HELP_PAYMENT_HASH, value: hash }
+					DetailId { label: "Payment hash", help: HELP_PAYMENT_HASH, value: hash }
 				}
 				if let Some(preimage) = offer.preimage.clone() {
 					DetailId { label: "Preimage", help: HELP_PREIMAGE, value: preimage }
@@ -504,7 +504,7 @@ fn PaymentKindDetails(kind: PaymentKind) -> Element {
 					DetailId { label: "Offer ID", help: HELP_OFFER_ID, value: offer.offer_id.clone() }
 				}
 				if let Some(payer_note) = offer.payer_note.clone() {
-					Kv { label: "Payer Note", help: HELP_PAYER_NOTE, "{payer_note}" }
+					Kv { label: "Payer note", help: HELP_PAYER_NOTE, "{payer_note}" }
 				}
 				if let Some(quantity) = offer.quantity {
 					Kv { label: "Quantity", help: HELP_QUANTITY, "{quantity}" }
@@ -514,7 +514,7 @@ fn PaymentKindDetails(kind: PaymentKind) -> Element {
 		Some(Kind::Bolt12Refund(refund)) => rsx! {
 			div { class: "kv",
 				if let Some(hash) = refund.hash.clone() {
-					DetailId { label: "Payment Hash", help: HELP_PAYMENT_HASH, value: hash }
+					DetailId { label: "Payment hash", help: HELP_PAYMENT_HASH, value: hash }
 				}
 				if let Some(preimage) = refund.preimage.clone() {
 					DetailId { label: "Preimage", help: HELP_PREIMAGE, value: preimage }
@@ -526,7 +526,7 @@ fn PaymentKindDetails(kind: PaymentKind) -> Element {
 		},
 		Some(Kind::Spontaneous(spontaneous)) => rsx! {
 			div { class: "kv",
-				DetailId { label: "Payment Hash", help: HELP_PAYMENT_HASH, value: spontaneous.hash.clone() }
+				DetailId { label: "Payment hash", help: HELP_PAYMENT_HASH, value: spontaneous.hash.clone() }
 				if let Some(preimage) = spontaneous.preimage.clone() {
 					DetailId { label: "Preimage", help: HELP_PREIMAGE, value: preimage }
 				}

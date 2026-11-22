@@ -272,7 +272,7 @@ fn TopBar() -> Element {
 					span { class: "coin", "₿" }
 					match price {
 						Some(p) => rsx! { "{crate::format::format_usd(p)}" },
-						None => rsx! { span { class: "muted", "price --" } },
+						None => rsx! { span { class: "muted", "price —" } },
 					}
 				}
 				div { class: "seg", role: "group", "aria-label": "Display unit",
@@ -281,7 +281,7 @@ fn TopBar() -> Element {
 					widgets::SegBtn { active: unit == DisplayUnit::Sats, onclick: move |_| set_unit(DisplayUnit::Sats), "Sats" }
 				}
 				if let Some((name, read_only, permissions)) = session {
-					widgets::Hover { tip: format!("Logged in with LDK Server token \"{name}\": {permissions}"),
+					widgets::Hover { tip: format!("Logged in with token \"{name}\". Permissions: {permissions}"),
 						span { class: "conn-pill",
 							Icon { name: "key", size: 14 }
 							span { class: "url", "{name}" }
@@ -500,8 +500,8 @@ mod tests {
 	#[test]
 	fn node_info_shows_chain_source_even_when_disconnected() {
 		let html = render(ActiveTab::NodeInfo, Seed::Disconnected);
-		assert!(html.contains("Chain Source"));
-		assert!(html.contains("No chain source configured."));
+		assert!(html.contains("Chain source"));
+		assert!(html.contains("No chain source configured"));
 		assert!(html.contains("Not connected to an LSP"));
 	}
 
@@ -519,7 +519,7 @@ mod tests {
 		assert!(channels.contains("Active"));
 		assert!(channels.contains("sats"));
 		let payments = render(ActiveTab::Payments, Seed::ConnectedWithData);
-		assert!(payments.contains("1/1 payment(s)"));
+		assert!(payments.contains("1 of 1 payment(s)"));
 		assert!(payments.contains("Stability"));
 		assert!(payments.contains("Succeeded"));
 	}
@@ -632,7 +632,7 @@ mod tests {
 	#[test]
 	fn an_older_daemon_only_loses_the_activity_card() {
 		let html = render_dashboard(false);
-		assert!(html.contains("Activity needs the updated daemon"));
+		assert!(html.contains("Activity needs a newer LSP"));
 		assert!(html.contains("An exact ledger identifier is required"));
 		assert!(html.contains("~2 more channels"), "tiles still render");
 		assert!(html.contains("Channel with 02aa opening"), "In progress still renders from the channel list");
@@ -720,7 +720,7 @@ mod tests {
 	#[test]
 	fn lightning_offers_every_payment_flow() {
 		let html = render(ActiveTab::Lightning, Seed::ConnectedEmpty);
-		for label in ["BOLT11 Send", "BOLT11 Receive", "BOLT12 Send", "BOLT12 Receive", "Keysend", "Pay Invoice"] {
+		for label in ["BOLT11 send", "BOLT11 receive", "BOLT12 send", "BOLT12 receive", "Keysend", "Pay invoice"] {
 			assert!(html.contains(label), "missing {label}");
 		}
 	}
@@ -761,7 +761,7 @@ mod tests {
 		let mut dom = VirtualDom::new(HistoryHarness);
 		dom.rebuild_in_place();
 		let html = dioxus_ssr::render(&dom);
-		assert!(html.contains("Channel History"));
+		assert!(html.contains("Channel history"));
 		assert!(html.contains("LSP published balances: target $43.63"));
 		assert!(html.contains("Show technical events"));
 		assert!(!html.contains("Raw JSON"), "technical cards stay hidden by default");
@@ -959,14 +959,14 @@ mod tests {
 		let html = render_revenue(true);
 		assert!(html.contains("1 rejected · show</button>"), "the rejected count filters the list to those trades");
 		assert!(html.contains(">Rejected trades</button>"), "a chip for rejected trades");
-		for text in ["Earned", "Spent", "Net", "Stability net", "Peg settlements, not revenue", "JIT channel opens", "574 sats", "2 opens · 287 sats each", "not tracked", "Trade fee", "Activity"] {
+		for text in ["Earned", "Spent", "Net", "Stability net", "Stability payments, not revenue", "JIT channel opens", "574 sats", "2 opens · 287 sats each", "not tracked", "Trade fee", "Activity"] {
 			assert!(html.contains(text), "missing {text}");
 		}
 		assert!(!html.contains("free opening"), "the always-zero JIT fee line is gone");
 		assert!(html.contains("Trade and routing fees") && !html.contains("JIT fees"), "no JIT earnings while opens are free");
 		assert!(html.contains("\u{2264} \u{2212}2,974 sats"), "net is a ceiling: 2,000 earned − 4,974 known spent, on-chain fees untracked");
 		assert!(html.contains("\u{2265} 4,974 sats"), "spent is a floor");
-		assert!(html.contains("At most: some fees are not tracked"));
+		assert!(html.contains("At most, as some fees are not tracked"));
 		for text in ["Channel closes", "Close fee bumps", "Claims &", ">Channel close</button>", ">Claim or sweep</button>"] {
 			assert!(html.contains(text), "missing {text}");
 		}
@@ -1121,26 +1121,26 @@ mod tests {
 	fn a_read_only_session_shows_no_send_or_edit_controls() {
 		let readonly = &READONLY_PERMISSIONS;
 		let lightning = render_as(ActiveTab::Lightning, readonly);
-		for text in ["BOLT11 Send", "BOLT11 Receive", "BOLT12 Send", "BOLT12 Receive", "Keysend", "Pay Invoice", "Generate Invoice"] {
+		for text in ["BOLT11 send", "BOLT11 receive", "BOLT12 send", "BOLT12 receive", "Keysend", "Pay invoice", "Generate invoice"] {
 			assert!(!lightning.contains(text), "Lightning shows {text}");
 		}
 		assert!(says_no_access(&lightning) && lightning.contains("needs payments:send or invoices:create"));
 		let onchain = render_as(ActiveTab::Onchain, readonly);
-		for text in ["Send On-chain", "Generate Address", "Send</button>", "Receive</button>"] {
+		for text in ["Send on-chain", "Generate address", "Send</button>", "Receive</button>"] {
 			assert!(!onchain.contains(text), "On-chain shows {text}");
 		}
-		assert!(onchain.contains("Transaction History"), "the read-only history tab stays");
+		assert!(onchain.contains("Transaction history"), "the read-only history tab stays");
 		let stable = render_as(ActiveTab::StableChannels, readonly);
-		assert!(stable.contains("Stable channels") && stable.contains("Ledger"), "the stable table still reads");
-		for text in ["Edit Stable Channel", "Edit this channel", ">Submit<"] {
+		assert!(stable.contains("Stable channels") && stable.contains("History</button>"), "the stable table still reads");
+		for text in ["Edit stable channel", "Edit this channel", ">Submit<"] {
 			assert!(!stable.contains(text), "Stable shows {text}");
 		}
 		let channels = render_as(ActiveTab::Channels, readonly);
 		assert!(channels.contains("1 of 1 channel(s)"));
-		assert!(!channels.contains("Open Channel") && !channels.contains("Channel actions"));
+		assert!(!channels.contains("Open channel") && !channels.contains("Channel actions"));
 		let peers = render_as(ActiveTab::Peers, readonly);
-		assert!(peers.contains("1 peers connected"));
-		assert!(!peers.contains("Connect Peer") && !peers.contains(">Disconnect<"));
+		assert!(peers.contains("Connected peers: 1"));
+		assert!(!peers.contains("Connect peer") && !peers.contains(">Disconnect<"));
 		let revenue = render_as(ActiveTab::Revenue, readonly);
 		assert!(revenue.contains("Activity") && !revenue.contains(">Refund<"));
 	}
@@ -1164,7 +1164,7 @@ mod tests {
 		let ldk_log = dioxus_ssr::render(&dom);
 		assert!(says_no_access(&ldk_log) && ldk_log.contains("needs admin"));
 		let node = render_as(ActiveTab::NodeInfo, &["payments:read"]);
-		assert!(node.contains("needs node:read") && node.contains("Chain Source"), "local config still shows");
+		assert!(node.contains("needs node:read") && node.contains("Chain source"), "local config still shows");
 	}
 
 	#[test]
@@ -1180,21 +1180,21 @@ mod tests {
 	fn an_admin_session_shows_every_control() {
 		let admin: &[&'static str] = &["admin"];
 		let lightning = render_as(ActiveTab::Lightning, admin);
-		for text in ["BOLT11 Send", "BOLT11 Receive", "BOLT12 Send", "BOLT12 Receive", "Keysend", "Pay Invoice"] {
+		for text in ["BOLT11 send", "BOLT11 receive", "BOLT12 send", "BOLT12 receive", "Keysend", "Pay invoice"] {
 			assert!(lightning.contains(text), "Lightning lacks {text}");
 		}
 		let onchain = render_as(ActiveTab::Onchain, admin);
-		for text in ["Send On-chain", "Send</button>", "Receive</button>", "History</button>"] {
+		for text in ["Send on-chain", "Send</button>", "Receive</button>", "History</button>"] {
 			assert!(onchain.contains(text), "On-chain lacks {text}");
 		}
 		let stable = render_as(ActiveTab::StableChannels, admin);
-		for text in ["Edit Stable Channel", "Edit this channel", ">Submit<"] {
+		for text in ["Edit stable channel", "Edit this channel", ">Submit<"] {
 			assert!(stable.contains(text), "Stable lacks {text}");
 		}
 		let channels = render_as(ActiveTab::Channels, admin);
-		assert!(channels.contains("Open Channel") && channels.contains("Channel actions"));
+		assert!(channels.contains("Open channel") && channels.contains("Channel actions"));
 		let peers = render_as(ActiveTab::Peers, admin);
-		assert!(peers.contains("Connect Peer") && peers.contains(">Disconnect<"));
+		assert!(peers.contains("Connect peer") && peers.contains(">Disconnect<"));
 		assert!(render_as(ActiveTab::Revenue, admin).contains(">Refund<"));
 		for (_, tabs) in ActiveTab::GROUPS {
 			for tab in tabs.iter().copied() {
@@ -1207,10 +1207,10 @@ mod tests {
 	fn a_token_that_can_only_receive_sees_only_the_receive_flows() {
 		let invoice = &INVOICE_PERMISSIONS;
 		let lightning = render_as(ActiveTab::Lightning, invoice);
-		assert!(lightning.contains("BOLT11 Receive") && lightning.contains("Generate Invoice"), "the first allowed flow opens");
-		assert!(!lightning.contains("BOLT11 Send") && !lightning.contains("Pay Invoice"));
+		assert!(lightning.contains("BOLT11 receive") && lightning.contains("Generate invoice"), "the first allowed flow opens");
+		assert!(!lightning.contains("BOLT11 send") && !lightning.contains("Pay invoice"));
 		let onchain = render_as(ActiveTab::Onchain, invoice);
-		assert!(onchain.contains("Generate Address") && !onchain.contains("Send On-chain"));
+		assert!(onchain.contains("Generate address") && !onchain.contains("Send on-chain"));
 	}
 
 	#[component]

@@ -13,7 +13,7 @@ const HELP_INCOMING: &str = "The channel (and its peer) the payment arrived on."
 const HELP_OUTGOING: &str = "The channel (and its peer) the payment was forwarded to.";
 const HELP_BY_CHANNEL: &str = "Routing fees grouped by the outgoing channel, highest first.";
 // Totals and rows cover only what LDK Server still holds individually.
-const RECENT_WINDOW_NOTE: &str = "LDK Server keeps individual forwards for about two hours, and only in detailed mode; older ones survive only as hourly totals.";
+const RECENT_WINDOW_NOTE: &str = "LDK Server keeps single forwards for about two hours, and only in detailed mode. Older ones remain only as hourly totals.";
 
 /// One side of a forward: the channel and, when known, the peer behind it.
 #[derive(Clone, PartialEq)]
@@ -122,7 +122,7 @@ pub fn ForwardedPayments() -> Element {
 		return rsx! {
 			Card {
 				if loading {
-					Empty { icon: "forward", title: "Loading...", Spinner { large: true } }
+					Empty { icon: "forward", title: "Loading…", Spinner { large: true } }
 				} else {
 					Empty { icon: "forward", title: "No recent forwarded payments", hint: RECENT_WINDOW_NOTE,
 						RefreshBtn { busy: loading, onclick: refresh }

@@ -22,7 +22,7 @@ const HELP_BALANCE_CHANNEL: &str =
 const HELP_BALANCE_AMOUNT: &str =
 	"The funds represented by this row, shown in the selected display unit.";
 const HELP_BALANCE_EXTRA: &str =
-	"Additional block heights, txids, or timing details needed to understand when funds become spendable.";
+	"Block heights or TXIDs that show when the funds become spendable.";
 const HELP_PENDING_SWEEP_BALANCES: &str =
 	"On-chain outputs the node is sweeping from channel closures or claim transactions.";
 const HELP_CLAIMABLE_ON_CHANNEL_CLOSE: &str =
@@ -30,13 +30,13 @@ const HELP_CLAIMABLE_ON_CHANNEL_CLOSE: &str =
 const HELP_AWAITING_CONFIRMATIONS: &str =
 	"The channel is closed and this balance is ours, but it needs enough on-chain confirmations before becoming spendable.";
 const HELP_CONTENTIOUS_CLAIMABLE: &str =
-	"The channel is closed and this balance should be ours, but our spending transaction must confirm before a timeout that could let the counterparty claim it.";
+	"The channel is closed and this balance should be ours, but our spending transaction must confirm before a timeout that could let the peer claim it.";
 const HELP_MAYBE_TIMEOUT_CLAIMABLE_HTLC: &str =
-	"An HTLC we sent that may become claimable after its timeout if the counterparty does not claim it first with the preimage.";
+	"An HTLC we sent that may become claimable after its timeout if the peer does not claim it first with the preimage.";
 const HELP_MAYBE_PREIMAGE_CLAIMABLE_HTLC: &str =
 	"An HTLC we received that is claimable only if we learn and use the payment preimage before the timeout.";
 const HELP_COUNTERPARTY_REVOKED_OUTPUT: &str =
-	"The counterparty broadcast a revoked commitment transaction, allowing this node to claim penalty outputs from it.";
+	"The peer broadcast a revoked commitment transaction, so this node can claim penalty outputs from it.";
 const HELP_PENDING_BROADCAST: &str =
 	"The sweep transaction has been prepared or queued but is not yet confirmed on-chain.";
 const HELP_BROADCAST_AWAITING_CONFIRMATION: &str =
@@ -82,7 +82,7 @@ pub fn Balances() -> Element {
 		return rsx! {
 			Card {
 				if loading {
-					Empty { icon: "wallet", title: "Loading balances...", crate::ui::widgets::Spinner { large: true } }
+					Empty { icon: "wallet", title: "Loading balances…", crate::ui::widgets::Spinner { large: true } }
 				} else {
 					Empty { icon: "wallet", title: "No balance data", hint: "Click Refresh to load",
 						RefreshBtn { busy: loading, onclick: move |_| actions::fetch_balances(ctx) }
@@ -120,7 +120,7 @@ pub fn Balances() -> Element {
 
 	rsx! {
 		Card { class: "hero",
-			span { class: "hero-label", "Total Balance" }
+			span { class: "hero-label", "Total balance" }
 			div { class: "hero-value", "{hero_value}" span { class: "hero-unit", "{hero_unit}" } }
 			span { class: "hero-sub", "{hero_sub}" }
 			div { class: "split",
@@ -145,19 +145,19 @@ pub fn Balances() -> Element {
 			div { class: "row", RefreshBtn { busy: loading, onclick: move |_| actions::fetch_balances(ctx), op: Op::Balances } }
 		}
 		div { class: "grid-3",
-			Stat { title: "On-chain Spendable", help: HELP_ONCHAIN_SPENDABLE, value: fmt(spendable), sub: format!("reserve {} | total {}", fmt(reserve), fmt(total_onchain)) }
-			Stat { title: "Lightning Total", help: HELP_LIGHTNING_TOTAL, value: fmt(total_lightning) }
-			Stat { title: "Anchor Reserve", help: HELP_ANCHOR_RESERVE, value: fmt(reserve), sub: "Kept for anchor-output fee bumping" }
+			Stat { title: "On-chain spendable", help: HELP_ONCHAIN_SPENDABLE, value: fmt(spendable), sub: format!("reserve {} · total {}", fmt(reserve), fmt(total_onchain)) }
+			Stat { title: "Lightning total", help: HELP_LIGHTNING_TOTAL, value: fmt(total_lightning) }
+			Stat { title: "Anchor reserve", help: HELP_ANCHOR_RESERVE, value: fmt(reserve), sub: "Kept for anchor-output fee bumping" }
 		}
 		div { class: "grid-2",
-			Card { title: "On-chain Balance",
+			Card { title: "On-chain balance",
 				div { class: "kv",
 					Kv { label: "Total", help: HELP_ONCHAIN_TOTAL, Hover { tip: format!("{} sats", format_sats(total_onchain)), span { class: "num", "{fmt(total_onchain)}" } } }
 					Kv { label: "Spendable", help: HELP_SPENDABLE, Hover { tip: format!("{} sats", format_sats(spendable)), span { class: "num", "{fmt(spendable)}" } } }
-					Kv { label: "Anchor Reserve", help: HELP_ANCHOR_RESERVE, Hover { tip: format!("{} sats", format_sats(reserve)), span { class: "num", "{fmt(reserve)}" } } }
+					Kv { label: "Anchor reserve", help: HELP_ANCHOR_RESERVE, Hover { tip: format!("{} sats", format_sats(reserve)), span { class: "num", "{fmt(reserve)}" } } }
 				}
 			}
-			Card { title: "Lightning Balance", class: "flush",
+			Card { title: "Lightning balance", class: "flush",
 				div { style: "padding: 0 20px 6px;",
 					div { class: "kv",
 						Kv { label: "Total", help: HELP_LIGHTNING_TOTAL, Hover { tip: format!("{} sats", format_sats(total_lightning)), span { class: "num", "{fmt(total_lightning)}" } } }
@@ -180,7 +180,7 @@ pub fn Balances() -> Element {
 									tr { key: "{i}",
 										td {
 											span { class: "row nowrap", style: "gap: 6px;",
-												"{row[0]}"
+												span { class: "nowrap", "{row[0]}" }
 												if let Some(help) = lightning_balance_help(&row[0]) {
 													InfoTip { text: help }
 												}
@@ -198,7 +198,7 @@ pub fn Balances() -> Element {
 			}
 		}
 		if !pending_sweeps.is_empty() {
-			Card { title: "Pending Sweep Balances", help: HELP_PENDING_SWEEP_BALANCES, sub: "Sweep outputs",
+			Card { title: "Pending sweep balances", help: HELP_PENDING_SWEEP_BALANCES, sub: "Sweep outputs",
 				div { class: "grid-3",
 					for (i, text, help) in pending_sweeps {
 						div { key: "{i}", class: "card inner stack tight",
@@ -222,37 +222,37 @@ fn lightning_balance_row(
 
 	match balance {
 		BalanceType::ClaimableOnChannelClose(b) => [
-			"Claimable on Channel Close".to_string(),
+			"Claimable on channel close".to_string(),
 			crate::format::truncate_id(&b.channel_id, 8, 8),
 			fmt(b.amount_satoshis),
 			String::new(),
 		],
 		BalanceType::ClaimableAwaitingConfirmations(b) => [
-			"Awaiting Confirmations".to_string(),
+			"Awaiting confirmations".to_string(),
 			crate::format::truncate_id(&b.channel_id, 8, 8),
 			fmt(b.amount_satoshis),
-			format!("Confirmation Height: {}", b.confirmation_height),
+			format!("Confirmation height: {}", b.confirmation_height),
 		],
 		BalanceType::ContentiousClaimable(b) => [
-			"Contentious Claimable".to_string(),
+			"Contentious claimable".to_string(),
 			crate::format::truncate_id(&b.channel_id, 8, 8),
 			fmt(b.amount_satoshis),
-			format!("Timeout Height: {}", b.timeout_height),
+			format!("Timeout height: {}", b.timeout_height),
 		],
 		BalanceType::MaybeTimeoutClaimableHtlc(b) => [
-			"Maybe Timeout Claimable HTLC".to_string(),
+			"HTLC claimable after timeout".to_string(),
 			crate::format::truncate_id(&b.channel_id, 8, 8),
 			fmt(b.amount_satoshis),
-			format!("Claimable Height: {}", b.claimable_height),
+			format!("Claimable height: {}", b.claimable_height),
 		],
 		BalanceType::MaybePreimageClaimableHtlc(b) => [
-			"Maybe Preimage Claimable HTLC".to_string(),
+			"HTLC claimable with preimage".to_string(),
 			crate::format::truncate_id(&b.channel_id, 8, 8),
 			fmt(b.amount_satoshis),
-			format!("Expiry Height: {}", b.expiry_height),
+			format!("Expiry height: {}", b.expiry_height),
 		],
 		BalanceType::CounterpartyRevokedOutputClaimable(b) => [
-			"Counterparty Revoked Output".to_string(),
+			"Peer's revoked output".to_string(),
 			crate::format::truncate_id(&b.channel_id, 8, 8),
 			fmt(b.amount_satoshis),
 			String::new(),
@@ -275,7 +275,7 @@ fn pending_sweep_text(
 			    .unwrap_or_default();
 			(
 			    format!(
-			        "Type: Pending Broadcast\n{}Amount: {}",
+			        "Type: Pending broadcast\n{}Amount: {}",
 			        ch_line,
 			        fmt(b.amount_satoshis)
 			    ),
@@ -290,7 +290,7 @@ fn pending_sweep_text(
 			    .unwrap_or_default();
 			(
 			format!(
-				"Type: Broadcast Awaiting Confirmation\n{}Amount: {}\nTXID: {}",
+				"Type: Awaiting confirmation\n{}Amount: {}\nTXID: {}",
 				ch_line,
 				fmt(b.amount_satoshis),
 				crate::format::truncate_id(&b.latest_spending_txid, 8, 8)
@@ -306,7 +306,7 @@ fn pending_sweep_text(
 			    .unwrap_or_default();
 			(
 			format!(
-				"Type: Awaiting Threshold Confirmations\n{}Amount: {}\nConfirmed at height: {}",
+				"Type: Awaiting more confirmations\n{}Amount: {}\nConfirmed at height: {}",
 				ch_line,
 				fmt(b.amount_satoshis),
 				b.confirmation_height
@@ -319,12 +319,34 @@ fn pending_sweep_text(
 
 fn lightning_balance_help(label: &str) -> Option<&'static str> {
 	match label {
-		"Claimable on Channel Close" => Some(HELP_CLAIMABLE_ON_CHANNEL_CLOSE),
-		"Awaiting Confirmations" => Some(HELP_AWAITING_CONFIRMATIONS),
-		"Contentious Claimable" => Some(HELP_CONTENTIOUS_CLAIMABLE),
-		"Maybe Timeout Claimable HTLC" => Some(HELP_MAYBE_TIMEOUT_CLAIMABLE_HTLC),
-		"Maybe Preimage Claimable HTLC" => Some(HELP_MAYBE_PREIMAGE_CLAIMABLE_HTLC),
-		"Counterparty Revoked Output" => Some(HELP_COUNTERPARTY_REVOKED_OUTPUT),
+		"Claimable on channel close" => Some(HELP_CLAIMABLE_ON_CHANNEL_CLOSE),
+		"Awaiting confirmations" => Some(HELP_AWAITING_CONFIRMATIONS),
+		"Contentious claimable" => Some(HELP_CONTENTIOUS_CLAIMABLE),
+		"HTLC claimable after timeout" => Some(HELP_MAYBE_TIMEOUT_CLAIMABLE_HTLC),
+		"HTLC claimable with preimage" => Some(HELP_MAYBE_PREIMAGE_CLAIMABLE_HTLC),
+		"Peer's revoked output" => Some(HELP_COUNTERPARTY_REVOKED_OUTPUT),
 		_ => None,
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use sc_rest_client::ldk_server_grpc::types::lightning_balance::BalanceType;
+
+	#[test]
+	fn every_lightning_balance_label_has_its_help() {
+		let kinds = [
+			BalanceType::ClaimableOnChannelClose(Default::default()),
+			BalanceType::ClaimableAwaitingConfirmations(Default::default()),
+			BalanceType::ContentiousClaimable(Default::default()),
+			BalanceType::MaybeTimeoutClaimableHtlc(Default::default()),
+			BalanceType::MaybePreimageClaimableHtlc(Default::default()),
+			BalanceType::CounterpartyRevokedOutputClaimable(Default::default()),
+		];
+		for kind in kinds {
+			let label = lightning_balance_row(&kind, &|s| s.to_string())[0].clone();
+			assert!(lightning_balance_help(&label).is_some(), "no help for {label}");
+		}
 	}
 }

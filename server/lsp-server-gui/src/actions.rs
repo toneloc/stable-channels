@@ -81,11 +81,11 @@ pub fn explain(e: &LspRestError, at_login: bool) -> Failure {
 	let not_found = e.error_code == InternalError && message.starts_with("HTTP 404");
 	let old_daemon = e.error_code == AuthError && message == OLD_DAEMON_REFUSAL;
 	if at_login && (not_found || old_daemon) {
-		return Failure::SignedOut("Login not found: daemon too old for token logins".to_string());
+		return Failure::SignedOut("This LSP is too old for token logins. Update it".to_string());
 	}
 	if e.error_code == AuthError && message.starts_with("request too old") {
 		return Failure::Show(
-			"The daemon refused the request as too old: check this computer's clock, it must be within a minute of the daemon's".to_string(),
+			"The LSP refused the request as too old. Check that this computer's clock is within a minute of the LSP's".to_string(),
 		);
 	}
 	let refused = e.error_code == AuthError
@@ -232,13 +232,13 @@ fn build_client(ctx: AppCtx) -> Option<LspRestClient> {
 	let built = {
 		let cert_path = conn.peek().tls_cert_path.trim().to_string();
 		if url.is_empty() || token.is_empty() || cert_path.is_empty() {
-			ctx.error("Please fill in all connection fields");
+			ctx.error("Fill in all connection fields");
 			return None;
 		}
 		let cert_data = match std::fs::read(&cert_path) {
 			Ok(data) => data,
 			Err(e) => {
-				ctx.error(format!("Failed to read TLS cert: {}", e));
+				ctx.error(format!("Couldn't read the TLS certificate: {}", e));
 				return None;
 			},
 		};
@@ -248,7 +248,7 @@ fn build_client(ctx: AppCtx) -> Option<LspRestClient> {
 	#[cfg(target_arch = "wasm32")]
 	let built = {
 		if url.is_empty() || token.is_empty() {
-			ctx.error("Please fill in the server URL and access token");
+			ctx.error("Fill in the server URL and token");
 			return None;
 		}
 		// On WASM, the browser handles TLS - no certificate needed
@@ -365,7 +365,7 @@ pub fn fetch_channels(ctx: AppCtx) {
 	});
 }
 
-/// Apply one payments page: "Load More" appends, anything else replaces.
+/// Apply one payments page: "Load more" appends, anything else replaces.
 pub fn apply_payments_page(
 	payments: &mut Option<ListPaymentsResponse>, page_token: &mut Option<String>,
 	page: ListPaymentsResponse, appending: bool,
@@ -411,7 +411,7 @@ where
 	loop {
 		if let Some(token) = &page_token {
 			if !seen.insert(token.clone()) {
-				return Err("Stopped loading payments: the server repeated a page token".to_string());
+				return Err("Stopped loading payments. The LSP sent the same page twice".to_string());
 			}
 		}
 
@@ -442,7 +442,7 @@ pub fn load_all_payments(ctx: AppCtx) {
 				break Some(format!("Stopped loading payments after {MAX_PAYMENT_PAGES} pages"));
 			}
 			if !seen.insert(token.clone()) {
-				break Some("Stopped loading payments: the server repeated a page token".to_string());
+				break Some("Stopped loading payments. The LSP sent the same page twice".to_string());
 			}
 			match client.list_payments(ListPaymentsRequest { page_token: Some(token) }).await {
 				Ok(page) => {
@@ -467,7 +467,7 @@ pub fn load_all_payments(ctx: AppCtx) {
 	});
 }
 
-/// Fetch the first payments page, or the next one when `appending` ("Load More").
+/// Fetch the first payments page, or the next one when `appending` ("Load more").
 pub fn fetch_payments(ctx: AppCtx, appending: bool) {
 	if !busy(ctx, Op::Payments) && !busy(ctx, Op::PaymentsAll) {
 		if let Some(client) = client_for(ctx, LIST_PAYMENTS_PATH) {
@@ -800,7 +800,7 @@ pub fn save_export(ctx: AppCtx, file_name: &'static str, mime: &'static str, con
 			if let Some(path) = crate::platform::save_file(&[], file_name, None).await {
 				match std::fs::write(&path, content) {
 					Ok(()) => ctx.success(format!("Exported {} to {}", what, path.display())),
-					Err(error) => ctx.error(format!("Export failed: {error}")),
+					Err(error) => ctx.error(format!("Couldn't export: {error}")),
 				}
 			}
 			let mut pending = ctx.pending;
@@ -811,7 +811,7 @@ pub fn save_export(ctx: AppCtx, file_name: &'static str, mime: &'static str, con
 	#[cfg(target_arch = "wasm32")]
 	match crate::platform::download_text(file_name, mime, &content) {
 		Ok(()) => ctx.success(format!("Exported {} to {}", what, file_name)),
-		Err(error) => ctx.error(format!("Export failed: {error}")),
+		Err(error) => ctx.error(format!("Couldn't export: {error}")),
 	}
 }
 
@@ -899,7 +899,7 @@ pub fn send_onchain(ctx: AppCtx) {
 fn onchain_sent(ctx: AppCtx, v: OnchainSendResponse) {
 	let mut results = ctx.results;
 	results.write().last_txid = Some(v.txid.clone());
-	ctx.success(format!("Sent! TXID: {}", v.txid));
+	ctx.success("Transaction sent");
 	let mut forms = ctx.forms;
 	forms.write().onchain_send = Default::default();
 	let mut view = ctx.view;
@@ -954,7 +954,7 @@ pub fn send_bolt11(ctx: AppCtx) {
 	run(ctx, Op::Bolt11Send, async move { client.bolt11_send(request).await }, |ctx, v| {
 		let mut results = ctx.results;
 		results.write().last_payment_id = Some(v.payment_id.clone());
-		ctx.success(format!("Payment sent! ID: {}", v.payment_id));
+		ctx.success("Payment sent");
 		let mut forms = ctx.forms;
 		forms.write().bolt11_send = Default::default();
 		close_dialog(ctx);
@@ -1012,7 +1012,7 @@ pub fn send_bolt12(ctx: AppCtx) {
 	run(ctx, Op::Bolt12Send, async move { client.bolt12_send(request).await }, |ctx, v| {
 		let mut results = ctx.results;
 		results.write().last_payment_id = Some(v.payment_id.clone());
-		ctx.success(format!("Payment sent! ID: {}", v.payment_id));
+		ctx.success("Payment sent");
 		let mut forms = ctx.forms;
 		forms.write().bolt12_send = Default::default();
 		close_dialog(ctx);
@@ -1063,7 +1063,7 @@ pub fn open_channel(ctx: AppCtx) {
 		form.cltv_expiry_delta.trim(),
 	);
 	if node_pubkey.is_empty() || address.is_empty() {
-		ctx.error("Node pubkey and address are required");
+		ctx.error("Node ID and address are required");
 		return;
 	}
 	run(
@@ -1082,8 +1082,8 @@ pub fn open_channel(ctx: AppCtx) {
 				})
 				.await
 		},
-		|ctx, v| {
-			ctx.success(format!("Channel opened! ID: {}", v.user_channel_id));
+		|ctx, _v| {
+			ctx.success("Channel open started");
 			let mut forms = ctx.forms;
 			forms.write().open_channel = Default::default();
 			close_dialog(ctx);
@@ -1098,7 +1098,7 @@ fn channel_ids(user_channel_id: &str, counterparty_node_id: &str) -> Option<(Str
 	(!user_channel_id.is_empty() && !counterparty_node_id.is_empty()).then_some((user_channel_id, counterparty_node_id))
 }
 
-const CHANNEL_IDS_REQUIRED: &str = "Channel ID and counterparty node ID are required";
+const CHANNEL_IDS_REQUIRED: &str = "User channel ID and peer node ID are required";
 
 pub fn close_channel(ctx: AppCtx) {
 	if busy(ctx, Op::CloseChannel) {
@@ -1117,7 +1117,7 @@ pub fn close_channel(ctx: AppCtx) {
 		Op::CloseChannel,
 		async move { client.close_channel(CloseChannelRequest { user_channel_id, counterparty_node_id }).await },
 		|ctx, _v| {
-			ctx.success("Channel close initiated");
+			ctx.success("Channel close started");
 			let mut forms = ctx.forms;
 			forms.write().close_channel = Default::default();
 			close_dialog(ctx);
@@ -1156,7 +1156,7 @@ pub fn force_close_channel(ctx: AppCtx) {
 				.await
 		},
 		|ctx, _v| {
-			ctx.success("Force close initiated");
+			ctx.success("Force close started");
 			let mut forms = ctx.forms;
 			forms.write().close_channel = Default::default();
 			close_dialog(ctx);
@@ -1194,7 +1194,7 @@ pub fn splice_in(ctx: AppCtx) {
 				.await
 		},
 		|ctx, _v| {
-			ctx.success("Splice-in initiated");
+			ctx.success("Splice-in started");
 			let mut forms = ctx.forms;
 			forms.write().splice_in = Default::default();
 			close_dialog(ctx);
@@ -1233,7 +1233,7 @@ pub fn splice_out(ctx: AppCtx) {
 }
 
 fn splice_out_started(ctx: AppCtx, v: SpliceOutResponse) {
-	ctx.success(format!("Splice-out initiated to {}", v.address));
+	ctx.success(format!("Splice-out to {} started", v.address));
 	let mut forms = ctx.forms;
 	forms.write().splice_out = Default::default();
 	close_dialog(ctx);
@@ -1292,7 +1292,7 @@ pub fn connect_peer(ctx: AppCtx) {
 	let address = form.address.trim().to_string();
 	let persist = form.persist;
 	if node_pubkey.is_empty() || address.is_empty() {
-		ctx.error("Node pubkey and address are required");
+		ctx.error("Node ID and address are required");
 		return;
 	}
 	run(
@@ -1300,7 +1300,7 @@ pub fn connect_peer(ctx: AppCtx) {
 		Op::ConnectPeer,
 		async move { client.connect_peer(ConnectPeerRequest { node_pubkey, address, persist }).await },
 		|ctx, _v| {
-			ctx.success("Peer connected successfully");
+			ctx.success("Peer connected");
 			let mut forms = ctx.forms;
 			forms.write().connect_peer = Default::default();
 			close_dialog(ctx);
@@ -1459,7 +1459,7 @@ pub fn create_token(ctx: AppCtx) {
 		ctx.error("Pick a preset or at least one permission");
 		return;
 	}
-	let expires_at = match crate::ui::access::expiry_secs(&form.expires, crate::format::now_secs()) {
+	let expires_at = match crate::ui::access::expiry_secs(&form.expiry, crate::format::now_secs()) {
 		Ok(secs) => secs,
 		Err(e) => {
 			ctx.error(e);
@@ -1478,7 +1478,7 @@ fn token_created(ctx: AppCtx, v: CreateTokenResponse, current: bool) {
 		let mut forms = ctx.forms;
 		forms.write().access = AccessForm { created: Some(CreatedToken { name, hex: v.token_hex }), ..Default::default() };
 	} else {
-		ctx.error(format!("Token {name} was created, but its session ended before it could be shown: revoke it"));
+		ctx.error(format!("Token {name} was created, but its session ended before it was shown. Revoke it"));
 	}
 	fetch_tokens(ctx);
 }
@@ -1517,7 +1517,7 @@ fn token_revoked(ctx: AppCtx, chosen: &RevokeTokenForm, current: bool) {
 			let mut nav = ctx.nav;
 			nav.write().active_tab = ActiveTab::Settings;
 		}
-		ctx.error("You revoked your own token: log in with another token");
+		ctx.error("You revoked your own token. Log in with another one");
 	} else {
 		ctx.success(format!("Token {} revoked", chosen.name));
 		fetch_tokens(ctx);
@@ -1686,7 +1686,7 @@ pub fn spontaneous_send(ctx: AppCtx) {
 	run(ctx, Op::SpontaneousSend, async move { client.spontaneous_send(request).await }, |ctx, v| {
 		let mut results = ctx.results;
 		results.write().last_payment_id = Some(v.payment_id.clone());
-		ctx.success(format!("Keysend sent! ID: {}", v.payment_id));
+		ctx.success("Keysend sent");
 		let mut forms = ctx.forms;
 		forms.write().spontaneous_send = Default::default();
 		close_dialog(ctx);
@@ -1882,7 +1882,7 @@ pub fn verify_signature(ctx: AppCtx) {
 			if v.valid {
 				ctx.success("Signature is valid");
 			} else {
-				ctx.error("Signature is INVALID");
+				ctx.error("Signature is not valid");
 			}
 		},
 	);
@@ -2088,7 +2088,7 @@ mod tests {
 		.await
 		.unwrap_err();
 
-		assert_eq!(error, "Stopped loading payments: the server repeated a page token");
+		assert_eq!(error, "Stopped loading payments. The LSP sent the same page twice");
 		assert_eq!(requested, vec![Some("t1".to_string()), Some("t2".to_string())]);
 	}
 
@@ -2112,13 +2112,13 @@ mod tests {
 	fn the_clock_error_tells_the_operator_to_check_the_clock() {
 		let stale = LspRestError::new(AuthError, "request too old: check this computer's clock");
 		let Failure::Show(text) = explain(&stale, false) else { panic!("a clock error keeps the session") };
-		assert!(text.contains("check this computer's clock") && text.contains("minute"), "{text}");
+		assert!(text.contains("Check that this computer's clock") && text.contains("minute"), "{text}");
 		assert!(!text.contains("AuthError"), "the hint replaces the raw error: {text}");
 	}
 
 	#[test]
 	fn a_daemon_without_login_is_reported_as_too_old() {
-		let too_old = Failure::SignedOut("Login not found: daemon too old for token logins".into());
+		let too_old = Failure::SignedOut("This LSP is too old for token logins. Update it".into());
 		// What a daemon from before token logins really answers: its api-key check runs before routing.
 		let old_daemon = LspRestError::new(AuthError, "Invalid X-Auth header");
 		assert_eq!(explain(&old_daemon, true), too_old);
@@ -2292,7 +2292,7 @@ NHhGIw==
 				run(ctx, Op::OnchainSend, async move { reply.await.unwrap() }, onchain_sent);
 			});
 			assert!(!ctx.pending.peek().has(Op::OnchainSend), "{how:?}: the reply was handled");
-			assert_eq!(shown(ctx), Some(("Sent! TXID: 5e9b".into(), false)), "{how:?}: the operator learns the money left");
+			assert_eq!(shown(ctx), Some(("Transaction sent".into(), false)), "{how:?}: the operator learns the money left");
 			assert_eq!(*ctx.dialog.peek(), None, "{how:?}: the confirm step cannot send it again");
 			assert_eq!(ctx.forms.peek().onchain_send.address, "", "{how:?}: the form cannot send it again");
 			assert!(!ctx.data.peek().fetched_at.contains_key(&Op::OnchainSend), "{how:?}: nothing lands in the next session's data");
@@ -2312,7 +2312,7 @@ NHhGIw==
 				dialog.set(Some(Dialog::SpliceOut));
 				run(ctx, Op::SpliceOut, async move { reply.await.unwrap() }, splice_out_started);
 			});
-			assert_eq!(shown(ctx), Some(("Splice-out initiated to bcrt1qsweep".into(), false)), "{how:?}");
+			assert_eq!(shown(ctx), Some(("Splice-out to bcrt1qsweep started".into(), false)), "{how:?}");
 			assert_eq!(*ctx.dialog.peek(), None, "{how:?}");
 			assert_eq!(ctx.forms.peek().splice_out.user_channel_id, "", "{how:?}");
 			new_session_kept(ctx, how);
@@ -2397,7 +2397,7 @@ NHhGIw==
 				run_action(ctx, Op::CreateToken, async move { reply.await.unwrap() }, token_created);
 			});
 			let (text, is_error) = shown(ctx).unwrap();
-			assert!(is_error && text.contains("ops-2") && text.contains("revoke it"), "{how:?}: {text}");
+			assert!(is_error && text.contains("ops-2") && text.contains("Revoke it"), "{how:?}: {text}");
 			assert!(ctx.forms.peek().access.created.is_none(), "{how:?}: a token shown once never reaches another session");
 			new_session_kept(ctx, how);
 		}
@@ -2415,7 +2415,7 @@ NHhGIw==
 					token_revoked(ctx, &chosen, current)
 				});
 			});
-			assert_eq!(shown(ctx), Some(("You revoked your own token: log in with another token".into(), true)), "{how:?}");
+			assert_eq!(shown(ctx), Some(("You revoked your own token. Log in with another one".into(), true)), "{how:?}");
 			assert_eq!(*ctx.dialog.peek(), None, "{how:?}");
 			new_session_kept(ctx, how);
 		}

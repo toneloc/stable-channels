@@ -173,7 +173,7 @@ impl TryFrom<TomlConfig> for GuiConfig {
 /// Parse config from TOML string content.
 pub fn parse_config_from_str(contents: &str) -> Result<GuiConfig, String> {
 	let toml_config: TomlConfig =
-		toml::from_str(contents).map_err(|e| format!("Failed to parse config: {}", e))?;
+		toml::from_str(contents).map_err(|e| format!("Not a valid sc-config.toml: {}", e))?;
 
 	GuiConfig::try_from(toml_config)
 }
@@ -181,7 +181,7 @@ pub fn parse_config_from_str(contents: &str) -> Result<GuiConfig, String> {
 /// Try to load config from a file path.
 pub fn load_config<P: AsRef<Path>>(path: P) -> Result<GuiConfig, String> {
 	let contents = std::fs::read_to_string(path.as_ref())
-		.map_err(|e| format!("Failed to read config file: {}", e))?;
+		.map_err(|e| format!("Can't read the file: {}", e))?;
 
 	parse_config_from_str(&contents)
 }
@@ -245,13 +245,13 @@ pub fn save_chain_source<P: AsRef<Path>>(
 ) -> Result<(), String> {
 	// Read existing file
 	let contents = std::fs::read_to_string(path.as_ref())
-		.map_err(|e| format!("Failed to read config file: {}", e))?;
+		.map_err(|e| format!("Can't read the file: {}", e))?;
 
 	// Parse as generic TOML value to preserve structure
 	let mut doc: toml::Value =
-		toml::from_str(&contents).map_err(|e| format!("Failed to parse config file: {}", e))?;
+		toml::from_str(&contents).map_err(|e| format!("Not a valid TOML file: {}", e))?;
 
-	let table = doc.as_table_mut().ok_or_else(|| "Config file root is not a table".to_string())?;
+	let table = doc.as_table_mut().ok_or_else(|| "Not a valid config file".to_string())?;
 
 	// Remove existing chain source sections
 	table.remove("bitcoind");
@@ -270,29 +270,29 @@ pub fn save_chain_source<P: AsRef<Path>>(
 				rpc_password: rpc_password.clone(),
 			};
 			let value = toml::Value::try_from(btc_config)
-				.map_err(|e| format!("Failed to serialize bitcoind config: {}", e))?;
+				.map_err(|e| format!("Can't write the Bitcoin Core settings: {}", e))?;
 			table.insert("bitcoind".to_string(), value);
 		},
 		ChainSourceConfig::Electrum { server_url } => {
 			let electrum_config = ElectrumConfigSave { server_url: server_url.clone() };
 			let value = toml::Value::try_from(electrum_config)
-				.map_err(|e| format!("Failed to serialize electrum config: {}", e))?;
+				.map_err(|e| format!("Can't write the Electrum settings: {}", e))?;
 			table.insert("electrum".to_string(), value);
 		},
 		ChainSourceConfig::Esplora { server_url } => {
 			let esplora_config = EsploraConfigSave { server_url: server_url.clone() };
 			let value = toml::Value::try_from(esplora_config)
-				.map_err(|e| format!("Failed to serialize esplora config: {}", e))?;
+				.map_err(|e| format!("Can't write the Esplora settings: {}", e))?;
 			table.insert("esplora".to_string(), value);
 		},
 	}
 
 	// Write back to file
 	let output =
-		toml::to_string_pretty(&doc).map_err(|e| format!("Failed to serialize config: {}", e))?;
+		toml::to_string_pretty(&doc).map_err(|e| format!("Can't write the config: {}", e))?;
 
 	std::fs::write(path.as_ref(), output)
-		.map_err(|e| format!("Failed to write config file: {}", e))?;
+		.map_err(|e| format!("Can't write the file: {}", e))?;
 
 	Ok(())
 }

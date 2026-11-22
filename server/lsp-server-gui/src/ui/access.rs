@@ -1,5 +1,6 @@
 //! Access page: make, list and revoke the daemon's tokens.
 
+use chrono::{Datelike, NaiveDate, Timelike};
 use dioxus::prelude::*;
 use sc_rest_client::ldk_server_grpc::permissions::{
 	ADMIN_PERMISSION, ALL_PERMISSIONS, INVOICE_PERMISSIONS, READONLY_PERMISSIONS,
@@ -7,12 +8,16 @@ use sc_rest_client::ldk_server_grpc::permissions::{
 use sc_rest_client::sc_protos::access::{TokenInfo, LIST_TOKENS_PATH};
 
 use crate::actions;
-use crate::state::{permission_for, AccessForm, AppCtx, Dialog, Op, RevokeTokenForm};
-use crate::ui::widgets::{Bubble, Card, Check, CopyBtn, Empty, Field, Gate, Icon, Modal, NoAccess, Pill, RefreshBtn, Spinner, TextInput, Th};
+use crate::state::{permission_for, AccessForm, AppCtx, Dialog, Expiry, Op, RevokeTokenForm};
+use crate::ui::widgets::{
+	Bubble, Card, Check, CopyBtn, Empty, Field, Gate, Group, Icon, Modal, NoAccess, Pill, RefreshBtn, SegBtn, Spinner, TextInput, Th,
+};
 use crate::ui::{close_dialog, open_dialog};
 
 const HELP_NAME: &str = "1 to 64 letters, digits, '-' or '_'.";
-const HELP_EXPIRY: &str = "Local time after which the token stops working; leave empty for no expiry.";
+/// Expiry shortcuts in days; 0 is never.
+const EXPIRY_PRESETS: [(u32, &str); 5] = [(0, "Never"), (1, "1 day"), (7, "7 days"), (30, "30 days"), (365, "1 year")];
+const WEEKDAYS: [&str; 7] = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
 
 /// Permissions a preset stands for; "custom" (or anything else) starts empty.
 pub fn preset_permissions(preset: &str) -> Vec<String> {
@@ -37,25 +42,69 @@ pub fn toggle_permission(permissions: &mut Vec<String>, permission: &str, on: bo
 	}
 }
 
-/// Unix seconds for a "YYYY-MM-DDTHH:MM" local time; empty means no expiry (0), a time not after `now` is an error.
-pub fn expiry_secs(input: &str, now: u64) -> Result<u64, String> {
+/// Unix seconds the token stops working at, 0 for never; a picked time must exist locally and be after `now`.
+pub fn expiry_secs(expiry: &Expiry, now: u64) -> Result<u64, String> {
 	use chrono::TimeZone;
-	let input = input.trim();
-	if input.is_empty() {
-		return Ok(0);
+	match *expiry {
+		Expiry::Never => Ok(0),
+		Expiry::Days(days) => Ok(now + u64::from(days) * 86_400),
+		Expiry::At { day: None, .. } => Err("Pick the day the token expires".to_string()),
+		Expiry::At { day: Some(day), hour, minute } => {
+			let secs = day
+				.and_hms_opt(hour, minute, 0)
+				.and_then(|t| chrono::Local.from_local_datetime(&t).earliest())
+				.ok_or_else(|| "A clock change skips that time. Pick another".to_string())?
+				.timestamp();
+			if secs <= now as i64 {
+				return Err("That time has passed. Pick a later one".to_string());
+			}
+			Ok(secs as u64)
+		},
 	}
-	let naive = chrono::NaiveDateTime::parse_from_str(input, "%Y-%m-%dT%H:%M")
-		.or_else(|_| chrono::NaiveDateTime::parse_from_str(input, "%Y-%m-%dT%H:%M:%S"))
-		.map_err(|_| "Expiry must be a date and time".to_string())?;
-	let secs = chrono::Local
-		.from_local_datetime(&naive)
-		.earliest()
-		.ok_or_else(|| "Expiry is not a valid local time".to_string())?
-		.timestamp();
-	if secs <= now as i64 {
-		return Err("Expiry must be in the future".to_string());
+}
+
+/// The line under the picker: when the token expires, or what is wrong with the choice (flagged true).
+pub fn expiry_line(expiry: &Expiry, now: u64) -> (bool, String) {
+	match expiry {
+		Expiry::Never => (false, "Works until you revoke it".to_string()),
+		Expiry::At { day: None, .. } => (false, "Pick a day on the calendar".to_string()),
+		_ => match expiry_secs(expiry, now) {
+			Ok(secs) => (false, format!("Expires {}", crate::format::local_datetime(secs))),
+			Err(e) => (true, e),
+		},
 	}
-	Ok(secs as u64)
+}
+
+/// One month of the calendar from Monday: blanks before the 1st and after the last day fill whole weeks.
+pub fn month_cells(month: NaiveDate) -> Vec<Option<NaiveDate>> {
+	let first = month.with_day(1).unwrap_or(month);
+	let mut cells = vec![None; first.weekday().num_days_from_monday() as usize];
+	cells.extend(first.iter_days().take_while(|d| d.month() == first.month()).map(Some));
+	while cells.len() % 7 != 0 {
+		cells.push(None);
+	}
+	cells
+}
+
+/// The first day of the month `months` away.
+pub fn shift_month(month: NaiveDate, months: i32) -> NaiveDate {
+	let first = month.with_day(1).unwrap_or(month);
+	let step = chrono::Months::new(months.unsigned_abs());
+	if months >= 0 { first.checked_add_months(step) } else { first.checked_sub_months(step) }.unwrap_or(first)
+}
+
+/// Opens the calendar on the day the current choice lands on, at the current time of day.
+fn start_picking(form: &mut AccessForm) {
+	if matches!(form.expiry, Expiry::At { .. }) {
+		return;
+	}
+	let now = chrono::Local::now();
+	let day = match form.expiry {
+		Expiry::Days(days) => now.date_naive().checked_add_days(chrono::Days::new(u64::from(days))),
+		_ => None,
+	};
+	form.calendar_month = Some(day.unwrap_or(now.date_naive()).with_day(1).unwrap_or(now.date_naive()));
+	form.expiry = Expiry::At { day, hour: now.hour(), minute: now.minute() / 5 * 5 };
 }
 
 /// A caveat in words for the list; permissions are shown on their own, so they return None.
@@ -99,8 +148,8 @@ pub fn Access() -> Element {
 	rsx! {
 		div { class: "stack",
 			if let Some(created) = form.created.clone() {
-				Card { title: "New token: {created.name}", sub: "Use it to log in to the GUI or call the daemon",
-					div { class: "notice warning", Icon { name: "alert", size: 16 } "Copy it now: it will not be shown again" }
+				Card { title: "New token: {created.name}", sub: "Use it to log in here or to call the LSP",
+					div { class: "notice warning", Icon { name: "alert", size: 16 } "Copy it now. It will not be shown again." }
 					div { class: "row nowrap", style: "margin-top: 10px;",
 						span { class: "mono break", "{created.hex}" }
 						CopyBtn { value: created.hex.clone(), label: "Copy token" }
@@ -131,7 +180,7 @@ pub fn Access() -> Element {
 							option { value: "admin", selected: form.preset == "admin", "Admin" }
 						}
 					}
-					Field { label: "Permissions",
+					Group { label: "Permissions",
 						div { class: "row", style: "gap: 6px 16px;",
 							for permission in ALL_PERMISSIONS {
 								Check {
@@ -143,14 +192,7 @@ pub fn Access() -> Element {
 							}
 						}
 					}
-					Field { label: "Expires", help: HELP_EXPIRY,
-						input {
-							class: "input",
-							r#type: "datetime-local",
-							value: form.expires.clone(),
-							oninput: move |e| forms.write().access.expires = e.value(),
-						}
-					}
+					ExpiryPicker {}
 					div { class: "row",
 						button { class: "btn primary", disabled: creating, onclick: move |_| actions::create_token(ctx),
 							if creating { Spinner {} }
@@ -182,11 +224,138 @@ pub fn Access() -> Element {
 					},
 					_ => rsx! {
 						if loading {
-							Empty { icon: "key", title: "Loading tokens...", Spinner { large: true } }
+							Empty { icon: "key", title: "Loading tokens…", Spinner { large: true } }
 						} else {
 							Empty { icon: "key", title: "No tokens loaded", hint: "Click Refresh to load" }
 						}
 					},
+				}
+			}
+		}
+	}
+}
+
+/// Expiry shortcuts, and a calendar with a time for any other moment.
+#[component]
+fn ExpiryPicker() -> Element {
+	let ctx = use_context::<AppCtx>();
+	let mut forms = ctx.forms;
+	let (expiry, shown) = {
+		let f = forms.read();
+		(f.access.expiry.clone(), f.access.calendar_month)
+	};
+	let (is_error, line) = expiry_line(&expiry, crate::format::now_secs());
+	let picking = matches!(expiry, Expiry::At { .. });
+	rsx! {
+		Group { label: "Expires",
+			div { class: "seg", style: "align-self: flex-start;",
+				for (days, label) in EXPIRY_PRESETS {
+					SegBtn {
+						key: "{days}",
+						active: expiry == if days == 0 { Expiry::Never } else { Expiry::Days(days) },
+						onclick: move |_| forms.write().access.expiry = if days == 0 { Expiry::Never } else { Expiry::Days(days) },
+						"{label}"
+					}
+				}
+				SegBtn { active: picking, onclick: move |_| start_picking(&mut forms.write().access), "Pick a date" }
+			}
+			if let Expiry::At { day, hour, minute } = expiry {
+				Calendar { day, hour, minute, shown }
+			}
+			span { class: if is_error { "field-preview error" } else { "field-preview" }, "{line}" }
+		}
+	}
+}
+
+/// A month of days to pick from, days before today greyed out, and the time of day.
+#[component]
+fn Calendar(day: Option<NaiveDate>, hour: u32, minute: u32, shown: Option<NaiveDate>) -> Element {
+	let ctx = use_context::<AppCtx>();
+	let mut forms = ctx.forms;
+	let today = chrono::Local::now().date_naive();
+	let this_month = shift_month(today, 0);
+	let month = shown.map(|m| shift_month(m, 0)).unwrap_or(this_month);
+	let mut set = move |day: Option<NaiveDate>, hour: u32, minute: u32| forms.write().access.expiry = Expiry::At { day, hour, minute };
+	let title = month.format("%B %Y").to_string();
+	rsx! {
+		div { class: "cal",
+			div { class: "cal-month",
+				div { class: "cal-head",
+					button {
+						class: "icon-btn",
+						r#type: "button",
+						"aria-label": "Previous month",
+						disabled: month <= this_month,
+						onclick: move |_| forms.write().access.calendar_month = Some(shift_month(month, -1)),
+						Icon { name: "chevron-left", size: 16 }
+					}
+					span { class: "cal-title", "{title}" }
+					button {
+						class: "icon-btn",
+						r#type: "button",
+						"aria-label": "Next month",
+						onclick: move |_| forms.write().access.calendar_month = Some(shift_month(month, 1)),
+						Icon { name: "chevron-right", size: 16 }
+					}
+				}
+				div { class: "cal-grid",
+					for name in WEEKDAYS {
+						span { key: "{name}", class: "cal-wd", "{name}" }
+					}
+					for (i, cell) in month_cells(month).into_iter().enumerate() {
+						match cell {
+							None => rsx! { span { key: "{i}" } },
+							Some(d) => {
+								let mut class = String::from("cal-day");
+								if Some(d) == day {
+									class.push_str(" on");
+								}
+								if d == today {
+									class.push_str(" today");
+								}
+								rsx! {
+									button {
+										key: "{i}",
+										class: "{class}",
+										r#type: "button",
+										disabled: d < today,
+										"aria-pressed": if Some(d) == day { "true" } else { "false" },
+										onclick: move |_| set(Some(d), hour, minute),
+										"{d.day()}"
+									}
+								}
+							},
+						}
+					}
+				}
+			}
+			// Grids, not <select>: a native dropdown list can open past the screen edge.
+			div { class: "cal-time",
+				span { class: "cal-label", "Hour" }
+				div { class: "cal-slots", role: "group", "aria-label": "Hour",
+					for h in 0..24u32 {
+						button {
+							key: "{h}",
+							class: if h == hour { "cal-slot on" } else { "cal-slot" },
+							r#type: "button",
+							"aria-pressed": if h == hour { "true" } else { "false" },
+							onclick: move |_| set(day, h, minute),
+							"{h:02}"
+						}
+					}
+				}
+				span { class: "cal-label", "Minute" }
+				div { class: "cal-slots", role: "group", "aria-label": "Minute",
+					for m in (0..60u32).step_by(5) {
+						button {
+							key: "{m}",
+							class: if m == minute { "cal-slot on" } else { "cal-slot" },
+							r#type: "button",
+							"aria-pressed": if m == minute { "true" } else { "false" },
+							onclick: move |_| set(day, hour, m),
+							":{m:02}"
+						}
+					}
 				}
 			}
 		}
@@ -207,7 +376,7 @@ fn TokenRow(token: TokenInfo) -> Element {
 				div { class: "strong", "{token.name}" }
 				div { class: "small muted mono break", "{token.id}" }
 				div { class: "row", style: "gap: 4px; margin-top: 4px;",
-					if token.used_by_daemon { Pill { tone: "warning", "used by this daemon" } }
+					if token.used_by_daemon { Pill { tone: "warning", "used by the LSP" } }
 					if token.is_gui_token { Pill { tone: "info", "GUI token" } }
 					if token.is_you { Pill { tone: "success", "you" } }
 				}
@@ -264,10 +433,10 @@ pub fn RevokeTokenDialog() -> Element {
 			},
 			p { "Revoke the token \"{target.name}\"?" }
 			if target.is_you {
-				span { class: "small muted", "This is the token you are logged in with: revoking it logs you out." }
+				span { class: "small muted", "You are logged in with this token. Revoking it logs you out." }
 			}
 			if target.is_gui_token {
-				span { class: "small muted", "The daemon writes a new GUI token file in its place." }
+				span { class: "small muted", "The LSP writes a new GUI token file in its place." }
 			}
 		}
 	}
@@ -336,7 +505,7 @@ mod tests {
 	#[test]
 	fn the_token_list_shows_tags_and_no_revoke_for_the_daemon_token() {
 		let html = render(&["admin"], false);
-		for text in ["used by this daemon", "GUI token", ">you<", "node:read", "expires ", "ip = 10.0.0.1", "g1", "ops-viewer"] {
+		for text in ["used by the LSP", "GUI token", ">you<", "node:read", "expires ", "ip = 10.0.0.1", "g1", "ops-viewer"] {
 			assert!(html.contains(text), "missing {text}");
 		}
 		assert!(!html.contains("time-before"), "the expiry is shown in words");
@@ -404,7 +573,7 @@ mod tests {
 	fn a_new_token_is_shown_once_with_a_warning() {
 		let html = render(&["admin"], true);
 		assert!(html.contains("deadbeef00") && html.contains("fresh"));
-		assert!(html.contains("Copy it now: it will not be shown again"));
+		assert!(html.contains("Copy it now. It will not be shown again."));
 		assert!(!render(&["admin"], false).contains("will not be shown again"));
 		let mut form = crate::state::AccessForm { created: Some(CreatedToken { name: "x".into(), hex: "secret".into() }), ..Default::default() };
 		dismiss_created(&mut form);
@@ -426,13 +595,90 @@ mod tests {
 		assert!(perms.is_empty());
 	}
 
+	fn day(y: i32, m: u32, d: u32) -> chrono::NaiveDate {
+		chrono::NaiveDate::from_ymd_opt(y, m, d).unwrap()
+	}
+
 	#[test]
-	fn an_expiry_is_a_local_time_in_the_future_or_empty() {
-		assert_eq!(expiry_secs("", 100), Ok(0));
-		assert!(expiry_secs("nonsense", 100).is_err());
-		assert!(expiry_secs("2001-01-01T00:00", 1_790_000_000).is_err(), "past");
-		let secs = expiry_secs("2030-06-01T12:30", 1_790_000_000).unwrap();
-		assert!(secs > 1_790_000_000);
+	fn an_expiry_is_never_some_days_after_creation_or_a_picked_future_time() {
+		let now = 1_790_000_000;
+		assert_eq!(expiry_secs(&Expiry::Never, now), Ok(0));
+		assert_eq!(expiry_secs(&Expiry::Days(7), now), Ok(now + 7 * 86_400));
+		assert!(expiry_secs(&Expiry::At { day: None, hour: 12, minute: 0 }, now).is_err(), "no day picked");
+		assert!(expiry_secs(&Expiry::At { day: Some(day(2001, 1, 1)), hour: 0, minute: 0 }, now).is_err(), "past");
+		let secs = expiry_secs(&Expiry::At { day: Some(day(2030, 6, 1)), hour: 12, minute: 30 }, now).unwrap();
+		assert_eq!(crate::format::local_datetime(secs), "01 Jun 2030, 12:30");
+	}
+
+	#[test]
+	fn the_expiry_line_says_when_the_token_stops_working() {
+		let now = 1_790_000_000;
+		assert_eq!(expiry_line(&Expiry::Never, now), (false, "Works until you revoke it".to_string()));
+		assert_eq!(expiry_line(&Expiry::Days(1), now), (false, format!("Expires {}", crate::format::local_datetime(now + 86_400))));
+		assert_eq!(expiry_line(&Expiry::At { day: None, hour: 9, minute: 0 }, now), (false, "Pick a day on the calendar".to_string()));
+		let (error, text) = expiry_line(&Expiry::At { day: Some(day(2001, 1, 1)), hour: 9, minute: 0 }, now);
+		assert!(error && text.contains("passed"), "{text}");
+	}
+
+	#[test]
+	fn the_calendar_starts_on_monday_and_shows_every_day_of_the_month() {
+		let nov = month_cells(day(2026, 11, 1));
+		assert_eq!(nov.iter().take_while(|c| c.is_none()).count(), 6, "1 Nov 2026 is a Sunday");
+		assert_eq!(nov.iter().flatten().count(), 30);
+		assert_eq!(nov.iter().flatten().last(), Some(&day(2026, 11, 30)));
+		assert_eq!(nov.len() % 7, 0, "whole weeks");
+		let feb = month_cells(day(2027, 2, 1));
+		assert_eq!(feb.first(), Some(&Some(day(2027, 2, 1))), "1 Feb 2027 is a Monday");
+		assert_eq!(feb.len(), 28);
+	}
+
+	#[test]
+	fn the_calendar_steps_across_years() {
+		assert_eq!(shift_month(day(2026, 12, 1), 1), day(2027, 1, 1));
+		assert_eq!(shift_month(day(2027, 1, 1), -1), day(2026, 12, 1));
+		assert_eq!(shift_month(day(2026, 3, 1), 12), day(2027, 3, 1));
+	}
+
+	#[component]
+	fn PickerHarness() -> Element {
+		let ctx = use_context_provider(|| {
+			AppCtx::new(Connection::signed_in("ops", &["admin"]), Forms::default(), Nav { active_tab: ActiveTab::Access, ..Default::default() }, Prefs::default(), false)
+		});
+		use_hook(move || {
+			let mut forms = ctx.forms;
+			let mut f = forms.write();
+			f.access.expiry = Expiry::At { day: Some(day(2030, 6, 12)), hour: 9, minute: 30 };
+			f.access.calendar_month = Some(day(2030, 6, 1));
+		});
+		rsx! { Access {} }
+	}
+
+	#[test]
+	fn the_form_uses_its_own_calendar_and_no_browser_date_picker() {
+		let mut dom = VirtualDom::new(PickerHarness);
+		dom.rebuild_in_place();
+		let html = dioxus_ssr::render(&dom);
+		assert!(!html.contains("datetime-local"));
+		assert!(html.contains("June 2030"));
+		assert_eq!(html.matches("class=\"cal-day").count(), 30, "every day of June");
+		assert!(html.contains("Expires 12 Jun 2030, 09:30"), "{html}");
+		for preset in ["Never", "1 day", "7 days", "30 days", "1 year", "Pick a date"] {
+			assert!(html.contains(&format!(">{preset}<")), "missing {preset}");
+		}
+		assert!(!html.contains("<label class=\"field\"><span class=\"field-label\">Permissions"), "a click between the boxes must not tick the first one");
+		assert!(!html.contains("<label class=\"field\"><span class=\"field-label\">Expires"), "a click on the calendar must not press the first preset");
+	}
+
+	#[test]
+	fn the_time_is_picked_from_hour_and_minute_grids_not_browser_dropdowns() {
+		let mut dom = VirtualDom::new(PickerHarness);
+		dom.rebuild_in_place();
+		let html = dioxus_ssr::render(&dom);
+		let cal = &html[html.find("class=\"cal\"").unwrap()..html.find("field-preview").unwrap()];
+		assert!(!cal.contains("<select"), "a native dropdown opens past the screen edge");
+		let slots = cal.matches("class=\"cal-slot\"").count() + cal.matches("class=\"cal-slot on\"").count();
+		assert_eq!(slots, 24 + 12, "24 hours and 12 five-minute steps");
+		assert_eq!(cal.matches("class=\"cal-slot on").count(), 2, "09 and 30 are marked");
 	}
 
 	#[test]

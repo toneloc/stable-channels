@@ -31,7 +31,7 @@ pub fn checked_next_cursor(
         || !seen_cursors.insert(next_cursor.clone())
     {
         return Err(
-            "Ledger export stopped because the server repeated a pagination cursor".to_owned(),
+            "Export stopped. The LSP sent the same page twice".to_owned(),
         );
     }
     Ok(Some(next_cursor))
@@ -51,7 +51,7 @@ pub fn filter_choice_label<'a>(filter: &str, value: &'a str) -> &'a str {
 
 pub fn latest_state_caption(overview: &ChannelLedgerOverview) -> String {
     let source = match overview.latest_accounting_source.as_str() {
-        "channels" => "Current SQLite state",
+        "channels" => "Current channel state",
         "ledger" => "Latest complete snapshot",
         _ => "No complete state",
     };
@@ -73,7 +73,7 @@ pub fn timeline_order(events: &[ChannelLedgerEvent], newest_first: bool) -> Vec<
 pub fn snapshot_rows(snapshot: &AccountingSnapshot) -> Vec<(&'static str, String)> {
     let mut rows = Vec::new();
     if let Some(value) = snapshot.expected_usd {
-        rows.push(("Expected USD", format!("${value:.2}")));
+        rows.push(("Stable target", format!("${value:.2}")));
     }
     if let Some(value) = snapshot.backing_sats {
         rows.push(("Backing", format_sats_with_usd(value, snapshot.btc_price)));
@@ -240,7 +240,7 @@ pub fn event_help(event: &ChannelLedgerEvent) -> String {
             "The channel was above its target, but the LSP cannot pull value from the wallet, so it recorded the check without sending a payment."
         }
         "STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN" => {
-            "The LSP sent a stability payment and the node will not report its outcome: it has no record of it (the send never reached it, or the node lost or never stored the record), or it still cannot be asked about it 14 days after it was sent. With a lost record the payment itself may still be in flight and be claimed. It is neither booked nor resent, and the channel gets no other stability payment, until an operator releases it from this channel's history: as arrived once the channel's balance shows it, or as not arrived once it is 14 days old and can no longer be in flight."
+            "The LSP sent a stability payment and the node will not report its outcome. Either it has no record of it (the send never reached it, or the node lost or never stored the record), or it still cannot be asked about it 14 days after it was sent. With a lost record the payment may still be in flight and be claimed. It is neither booked nor resent, and the channel gets no other stability payment, until an operator releases it from this channel's history, as arrived once the channel's balance shows it, or as not arrived once it is 14 days old and can no longer be in flight."
         }
         "STABILITY_TOP_UP_RELEASE_CONFLICT" => {
             "An operator had counted this stability payment as not arrived, and the node then reported it claimed. Its sats were added to the books. If another payment was sent in its place, the channel is now above its target by that amount, which the wallet owes back."
@@ -249,7 +249,7 @@ pub fn event_help(event: &ChannelLedgerEvent) -> String {
             "The node reported a failure for a stability payment that was already booked as claimed. The books were left as they are, because they may have changed since; compare the channel's backing with the wallet's balance."
         }
         "STABILITY_TOP_UP_RELEASED" => {
-            "An operator decided what happened to a stability payment the node would not report on. Counted as arrived, its sats were added to the books; counted as not arrived, it was dropped and the next stability check pays what is still owed. If the node later reports it claimed after all, it is still booked, unless an older daemon version sent it."
+            "An operator decided what happened to a stability payment the node would not report on. Counted as arrived, its sats were added to the books; counted as not arrived, it was dropped and the next stability check pays what is still owed. If the node later reports it claimed after all, it is still booked, unless an older LSP version sent it."
         }
         "STABILITY_TOP_UP_DEFERRED_STILL_PENDING" => {
             "A stability payment has had no outcome for over an hour, usually because the wallet is offline and has not claimed it, sometimes because the node could not be asked about it. It may still be claimed or fail, so it cannot be released yet. The channel gets no other stability payment until then; if the node still cannot be asked once the payment is 14 days old, it becomes releasable."
@@ -264,10 +264,10 @@ pub fn event_help(event: &ChannelLedgerEvent) -> String {
             "The LSP recorded a Lightning payment to move the channel's stable value toward its target, then handed it to the node. The record is written before the payment goes out, so a payment whose send fails is not paid again until the node or an operator says what happened to it."
         }
         "STABILITY_PAYMENT_SETTLED" => {
-            "The stability payment completed successfully and is no longer in flight."
+            "The stability payment completed and is no longer in flight."
         }
         "STABILITY_PAYMENT_RECORDED" => {
-            "A stability payment was associated with this channel and stored for settlement tracking."
+            "A stability payment was linked to this channel and stored for tracking."
         }
         "EVENT_STREAM_CONNECTED" => {
             "The LSP connected to LDK Server's live event stream and resumed listening for activity."
@@ -306,7 +306,7 @@ pub fn event_help(event: &ChannelLedgerEvent) -> String {
             "The splice was agreed with the peer and its new funding transaction is waiting for confirmation. The channel's accounting is reconciled when LDK reports it ready again."
         }
         "SPLICE_NEGOTIATION_FAILED" => {
-            "A splice negotiation round with the peer failed. Nothing changed on-chain: the channel keeps its current funding and any splice already negotiated."
+            "A splice negotiation round with the peer failed. Nothing changed on-chain. The channel keeps its current funding and any splice already negotiated."
         }
         "CHANNEL_SHUTDOWN_STATE_CHANGED" => {
             "The channel moved to a new cooperative close stage. Pending HTLCs are resolved first, then the closing fee is negotiated and the close transaction is broadcast. The LSP checks every 30 seconds, so a quick close can skip stages, and a stage the channel falls back to after a disconnect is not recorded again."
@@ -336,16 +336,16 @@ pub fn event_help(event: &ChannelLedgerEvent) -> String {
             "The received trade message had the expected structure and could be decoded."
         }
         "TRADE_SIGNATURE_VALID" => {
-            "The cryptographic signature on the received channel message was successfully verified."
+            "The signature on the received channel message was verified."
         }
         "SYNC_MESSAGE_SENT" | "TRADE_MESSAGE_SENT" => {
-            "A Stable Channels protocol message was delivered to the counterparty over Lightning."
+            "A Stable Channels protocol message was delivered to the peer over Lightning."
         }
         "PAYMENT_SETTLED" if event_amount_msat(event) == Some(1) => {
-            "The 1-msat carrier payment used to deliver an accounting sync completed successfully."
+            "The 1-msat carrier payment used to deliver an accounting sync completed."
         }
         "PAYMENT_SETTLED" | "PAYMENT_SUCCESSFUL" => {
-            "The Lightning payment completed successfully."
+            "The Lightning payment completed."
         }
         "PAYMENT_FAILED" => return failed_payment_help(event),
         "CHANNEL_ONCHAIN_TX" => return onchain_tx_help(event),
@@ -406,7 +406,7 @@ fn onchain_tx_help(event: &ChannelLedgerEvent) -> String {
 }
 
 fn failed_payment_help(event: &ChannelLedgerEvent) -> String {
-    let base = "The Lightning payment did not complete successfully.";
+    let base = "The Lightning payment did not complete.";
     let Some(reason) = detail_text(event, "reason") else {
         return base.to_owned();
     };
@@ -481,7 +481,7 @@ fn category_help_phrase(category: &str) -> &'static str {
         "payment" => "a Lightning payment event",
         "forwarding" => "a routed-payment event",
         "trade" => "a trade or stable-allocation event",
-        "stability" => "a stabilization or accounting-sync event",
+        "stability" => "a stability payment or accounting-sync event",
         "peer" => "a peer-connection event",
         "sweep" => "a channel-closing sweep event",
         "reconciliation" => "a recovery or backfill event",
@@ -576,11 +576,11 @@ pub fn category_help(category: &str) -> String {
         "payment" => "Lightning payment activity",
         "forwarding" => "Routed payment activity",
         "trade" => "BTC/USD trade or stable-allocation activity",
-        "stability" => "Stabilization payment or accounting-sync activity",
+        "stability" => "Stability payment or accounting-sync activity",
         "peer" => "Peer connection activity",
         "sweep" => "Closing-output sweep activity",
         "reconciliation" => "Recovery, backfill, or event-gap processing",
-        "operator" => "Manual edit or configuration activity",
+        "operator" => "Manual edit or config activity",
         "system" => "Internal system activity",
         _ => "Unclassified ledger activity",
     };
@@ -591,8 +591,8 @@ pub fn status_help(status: &str) -> String {
     let meaning = match status {
         "observed" => "Informational event; no workflow completion is implied",
         "pending" => "Operation is still in progress",
-        "completed" => "Operation finished or was applied successfully",
-        "partial" => "Only part of the operation completed successfully",
+        "completed" => "Operation finished or was applied",
+        "partial" => "Only part of the operation completed",
         "failed" => "Operation failed or was rejected",
         "skipped" => "Operation was intentionally not performed",
         _ => "Unrecognized event status",
@@ -980,7 +980,7 @@ mod tests {
         assert!(event_help(&novel).contains("unknown(42)"));
         let legacy = with_detail(event(4, "PAYMENT_FAILED"), r#"{"reason":null}"#);
         assert_eq!(human_summary(&legacy), "Payment failed");
-        assert_eq!(event_help(&legacy), "The Lightning payment did not complete successfully.");
+        assert_eq!(event_help(&legacy), "The Lightning payment did not complete.");
     }
 
     #[test]

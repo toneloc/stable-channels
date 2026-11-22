@@ -7,7 +7,7 @@ use crate::state::{permission_for, AppCtx, Dialog, Op};
 use crate::ui::widgets::{Bubble, Card, Check, Empty, Field, Gate, Icon, Modal, NoAccess, Peer, Pill, RefreshBtn, Spinner, TextInput, Th};
 use crate::ui::{close_dialog, open_dialog};
 
-const HELP_PEER_NODE_ID: &str = "The node public key identifying the connected or target peer.";
+const HELP_PEER_NODE_ID: &str = "The peer's node ID.";
 const HELP_PEER_ADDRESS: &str = "Network address used to reach the peer.";
 const HELP_PEER_STATUS: &str = "Whether the peer is currently connected or disconnected.";
 const HELP_PERSIST: &str = "Reconnect to this peer automatically after restarts.";
@@ -42,11 +42,11 @@ pub fn Peers() -> Element {
 	rsx! {
 		Card { class: "flush",
 			div { class: "toolbar",
-				span { class: "count", "{connected_count} peers connected" }
+				span { class: "count", "Connected peers: {connected_count}" }
 				div { class: "row", style: "margin-left: auto;",
 					RefreshBtn { busy: loading, onclick: move |_| actions::fetch_peers(ctx), op: Op::Peers }
 					if can_connect {
-						button { class: "btn sm accent", onclick: move |_| open_dialog(ctx, Dialog::ConnectPeer), Icon { name: "plus", size: 14 } "Connect Peer" }
+						button { class: "btn sm accent", onclick: move |_| open_dialog(ctx, Dialog::ConnectPeer), Icon { name: "plus", size: 14 } "Connect peer" }
 					}
 				}
 			}
@@ -97,7 +97,7 @@ pub fn Peers() -> Element {
 				},
 				_ => rsx! {
 					if loading {
-						Empty { icon: "users", title: "Loading peers...", Spinner { large: true } }
+						Empty { icon: "users", title: "Loading peers…", Spinner { large: true } }
 					} else {
 						Empty { icon: "users", title: "No peers connected", hint: "Click Refresh to load" }
 					}
@@ -119,8 +119,8 @@ pub fn ConnectPeerDialog() -> Element {
 	};
 	rsx! {
 		Modal {
-			title: "Connect Peer",
-			sub: "Connect to a Lightning Network peer",
+			title: "Connect peer",
+			sub: "Connect to a Lightning peer",
 			icon: rsx! { Bubble { icon: "users", tone: "blue" } },
 			onclose: move |_| cancel(),
 			footer: rsx! {
@@ -130,10 +130,10 @@ pub fn ConnectPeerDialog() -> Element {
 					"Connect"
 				}
 			},
-			Field { label: "Node Pubkey", help: HELP_PEER_NODE_ID, TextInput { value: form.node_pubkey.clone(), mono: true, oninput: move |v| forms.write().connect_peer.node_pubkey = v } }
+			Field { label: "Node ID", help: HELP_PEER_NODE_ID, TextInput { value: form.node_pubkey.clone(), mono: true, oninput: move |v| forms.write().connect_peer.node_pubkey = v } }
 			Field { label: "Address", help: HELP_PEER_ADDRESS, TextInput { value: form.address.clone(), mono: true, placeholder: "host:port", oninput: move |v| forms.write().connect_peer.address = v } }
 			div { class: "toggle-row",
-				Check { checked: form.persist, label: "Persist Connection", help: HELP_PERSIST, onchange: move |v| forms.write().connect_peer.persist = v }
+				Check { checked: form.persist, label: "Persist connection", help: HELP_PERSIST, onchange: move |v| forms.write().connect_peer.persist = v }
 			}
 		}
 	}

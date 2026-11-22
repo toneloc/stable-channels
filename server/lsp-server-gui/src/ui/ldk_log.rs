@@ -23,7 +23,7 @@ pub fn LdkLog() -> Element {
 			LogToolbar { lines, loading, oninput: move |v| forms.write().ldk_log.max_lines = v, onrefresh: move |_| actions::fetch_ldk_log(ctx) }
 			match log {
 				Some(content) if content.is_empty() => rsx! {
-					Empty { icon: "file", title: "Empty response.",
+					Empty { icon: "file", title: "The log is empty",
 						div { class: "notice", style: "text-align: left;",
 							Icon { name: "info", size: 16 }
 							em { "LDK Server may not have `[log] file = \"...\"` set in its config. Uncomment that line and restart LDK Server, then refresh." }

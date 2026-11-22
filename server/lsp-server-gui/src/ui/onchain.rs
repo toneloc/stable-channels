@@ -9,11 +9,11 @@ use crate::ui::widgets::{any_permission_of, Bubble, Card, Check, Field, Gate, Ic
 
 const HELP_ADDRESS: &str =
 	"The Bitcoin address for the current network. Verify it belongs to the intended recipient and network before sending.";
-const HELP_AMOUNT: &str = "The on-chain amount to send. Miner fees are separate unless Send All is selected.";
-const HELP_SEND_ALL: &str = "Spend the wallet's available on-chain balance, subtracting the miner fee from the output. LDK keeps the reserve it needs to fee-bump anchor channels, so a small amount can stay in the wallet.";
+const HELP_AMOUNT: &str = "The amount to send. The miner fee comes on top, unless you send the entire balance.";
+const HELP_SEND_ALL: &str = "Sends the spendable on-chain balance, with the miner fee taken from it. The anchor reserve stays in the wallet.";
 const HELP_FEE_RATE: &str = "Optional miner fee rate in sat/vB. Higher rates can confirm faster but cost more.";
-const HELP_LAST_TXID: &str = "The transaction id for the most recently created or broadcast on-chain transaction.";
-const HELP_TXID: &str = "The Bitcoin transaction id. Use it to inspect the transaction in a block explorer or node.";
+const HELP_LAST_TXID: &str = "TXID of the last on-chain transaction sent from here.";
+const HELP_TXID: &str = "Use this TXID to look the transaction up in a block explorer.";
 const HELP_ONCHAIN_TOTAL: &str = "The total balance tracked by the node's on-chain wallet.";
 const HELP_SPENDABLE: &str =
 	"Currently spendable on-chain funds. This excludes funds still waiting on confirmations or kept as reserve.";
@@ -86,7 +86,7 @@ fn SendCard() -> Element {
 	let pending = ctx.busy(Op::OnchainSend);
 	let last_txid = ctx.results.read().last_txid.clone();
 	rsx! {
-		Card { title: "Send On-chain",
+		Card { title: "Send on-chain",
 			div { class: "stack", style: "gap: 16px;",
 				Field { label: "Address", help: HELP_ADDRESS,
 					TextInput { value: form.address.clone(), mono: true, placeholder: "bc1…", oninput: move |v| forms.write().onchain_send.address = v }
@@ -95,7 +95,7 @@ fn SendCard() -> Element {
 					Field { label: "Amount ({unit})", help: HELP_AMOUNT, preview,
 						TextInput { value: form.amount_sats.clone(), disabled: form.send_all, oninput: move |v| forms.write().onchain_send.amount_sats = v }
 					}
-					Field { label: "Fee Rate (sat/vB, optional)", help: HELP_FEE_RATE,
+					Field { label: "Fee rate (sat/vB, optional)", help: HELP_FEE_RATE,
 						TextInput { value: form.fee_rate_sat_per_vb.clone(), oninput: move |v| forms.write().onchain_send.fee_rate_sat_per_vb = v }
 					}
 				}
@@ -115,12 +115,12 @@ fn SendCard() -> Element {
 					div { class: "confirm-box",
 						Check { checked: confirmed, danger: true, label: "I understand this sends my entire spendable on-chain balance", onchange: move |v| view.write().send_all_confirm = v }
 						button { class: "btn lg danger solid block", disabled: !confirmed || pending, onclick: move |_| actions::review_send(ctx, SendKind::Onchain),
-							if pending { Spinner {} "Sending..." } else { Icon { name: "arrow-up", size: 18 } "Send All" }
+							if pending { Spinner {} "Sending…" } else { Icon { name: "arrow-up", size: 18 } "Send all" }
 						}
 					}
 				} else {
 					button { class: "btn lg primary block", disabled: pending, onclick: move |_| actions::review_send(ctx, SendKind::Onchain),
-						if pending { Spinner {} "Sending..." } else { Icon { name: "arrow-up", size: 18 } "Send" }
+						if pending { Spinner {} "Sending…" } else { Icon { name: "arrow-up", size: 18 } "Send" }
 					}
 				}
 				if let Some(txid) = last_txid {
@@ -137,10 +137,10 @@ fn ReceiveCard() -> Element {
 	let pending = ctx.busy(Op::OnchainReceive);
 	let address = ctx.results.read().onchain_address.clone();
 	rsx! {
-		Card { title: "Receive On-chain",
+		Card { title: "Receive on-chain",
 			div { class: "stack", style: "gap: 16px;",
 				button { class: "btn lg primary block", disabled: pending, onclick: move |_| actions::generate_onchain_address(ctx),
-					if pending { Spinner {} "Generating..." } else { Icon { name: "arrow-down", size: 18 } "Generate Address" }
+					if pending { Spinner {} "Generating…" } else { Icon { name: "arrow-down", size: 18 } "Generate address" }
 				}
 				if let Some(address) = address {
 					div { class: "result",
@@ -149,7 +149,7 @@ fn ReceiveCard() -> Element {
 							button { class: "btn sm", onclick: {
 								let address = address.clone();
 								move |_| actions::copy(ctx, &address)
-							}, Icon { name: "copy", size: 14 } "Copy Address" }
+							}, Icon { name: "copy", size: 14 } "Copy address" }
 						}
 						div { class: "value", style: "font-size: 15px;", "{address}" }
 					}
@@ -171,35 +171,35 @@ fn History() -> Element {
 			div { class: "grid-2",
 				Card { title: "Summary",
 					div { class: "kv",
-						Kv { label: "Total Balance", help: HELP_ONCHAIN_TOTAL, span { class: "num strong", "{ctx.fmt_sats(b.total_onchain_balance_sats)}" } }
+						Kv { label: "Total balance", help: HELP_ONCHAIN_TOTAL, span { class: "num strong", "{ctx.fmt_sats(b.total_onchain_balance_sats)}" } }
 						Kv { label: "Spendable", help: HELP_SPENDABLE, span { class: "num", "{ctx.fmt_sats(b.spendable_onchain_balance_sats)}" } }
 						if b.total_anchor_channels_reserve_sats > 0 {
-							Kv { label: "Anchor Reserve", help: HELP_ANCHOR_RESERVE, span { class: "num", "{ctx.fmt_sats(b.total_anchor_channels_reserve_sats)}" } }
+							Kv { label: "Anchor reserve", help: HELP_ANCHOR_RESERVE, span { class: "num", "{ctx.fmt_sats(b.total_anchor_channels_reserve_sats)}" } }
 						}
 					}
 				}
 				if !b.pending_balances_from_channel_closures.is_empty() {
-					Card { title: "Pending Sweeps",
+					Card { title: "Pending sweeps",
 						div { class: "stack",
 							for (i, sweep) in b.pending_balances_from_channel_closures.iter().filter_map(|s| s.balance_type.clone()).enumerate() {
 								div { key: "{i}", class: "card inner stack tight",
 									match sweep {
 										BalanceType::PendingBroadcast(s) => rsx! {
 											div { class: "row between",
-												span { class: "row nowrap", style: "gap: 6px;", Pill { tone: "warning", "Pending Broadcast" } InfoTip { text: HELP_PENDING_BROADCAST } }
+												span { class: "row nowrap", style: "gap: 6px;", Pill { tone: "warning", "Pending broadcast" } InfoTip { text: HELP_PENDING_BROADCAST } }
 												span { class: "num strong", "{ctx.fmt_sats(s.amount_satoshis)}" }
 											}
 										},
 										BalanceType::BroadcastAwaitingConfirmation(s) => rsx! {
 											div { class: "row between",
-												span { class: "row nowrap", style: "gap: 6px;", Pill { tone: "warning", "Awaiting Confirmation" } InfoTip { text: HELP_BROADCAST_AWAITING_CONFIRMATION } }
+												span { class: "row nowrap", style: "gap: 6px;", Pill { tone: "warning", "Awaiting confirmation" } InfoTip { text: HELP_BROADCAST_AWAITING_CONFIRMATION } }
 												span { class: "num strong", "{ctx.fmt_sats(s.amount_satoshis)}" }
 											}
 											LastId { label: "TXID:", help: HELP_TXID, value: s.latest_spending_txid.clone() }
 										},
 										BalanceType::AwaitingThresholdConfirmations(s) => rsx! {
 											div { class: "row between",
-												span { class: "row nowrap", style: "gap: 6px;", Pill { tone: "success", "Awaiting Threshold" } InfoTip { text: HELP_AWAITING_THRESHOLD_CONFIRMATIONS } }
+												span { class: "row nowrap", style: "gap: 6px;", Pill { tone: "success", "Awaiting more confirmations" } InfoTip { text: HELP_AWAITING_THRESHOLD_CONFIRMATIONS } }
 												span { class: "num strong", "{ctx.fmt_sats(s.amount_satoshis)}" }
 											}
 											span { class: "small muted", "Confirmed at height {s.confirmation_height}" }
@@ -213,17 +213,17 @@ fn History() -> Element {
 			}
 		}
 		// Neutral informational callout — not an error.
-		Card { title: "Transaction History",
+		Card { title: "Transaction history",
 			div { class: "notice",
 				Icon { name: "info", size: 16 }
 				div { class: "stack tight",
-					span { "Full on-chain transaction history is not yet available." }
-					span { "ldk-node does not currently expose BDK wallet transaction history." }
+					span { "Full on-chain history is not available yet." }
+					span { "LDK Node does not expose the wallet's transaction list." }
 				}
 			}
 			if let Some(txid) = last_txid {
 				div { style: "margin-top: 12px;",
-					LastId { label: "Last Sent TXID:", help: HELP_LAST_TXID, value: txid }
+					LastId { label: "Last sent TXID:", help: HELP_LAST_TXID, value: txid }
 				}
 			}
 		}

@@ -9,7 +9,7 @@ use crate::state::{permission_for, AppCtx, Op};
 use crate::ui::widgets::{Card, CopyBtn, Empty, Gate, Hover, IdCopy, Kv, NoAccess, Pill, RefreshBtn};
 
 const HELP_NODE_ID: &str = "The public key that identifies this Lightning node to peers and the network.";
-const HELP_BEST_BLOCK: &str = "The best known block for this node's wallet, shown by block hash and height. If this height trails your chain source tip, the node may still be syncing.";
+const HELP_BEST_BLOCK: &str = "The latest block this node knows. If it trails your chain source, the node may still be syncing.";
 const HELP_NETWORK: &str =
 	"The Bitcoin network this node is connected to, such as mainnet, testnet, signet, or regtest.";
 const HELP_CHAIN_SOURCE: &str = "The blockchain backend used for headers, transactions, fee data, and wallet sync.";
@@ -35,7 +35,7 @@ pub fn NodeInfo() -> Element {
 			if connected && ctx.can(GET_NODE_INFO_PATH) {
 				NodeDetails {}
 			} else if connected {
-				Card { title: "Node Details", NoAccess { permission: permission_for(GET_NODE_INFO_PATH) } }
+				Card { title: "Node details", NoAccess { permission: permission_for(GET_NODE_INFO_PATH) } }
 			}
 			// Chain source is local config — visible even while disconnected.
 			ChainSource {}
@@ -56,30 +56,30 @@ fn NodeDetails() -> Element {
 		.as_ref()
 		.map(|info| {
 			[
-				("Lightning Wallet Sync", HELP_LIGHTNING_WALLET_SYNC, info.latest_lightning_wallet_sync_timestamp),
-				("On-chain Wallet Sync", HELP_ONCHAIN_WALLET_SYNC, info.latest_onchain_wallet_sync_timestamp),
-				("Fee Rate Cache Update", HELP_FEE_RATE_CACHE_UPDATE, info.latest_fee_rate_cache_update_timestamp),
-				("RGS Snapshot", HELP_RGS_SNAPSHOT, info.latest_rgs_snapshot_timestamp),
-				("Node Announcement", HELP_NODE_ANNOUNCEMENT, info.latest_node_announcement_broadcast_timestamp),
+				("Lightning wallet sync", HELP_LIGHTNING_WALLET_SYNC, info.latest_lightning_wallet_sync_timestamp),
+				("On-chain wallet sync", HELP_ONCHAIN_WALLET_SYNC, info.latest_onchain_wallet_sync_timestamp),
+				("Fee rate cache update", HELP_FEE_RATE_CACHE_UPDATE, info.latest_fee_rate_cache_update_timestamp),
+				("RGS snapshot", HELP_RGS_SNAPSHOT, info.latest_rgs_snapshot_timestamp),
+				("Node announcement", HELP_NODE_ANNOUNCEMENT, info.latest_node_announcement_broadcast_timestamp),
 			]
 		})
 		.unwrap_or_default();
 	rsx! {
 		Card {
-			title: "Node Details",
+			title: "Node details",
 			actions: rsx! {
 				Pill { tone: "success", span { class: "dot success", style: "width: 6px; height: 6px; box-shadow: none;" } "Online" }
 				RefreshBtn { busy: loading, onclick: move |_| actions::fetch_node_info(ctx), op: Op::NodeInfo }
 			},
 			match info {
 				None => rsx! {
-					Empty { icon: "home", title: "No node info available", hint: "Click Refresh to fetch." }
+					Empty { icon: "home", title: "No node info available", hint: "Click Refresh to load" }
 				},
 				Some(info) => rsx! {
 					div { class: "kv",
 						Kv { label: "Node ID", help: HELP_NODE_ID, IdCopy { value: info.node_id.clone(), head: 10, tail: 10 } }
 						if let Some(block) = info.current_best_block.as_ref() {
-							Kv { label: "Best Block", help: HELP_BEST_BLOCK,
+							Kv { label: "Best block", help: HELP_BEST_BLOCK,
 								Hover { tip: block.block_hash.clone(), span { class: "mono", "{truncate_id(&block.block_hash, 8, 8)}" } }
 								Pill { tone: "info", "height {block.height}" }
 							}
@@ -107,9 +107,9 @@ fn ChainSource() -> Element {
 	drop(conn);
 	let empty = matches!(chain_source, ChainSourceConfig::None) && network.is_empty();
 	rsx! {
-		Card { title: "Chain Source", sub: "From the loaded daemon config",
+		Card { title: "Chain source", sub: "From the loaded config file",
 			if empty {
-				Empty { icon: "cube", title: "No chain source configured." }
+				Empty { icon: "cube", title: "No chain source configured" }
 			} else {
 				div { class: "kv",
 					if !network.is_empty() {
@@ -118,17 +118,17 @@ fn ChainSource() -> Element {
 					match chain_source {
 						ChainSourceConfig::None => rsx! {},
 						ChainSourceConfig::Bitcoind { rpc_address, rpc_user, rpc_password } => rsx! {
-							Kv { label: "Chain Source", help: HELP_CHAIN_SOURCE, Pill { tone: "orange", "Bitcoin Core RPC" } }
-							Kv { label: "RPC Address", help: HELP_RPC_ADDRESS, span { class: "mono", "{rpc_address}" } CopyBtn { value: rpc_address.clone() } }
-							Kv { label: "RPC User", span { class: "mono", "{rpc_user}" } CopyBtn { value: rpc_user.clone() } }
-							Kv { label: "RPC Password", span { class: "mono", "********" } CopyBtn { value: rpc_password.clone() } }
+							Kv { label: "Chain source", help: HELP_CHAIN_SOURCE, Pill { tone: "orange", "Bitcoin Core RPC" } }
+							Kv { label: "RPC address", help: HELP_RPC_ADDRESS, span { class: "mono", "{rpc_address}" } CopyBtn { value: rpc_address.clone() } }
+							Kv { label: "RPC user", span { class: "mono", "{rpc_user}" } CopyBtn { value: rpc_user.clone() } }
+							Kv { label: "RPC password", span { class: "mono", "********" } CopyBtn { value: rpc_password.clone() } }
 						},
 						ChainSourceConfig::Electrum { server_url } => rsx! {
-							Kv { label: "Chain Source", help: HELP_CHAIN_SOURCE, Pill { tone: "info", "Electrum" } }
+							Kv { label: "Chain source", help: HELP_CHAIN_SOURCE, Pill { tone: "info", "Electrum" } }
 							Kv { label: "Server URL", help: HELP_ELECTRUM_URL, span { class: "mono break", "{server_url}" } CopyBtn { value: server_url.clone() } }
 						},
 						ChainSourceConfig::Esplora { server_url } => rsx! {
-							Kv { label: "Chain Source", help: HELP_CHAIN_SOURCE, Pill { tone: "success", "Esplora" } }
+							Kv { label: "Chain source", help: HELP_CHAIN_SOURCE, Pill { tone: "success", "Esplora" } }
 							Kv { label: "Server URL", help: HELP_ESPLORA_URL, span { class: "mono break", "{server_url}" } CopyBtn { value: server_url.clone() } }
 						},
 					}

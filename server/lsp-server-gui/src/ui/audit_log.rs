@@ -77,7 +77,7 @@ pub fn AuditLog() -> Element {
 		div { class: "card stack", style: "gap: 14px;",
 			LogToolbar { lines, loading, oninput: move |v| forms.write().audit_log.max_lines = v, onrefresh: move |_| actions::fetch_audit_log(ctx) }
 			match log {
-				Some(content) if content.is_empty() => rsx! { Empty { icon: "file", title: "No audit events yet." } },
+				Some(content) if content.is_empty() => rsx! { Empty { icon: "file", title: "No audit events yet" } },
 				Some(content) => {
 					let formatted = content.lines().map(format_audit_line).collect::<Vec<_>>().join("\n");
 					rsx! { LogView { kind: LogKind::Audit, text: formatted } }

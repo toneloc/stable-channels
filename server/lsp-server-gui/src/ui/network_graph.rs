@@ -17,7 +17,7 @@ const HELP_GRAPH_NODE: &str = "A public Lightning node known through network gos
 const HELP_NODE_ID: &str = "The public key that identifies this Lightning node to peers and the network.";
 const HELP_NODE_ONE: &str = "One endpoint of the public channel.";
 const HELP_NODE_TWO: &str = "The other endpoint of the public channel.";
-const HELP_CAPACITY: &str = "The total channel size currently tracked for this channel.";
+const HELP_CAPACITY: &str = "Total size of the channel.";
 const HELP_CLTV_DELTA: &str =
 	"The additional block delay required by this channel's routing policy for forwarded HTLCs.";
 const HELP_HTLC_MIN: &str = "Minimum HTLC amount allowed by this channel direction.";
@@ -81,13 +81,13 @@ fn ChannelsSection() -> Element {
 		(count, rows, matching)
 	});
 	rsx! {
-		Card { class: "flush", title: "Graph Channels", sub: "Public channels from gossip",
+		Card { class: "flush", title: "Graph channels", sub: "Public channels from gossip",
 			actions: rsx! {
 				button { class: "btn sm", disabled: loading, onclick: move |_| actions::fetch_graph_channels(ctx),
-					if loading { Spinner {} "Loading..." } else { Icon { name: "list", size: 14 } "List Channels" }
+					if loading { Spinner {} "Loading…" } else { Icon { name: "list", size: 14 } "List channels" }
 				}
 			},
-			GraphList { listing, filter, noun: "channels", help: HELP_GRAPH_CHANNEL, column: "Short Channel ID", column_help: HELP_SHORT_CHANNEL_ID, oninput: move |v| view.write().scid_filter = v }
+			GraphList { listing, filter, noun: "channels", help: HELP_GRAPH_CHANNEL, column: "Short channel ID", column_help: HELP_SHORT_CHANNEL_ID, oninput: move |v| view.write().scid_filter = v }
 		}
 	}
 }
@@ -104,10 +104,10 @@ fn NodesSection() -> Element {
 		(count, rows, matching)
 	});
 	rsx! {
-		Card { class: "flush", title: "Graph Nodes", sub: "Public nodes from gossip",
+		Card { class: "flush", title: "Graph nodes", sub: "Public nodes from gossip",
 			actions: rsx! {
 				button { class: "btn sm", disabled: loading, onclick: move |_| actions::fetch_graph_nodes(ctx),
-					if loading { Spinner {} "Loading..." } else { Icon { name: "list", size: 14 } "List Nodes" }
+					if loading { Spinner {} "Loading…" } else { Icon { name: "list", size: 14 } "List nodes" }
 				}
 			},
 			GraphList { listing, filter, noun: "nodes", help: HELP_GRAPH_NODE, column: "Node ID", column_help: HELP_NODE_ID, oninput: move |v| view.write().node_filter = v }
@@ -126,7 +126,7 @@ fn GraphList(
 	};
 	rsx! {
 		div { class: "toolbar",
-			span { class: "count", "{count} {noun} in network graph" }
+			span { class: "count", "{count} {noun} in the network graph" }
 			InfoTip { text: help }
 			if count > 0 {
 				div { class: "search", style: "margin-left: auto; max-width: 240px;",
@@ -148,7 +148,7 @@ fn GraphList(
 			}
 		}
 		if matching > rows.len() {
-			div { class: "table-foot", "... and {matching - rows.len()} more" }
+			div { class: "table-foot", "… and {matching - rows.len()} more" }
 		}
 	}
 }
@@ -161,23 +161,23 @@ fn ChannelLookup() -> Element {
 	let pending = ctx.busy(Op::GraphGetChannel);
 	let channel = ctx.data.read().graph_channel_detail.as_ref().and_then(|r| r.channel.clone());
 	rsx! {
-		Card { title: "Lookup Channel",
+		Card { title: "Look up channel",
 			div { class: "stack", style: "gap: 14px;",
 				div { class: "row nowrap", style: "align-items: flex-end;",
 					div { class: "grow",
-						Field { label: "Short Channel ID", help: HELP_SHORT_CHANNEL_ID,
+						Field { label: "Short channel ID", help: HELP_SHORT_CHANNEL_ID,
 							TextInput { value: scid, mono: true, oninput: move |v| forms.write().graph_get_channel.short_channel_id = v }
 						}
 					}
 					button { class: "btn", disabled: pending, onclick: move |_| actions::fetch_graph_channel(ctx),
 						if pending { Spinner {} } else { Icon { name: "search", size: 16 } }
-						"Lookup"
+						"Look up"
 					}
 				}
 				if let Some(ch) = channel {
 					div { class: "kv",
-						Kv { label: "Node One", help: HELP_NODE_ONE, IdCopy { value: ch.node_one.clone() } }
-						Kv { label: "Node Two", help: HELP_NODE_TWO, IdCopy { value: ch.node_two.clone() } }
+						Kv { label: "Node 1", help: HELP_NODE_ONE, IdCopy { value: ch.node_one.clone() } }
+						Kv { label: "Node 2", help: HELP_NODE_TWO, IdCopy { value: ch.node_two.clone() } }
 						if let Some(capacity) = ch.capacity_sats {
 							Kv { label: "Capacity", help: HELP_CAPACITY, Hover { tip: format!("{} sats", crate::format::format_sats(capacity)), span { class: "num", "{ctx.fmt_sats(capacity)}" } } }
 						}
@@ -191,9 +191,9 @@ fn ChannelLookup() -> Element {
 										if update.enabled { Pill { tone: "success", "Enabled" } } else { Pill { tone: "muted", "Disabled" } }
 									}
 									div { class: "kv",
-										crate::ui::widgets::Kv { label: "CLTV Delta", help: HELP_CLTV_DELTA, span { class: "num", "{update.cltv_expiry_delta}" } }
-										crate::ui::widgets::Kv { label: "HTLC Min", help: HELP_HTLC_MIN, span { class: "num", "{update.htlc_minimum_msat} msat" } }
-										crate::ui::widgets::Kv { label: "HTLC Max", help: HELP_HTLC_MAX, span { class: "num", "{update.htlc_maximum_msat} msat" } }
+										crate::ui::widgets::Kv { label: "CLTV delta", help: HELP_CLTV_DELTA, span { class: "num", "{update.cltv_expiry_delta}" } }
+										crate::ui::widgets::Kv { label: "HTLC minimum", help: HELP_HTLC_MIN, span { class: "num", "{update.htlc_minimum_msat} msat" } }
+										crate::ui::widgets::Kv { label: "HTLC maximum", help: HELP_HTLC_MAX, span { class: "num", "{update.htlc_maximum_msat} msat" } }
 									}
 								}
 							}
@@ -213,7 +213,7 @@ fn NodeLookup() -> Element {
 	let pending = ctx.busy(Op::GraphGetNode);
 	let node = ctx.data.read().graph_node_detail.as_ref().and_then(|r| r.node.clone());
 	rsx! {
-		Card { title: "Lookup Node",
+		Card { title: "Look up node",
 			div { class: "stack", style: "gap: 14px;",
 				div { class: "row nowrap", style: "align-items: flex-end;",
 					div { class: "grow",
@@ -223,7 +223,7 @@ fn NodeLookup() -> Element {
 					}
 					button { class: "btn", disabled: pending, onclick: move |_| actions::fetch_graph_node(ctx),
 						if pending { Spinner {} } else { Icon { name: "search", size: 16 } }
-						"Lookup"
+						"Look up"
 					}
 				}
 				if let Some(node) = node {
@@ -235,7 +235,7 @@ fn NodeLookup() -> Element {
 								span { style: "width: 14px; height: 14px; border-radius: 4px; background: #{ann.rgb}; box-shadow: inset 0 0 0 1px var(--border-strong);" }
 								span { class: "mono", "#{ann.rgb}" }
 							}
-							Kv { label: "Last Update", Hover { tip: format!("unix: {}", ann.last_update), span { class: "num", "{ann.last_update}" } } }
+							Kv { label: "Last update", Hover { tip: format!("unix: {}", ann.last_update), span { class: "num", "{ann.last_update}" } } }
 							if !ann.addresses.is_empty() {
 								Kv { label: "Addresses", help: HELP_ADDRESSES,
 									div { class: "stack tight",

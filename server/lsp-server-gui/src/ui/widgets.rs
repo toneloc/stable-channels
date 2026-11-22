@@ -124,6 +124,7 @@ pub fn Icon(name: &'static str, #[props(default = 18)] size: u32) -> Element {
 			path { d: "M12 8h.01" }
 		},
 		"chevron-right" => rsx! { path { d: "m9 18 6-6-6-6" } },
+		"chevron-left" => rsx! { path { d: "m15 18-6-6 6-6" } },
 		"chevron-up" => rsx! { path { d: "m18 15-6-6-6 6" } },
 		"chevron-down" => rsx! { path { d: "m6 9 6 6 6-6" } },
 		"more" => rsx! {
@@ -540,7 +541,7 @@ pub fn Gate() -> Element {
 						div { class: "glyph danger", Icon { name: "alert", size: 24 } }
 						div { class: "title", "Can't reach the LSP at {server_url}" }
 						div { class: "hint break", "{e}" }
-						div { class: "hint", "Make sure the daemon is running." }
+						div { class: "hint", "Make sure the LSP is running." }
 						div { class: "row", style: "margin-top: 10px; justify-content: center;",
 							button { class: "btn", onclick: open_settings, Icon { name: "sliders", size: 16 } "Open Settings" }
 							button { class: "btn primary", onclick: move |_| crate::actions::connect(ctx), Icon { name: "refresh", size: 16 } "Retry" }
@@ -583,6 +584,22 @@ pub fn Field(
 			if !hint.is_empty() {
 				span { class: "field-hint", "{hint}" }
 			}
+		}
+	}
+}
+
+/// Labelled group of several controls; not a <label>, so a click between them presses none.
+#[component]
+pub fn Group(label: String, help: Option<String>, children: Element) -> Element {
+	rsx! {
+		div { class: "field",
+			span { class: "field-label",
+				"{label}"
+				if let Some(help) = help {
+					InfoTip { text: help }
+				}
+			}
+			{children}
 		}
 	}
 }

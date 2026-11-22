@@ -69,7 +69,7 @@ impl ActiveTab {
 	pub fn label(self) -> &'static str {
 		match self {
 			ActiveTab::Overview => "Overview",
-			ActiveTab::NodeInfo => "Node Info",
+			ActiveTab::NodeInfo => "Node info",
 			ActiveTab::Balances => "Balances",
 			ActiveTab::Revenue => "Revenue",
 			ActiveTab::Channels => "Channels",
@@ -89,12 +89,12 @@ impl ActiveTab {
 
 	pub fn title(self) -> &'static str {
 		match self {
-			ActiveTab::NodeInfo => "Node Information",
-			ActiveTab::Lightning => "Lightning Payments",
+			ActiveTab::NodeInfo => "Node information",
+			ActiveTab::Lightning => "Lightning payments",
 			ActiveTab::Onchain => "On-chain",
-			ActiveTab::StableChannels => "Stable Channels",
-			ActiveTab::ForwardedPayments => "Forwarded Payments",
-			ActiveTab::NetworkGraph => "Network Graph",
+			ActiveTab::StableChannels => "Stable channels",
+			ActiveTab::ForwardedPayments => "Forwarded payments",
+			ActiveTab::NetworkGraph => "Network graph",
 			other => other.label(),
 		}
 	}
@@ -114,9 +114,9 @@ impl ActiveTab {
 			ActiveTab::StableChannels => "USD-stabilized channels and their targets",
 			ActiveTab::Tools => "Message signing and router utilities",
 			ActiveTab::NetworkGraph => "Public channels and nodes known from gossip",
-			ActiveTab::Logs => "Audit trail, channel ledger and LDK server logs",
+			ActiveTab::Logs => "Audit log, channel history and LDK Server log",
 			ActiveTab::Settings => "Connection, display unit and appearance",
-			ActiveTab::Access => "Tokens that can log in to the GUI and call the daemon",
+			ActiveTab::Access => "Tokens that can log in here or call the LSP",
 		}
 	}
 
@@ -484,14 +484,26 @@ pub struct RevokeTokenForm {
 	pub is_gui_token: bool,
 }
 
+/// When a new token stops working.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Expiry {
+	#[default]
+	Never,
+	/// This many days after the token is made.
+	Days(u32),
+	/// A local day from the calendar (none until one is picked) and a time on it.
+	At { day: Option<chrono::NaiveDate>, hour: u32, minute: u32 },
+}
+
 /// The Access page: the create form, the token just made, and the revoke target.
 #[derive(Default, Clone)]
 pub struct AccessForm {
 	pub name: String,
 	pub preset: String,
 	pub permissions: Vec<String>,
-	/// Optional "YYYY-MM-DDTHH:MM" local time; empty means no expiry.
-	pub expires: String,
+	pub expiry: Expiry,
+	/// First day of the month the calendar shows.
+	pub calendar_month: Option<chrono::NaiveDate>,
 	pub created: Option<CreatedToken>,
 	pub revoke: RevokeTokenForm,
 }
