@@ -117,9 +117,12 @@ fun BackupView(appState: AppState) {
         }
 
         if (showSeedWords) {
-            val words = appState.nodeService.savedMnemonic
-            if (!words.isNullOrEmpty()) {
-                RevealSecretPhraseDialog(mnemonic = words, onDismiss = { showSeedWords = false })
+            if (!appState.nodeService.savedMnemonic.isNullOrEmpty()) {
+                // The quiz reads the phrase itself, only once it is passed.
+                RevealSecretPhraseDialog(
+                    mnemonicProvider = { appState.nodeService.savedMnemonic },
+                    onDismiss = { showSeedWords = false },
+                )
             } else {
                 Spacer(Modifier.height(8.dp))
                 Text(

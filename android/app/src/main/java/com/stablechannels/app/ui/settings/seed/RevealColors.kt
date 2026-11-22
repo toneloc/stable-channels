@@ -28,7 +28,16 @@ internal object RevealColors {
     val secondaryGroupedBackground: Color
         @Composable get() = if (LocalDarkTheme.current) Color(0xFF1C1C1E) else Color(0xFFFFFFFF)
 
-    // iOS systemGreen, the Copy Seed checkmark.
-    val copiedCheck: Color
+    // iOS systemGreen, systemRed and systemOrange.
+    val green: Color
         @Composable get() = if (LocalDarkTheme.current) Color(0xFF30D158) else Color(0xFF34C759)
+
+    val red: Color
+        @Composable get() = if (LocalDarkTheme.current) Color(0xFFFF453A) else Color(0xFFFF3B30)
+
+    val orange: Color
+        @Composable get() = if (LocalDarkTheme.current) Color(0xFFFF9F0A) else Color(0xFFFF9500)
+
+    /** iOS stablePrimary: the Learn more links and illustration accents. */
+    val stablePrimary = Color(0xFF00A3E0)
 }

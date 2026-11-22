@@ -124,6 +124,15 @@ private constructor(val step: RevealQuizStep, val direction: QuizNavigationDirec
     fun mnemonic(provider: () -> String?): String? =
         if (step == RevealQuizStep.Revealed) provider()?.takeIf { it.isNotEmpty() } else null
 
+    /**
+     * Applies [action] only while [shownStep] is still the current step, so a tap on a screen that
+     * is animating out cannot act on the step that replaced it.
+     */
+    fun fromStep(
+        shownStep: RevealQuizStep,
+        action: RevealRecoveryQuiz.() -> RevealRecoveryQuiz,
+    ): RevealRecoveryQuiz = if (shownStep == step) action() else this
+
     fun startQuiz(): RevealRecoveryQuiz = forwardTo(RevealQuizStep.Question(FIRST_QUESTION))
 
     /** Answers the question on screen; ignored outside a question step. */
