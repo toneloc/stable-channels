@@ -7,7 +7,7 @@ use sc_rest_client::sc_protos::stable::{QueuedSpliceInfo, StableChannelInfo};
 use crate::actions;
 use crate::format::{ago, format_sats, format_usd, unit_label};
 use crate::health::{has_stable_position, settle_threshold_usd, settlement, stable_drift, Drift, Settlement};
-use crate::state::{AppCtx, ChannelSortColumn, ChannelStatusFilter, Dialog, Drawer, Op, QueuedRelease};
+use crate::state::{queued_call_releasable, AppCtx, ChannelSortColumn, ChannelStatusFilter, Dialog, Drawer, Op, QueuedRelease};
 use crate::ui::widgets::{
 	Amount, Bubble, Card, Check, CopyBtn, Empty, Field, Gate, Hover, Icon, IdCopy, Kv, LiquidityBar, Modal, Peer, Pill,
 	RefreshBtn, SidePanel, SortTh, Spinner, Stat, TextInput, Th,
@@ -54,8 +54,9 @@ const HELP_CLTV_EXPIRY_DELTA: &str =
 const HELP_CLOSE_CHANNEL: &str =
 	"Cooperatively close the channel when possible and return funds on-chain after confirmation.";
 const HELP_SPLICE_IN: &str = "Add on-chain funds to an existing channel without closing and reopening it. The daemon queues it, wakes the phone by push, and runs the splice once the channel is usable; the row below shows where it got to.";
-const HELP_QUEUED_SPLICES: &str = "Splice-ins queued for the phone. A call the node has not answered stays pending: no second call and no new request go out until it locks, the node drops it, or you release it after checking the node.";
-const RELEASE_WARNING: &str = "Release clears the call the node has not answered, so a new request can go out. If the node is still working on the earlier splice-in, both can land: the LSP's funds go into the channel twice, with a second on-chain fee. Release only after checking on the node that it holds no splice for this channel. The tick covers this call only.";
+const HELP_QUEUED_SPLICES: &str = "Splice-ins queued for the phone. A call the node has not answered stays pending: no second call and no new request go out until it locks, the node drops it, or you release it. A signed splice can be released only once it has stalled, three hours after the signing.";
+const RELEASE_WARNING: &str = "Release clears the call the node has not answered, so a new request can go out. The node may still hold it and run it once the phone is back: then both can land, and the LSP's funds go into the channel twice, with a second on-chain fee. Release only if the node has restarted or dropped the call. The daemon first checks the channel for this call's splice, and marks the request locked if it is there. The tick covers this call only.";
+const SIGNED_RELEASE_WARNING: &str = "The node signed this call's splice. It locks once its transaction has confirmed and the phone is online, and a new request behind it would put the LSP's funds into the channel twice. Release it only if that transaction can never confirm, for example because its inputs were spent elsewhere. The tick covers this call only.";
 const HELP_SPLICE_OUT: &str = "Move funds from a channel to an on-chain address without fully closing the channel.";
 const HELP_ONCHAIN_ADDRESS: &str =
 	"The Bitcoin address for the current network. Verify it belongs to the intended recipient and network before sending.";
@@ -369,7 +370,7 @@ fn queued_splice_is_shown(row: &QueuedSpliceInfo, now: u64) -> bool {
 		|| now.saturating_sub(row.updated_at.max(0) as u64) < 86_400
 }
 
-/// The row an open Release confirmation belongs to, with its tick; None once that row no longer has the confirmed call pending on the node.
+/// The row an open Release confirmation belongs to, with its tick; None once that row no longer has the confirmed call pending on the node, or it may no longer be released.
 fn armed_release(release: Option<&QueuedRelease>, rows: &[QueuedSpliceInfo]) -> Option<(QueuedSpliceInfo, bool)> {
 	let release = release?;
 	rows.iter().find(|row| release.is_for(row)).map(|row| (row.clone(), release.confirmed))
@@ -428,11 +429,14 @@ fn QueuedSplices(rows: Vec<QueuedSpliceInfo>) -> Element {
 											if open {
 												button { class: "btn sm ghost", disabled: busy, onclick: move |_| actions::cancel_queued_splice(ctx, uid.clone()), "Cancel" }
 											}
-											if row.pending_on_node {
+											if queued_call_releasable(&row) {
 												" "
 												// Opens the confirmation below; nothing is sent from here.
-												button { class: "btn sm danger", disabled: busy, title: "Only after checking that the node holds no splice for this channel",
+												button { class: "btn sm danger", disabled: busy, title: "Only if the node no longer holds this call",
 													onclick: move |_| view.write().open_release(&release_row), "Release" }
+											} else if row.pending_on_node {
+												" "
+												span { class: "small muted", title: "A signed splice can be released only once it has stalled, three hours after the signing", "signed · locks once confirmed" }
 											}
 										}
 									}
@@ -457,19 +461,25 @@ fn ReleaseConfirm(row: QueuedSpliceInfo, confirmed: bool) -> Element {
 	let busy = ctx.busy(Op::CancelQueuedSplice);
 	let called = ago(row.last_attempt_at.max(0) as u64, *ctx.now.read());
 	let tick_row = row.clone();
+	let signed = !row.funding_txo.is_empty();
+	let (title, warning, tick) = if signed {
+		("Release the signed splice-in", SIGNED_RELEASE_WARNING, "I checked: this transaction can never confirm")
+	} else {
+		("Release the splice-in pending on the node", RELEASE_WARNING, "I checked the node: it restarted or dropped this call")
+	};
 	rsx! {
 		div { class: "confirm-box", style: "margin: 12px;",
-			div { class: "title", Icon { name: "alert", size: 16 } "Release the splice-in pending on the node" }
+			div { class: "title", Icon { name: "alert", size: 16 } "{title}" }
 			div { class: "row",
 				Peer { node_id: row.counterparty_node_id.clone() }
 				Amount { msat: row.amount_sats.saturating_mul(1_000) }
 				span { class: "small muted", "Call made {called}" }
 			}
-			if !row.funding_txo.is_empty() {
+			if signed {
 				span { class: "small muted", "The node reported this call's splice as signed: {row.funding_txo}" }
 			}
-			span { class: "small muted", "{RELEASE_WARNING}" }
-			Check { checked: confirmed, danger: true, label: "I checked the node: it holds no splice for this channel",
+			span { class: "small muted", "{warning}" }
+			Check { checked: confirmed, danger: true, label: tick,
 				onchange: move |v| view.write().tick_release(&tick_row, v) }
 			div { class: "row",
 				button { class: "btn ghost", onclick: move |_| view.write().close_release(), "Keep waiting" }
@@ -1281,6 +1291,29 @@ mod tests {
 	}
 
 	#[test]
+	fn a_signed_call_is_offered_for_release_only_once_it_has_stalled() {
+		let mut signed = queued_row("negotiated", true, 0);
+		signed.funding_txo = "bb:1".into();
+		let html = channels_html(signed.clone(), true);
+		assert!(!html.contains(">Release<") && html.contains("locks once confirmed"), "no Release for a signed splice that may still lock");
+		assert_eq!(armed_release(Some(&QueuedRelease::for_call(&signed, true)), &[signed.clone()]), None);
+		let request = sc_rest_client::sc_protos::stable::ListQueuedSplicesResponse { splices: vec![signed.clone()] };
+		assert_eq!(crate::actions::queued_release_request(&QueuedRelease::for_call(&signed, true), &request), None, "nothing is sent for it either");
+		let mut stalled = signed.clone();
+		stalled.status = "stalled".into();
+		assert!(channels_html(stalled.clone(), true).contains(">Release<"));
+		let boxed = channels_html_with(stalled.clone(), true, Some(QueuedRelease::for_call(&stalled, false)));
+		assert!(boxed.contains("can never confirm") && boxed.contains("Release the signed splice-in"));
+		// A cancelled request whose call the node signed after all never stalls: it is offered, and the daemon holds the release until the splice has had its time to lock.
+		let cancelled = QueuedSpliceInfo { status: "cancelled".into(), ..signed.clone() };
+		assert!(channels_html(cancelled, true).contains(">Release<"));
+		// An unsigned pending call keeps its Release, with the warning that the node may still run it.
+		let pending = queued_row("splicing", true, 0);
+		let boxed = channels_html_with(pending.clone(), true, Some(QueuedRelease::for_call(&pending, false)));
+		assert!(boxed.contains("restarted or dropped this call"));
+	}
+
+	#[test]
 	fn a_release_confirmation_belongs_to_a_row_still_pending_on_the_node() {
 		let rows = vec![queued_row("splicing", true, 0), QueuedSpliceInfo { user_channel_id: "9".into(), ..queued_row("queued", false, 0) }];
 		let open = |uid: &str, confirmed: bool| armed_release(release_for(uid, confirmed).as_ref(), &rows);
@@ -1306,7 +1339,9 @@ mod tests {
 		assert!(!release.is_for(&QueuedSpliceInfo { user_channel_id: "8".into(), ..call.clone() }), "another channel");
 		let signed = QueuedSpliceInfo { status: "negotiated".into(), funding_txo: "bb:1".into(), ..call };
 		assert!(!release.is_for(&signed), "the node signed the call after the operator checked it");
-		assert!(QueuedRelease::for_call(&signed, true).is_for(&signed), "a release opened on the signed call is for it");
+		assert!(!QueuedRelease::for_call(&signed, true).is_for(&signed), "a signed call is not released before it stalls");
+		let stalled = QueuedSpliceInfo { status: "stalled".into(), ..signed };
+		assert!(QueuedRelease::for_call(&stalled, true).is_for(&stalled), "a release opened on the signed call once it stalled is for it");
 	}
 
 	#[test]
@@ -1353,8 +1388,8 @@ mod tests {
 		let html = channels_html_with(call.clone(), true, Some(QueuedRelease::for_call(&call, false)));
 		assert!(html.contains("Call made 10m ago"), "{html}");
 		assert!(!html.contains("as signed"));
-		let negotiated = QueuedSpliceInfo { status: "negotiated".into(), funding_txo: "ab12:1".into(), ..call };
-		let html = channels_html_with(negotiated.clone(), true, Some(QueuedRelease::for_call(&negotiated, false)));
+		let signed = QueuedSpliceInfo { status: "stalled".into(), funding_txo: "ab12:1".into(), ..call };
+		let html = channels_html_with(signed.clone(), true, Some(QueuedRelease::for_call(&signed, false)));
 		assert!(html.contains("splice as signed: ab12:1"), "{html}");
 	}
 

@@ -688,6 +688,11 @@ pub struct QueuedRelease {
 	pub confirmed: bool,
 }
 
+/// Whether the call a queued splice has pending on the node may be released from here: one the node has not reported as signed, or a signed one that has stalled, which happens once its splice has had three hours to lock. A cancelled request whose call the node signed after all never stalls, so it is offered too. The daemon refuses to release a signed splice before those three hours, since it still locks once its transaction confirms.
+pub fn queued_call_releasable(row: &QueuedSpliceInfo) -> bool {
+	row.pending_on_node && (row.funding_txo.is_empty() || matches!(row.status.as_str(), "stalled" | "cancelled"))
+}
+
 impl QueuedRelease {
 	/// The confirmation for the call `row` has pending on the node, with its tick.
 	pub fn for_call(row: &QueuedSpliceInfo, confirmed: bool) -> Self {
@@ -700,9 +705,9 @@ impl QueuedRelease {
 		}
 	}
 
-	/// Whether `row` still has this confirmation's call pending on the node. A status change or a repeat push is still the same call.
+	/// Whether `row` still has this confirmation's call pending on the node, and may still be released. A status change or a repeat push is still the same call.
 	pub fn is_for(&self, row: &QueuedSpliceInfo) -> bool {
-		row.pending_on_node
+		queued_call_releasable(row)
 			&& row.user_channel_id == self.user_channel_id
 			&& row.created_at == self.created_at
 			&& row.last_attempt_at == self.last_attempt_at
