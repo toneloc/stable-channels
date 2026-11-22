@@ -432,7 +432,7 @@ pub struct QueuedSplice {
     pub wake_note: Option<String>,
     /// The outpoint the node last negotiated for this request. A row that holds one keeps its call through a later negotiation failure, since the signed splice may have landed.
     pub funding_txo: Option<String>,
-    /// Every outpoint the node negotiated for this request, oldest first. On the LSP's node a negotiation is reported only for a splice its own wallet took part in, so the request's splice is whichever of these the channel locks on: a fee bump, or a splice-out the user added to the same transaction, does not hide it.
+    /// Every outpoint the node negotiated for this request, oldest first. On the LSP's node a negotiation is reported only for a splice the node contributed to, and the daemon keeps the operator's own splices off a channel a request holds, so the request's splice is whichever of these the channel locks on: a fee bump, or a splice-out the user added to the same transaction, does not hide it.
     pub negotiated_txos: Vec<String>,
     /// When that outpoint was negotiated; cleared with it by the next call.
     pub negotiated_at: Option<i64>,
@@ -457,7 +457,7 @@ impl QueuedSplice {
     }
 }
 
-/// A splice-in the operator made by hand, noted so that a queued request for the channel waits until the channel has moved past the funding it was made on.
+/// A splice the operator made by hand (Splice+ or Splice-), noted so that a queued request for the channel waits until the channel has moved past the funding it was made on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManualSplice {
     pub user_channel_id: String,
@@ -465,7 +465,7 @@ pub struct ManualSplice {
     pub made_at: i64,
 }
 
-/// What noting a splice-in made by hand did.
+/// What noting a splice made by hand did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManualNoteOutcome {
     /// The note is in, replacing an earlier one if `existed`.
@@ -484,7 +484,7 @@ pub enum QueueSpliceOutcome {
     PendingOnNode(QueuedSplice),
     /// The node's failure event released the channel's last call inside the backoff, and a signing can still revive it; nothing changed.
     Revivable(QueuedSplice),
-    /// A splice-in made by hand is noted on the funding the channel is on now; nothing changed.
+    /// A splice made by hand is noted on the funding the channel is on now; nothing changed.
     ManualPending(ManualSplice),
 }
 
@@ -1344,7 +1344,7 @@ impl Database {
     /// call's signing can still revive the row. The check runs inside the transaction, so an event that lands while the
     /// caller is away from the table cannot slip a replacement past it.
     ///
-    /// With `channel_funding_txo`, the funding the caller saw the channel on, a splice-in made by hand and noted on that
+    /// With `channel_funding_txo`, the funding the caller saw the channel on, a splice made by hand and noted on that
     /// funding refuses the request too, inside the same transaction, so a note made while the caller was away is seen.
     pub fn queue_splice_in(
         &self,
@@ -1457,7 +1457,7 @@ impl Database {
         .optional()
     }
 
-    /// The splice-in made by hand on the channel that the queue has not yet seen through, if any.
+    /// The splice made by hand on the channel that the queue has not yet seen through, if any.
     pub fn load_manual_splice(&self, user_channel_id: &str) -> SqliteResult<Option<ManualSplice>> {
         let conn = self.conn.lock().unwrap();
         Self::manual_splice_on(&conn, user_channel_id)

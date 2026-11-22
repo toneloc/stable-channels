@@ -79,9 +79,25 @@ pub async fn splice_out(State(state): State<AppState>, body: Bytes) -> Response 
         Ok(r) => r,
         Err(resp) => return resp,
     };
+    // The same rule as for a splice-in by hand: the node reports a splice-out of its own as a negotiated splice too, so one made while a queued splice-in owns the channel would be taken for it. Otherwise it is noted the same way.
+    let user_channel_id = req.user_channel_id.clone();
+    let replaced_a_note = match crate::queued_splice::before_manual_splice(
+        &state.db,
+        state.ldk_server.as_ref() as &dyn crate::stable_manager::LdkServerCalls,
+        &user_channel_id,
+        crate::revenue::now_secs(),
+    )
+    .await
+    {
+        Ok(replaced_a_note) => replaced_a_note,
+        Err(message) => return error_response(ErrorCode::InvalidRequestError, format!("the splice-out was not made: {message}")),
+    };
     match state.ldk_server.splice_out(req).await {
         Ok(resp) => ok_response(resp),
-        Err(e) => map_grpc_error(e),
+        Err(e) => {
+            crate::queued_splice::after_manual_splice_failed(&state.db, &user_channel_id, replaced_a_note, &e);
+            map_grpc_error(e)
+        }
     }
 }
 

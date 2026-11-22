@@ -11,10 +11,12 @@
 //! whose call was answered is still checked for a lock before any new call.
 //!
 //! A lock is attributed by what only the LSP's own splice produces. On the LSP's node LDK reports a
-//! negotiated splice only when the node's own wallet took part in it, so every outpoint negotiated
-//! for a request is kept, and the request has locked once the channel is on one of them: a fee bump,
-//! or a splice-out the user added to the same transaction, does not hide it, and nothing has to be
-//! looked up. The node's ready event for such an outpoint locks the request too, even when a later
+//! negotiated splice only when the node contributed to it: a splice-in of its own, or a splice-out of
+//! its own. A splice the operator makes by hand, in or out, is refused while a request holds the
+//! channel and is noted otherwise, so a negotiation while a request holds the channel is the
+//! request's. Every outpoint negotiated for a request is kept, and the request has locked once the
+//! channel is on one of them: a fee bump, or a splice-out the user added to the same transaction,
+//! does not hide it, and nothing has to be looked up. The node's ready event for such an outpoint locks the request too, even when a later
 //! splice has moved the channel on by the time the job looks. When no negotiation was seen (an event
 //! lost in a restart), the channel's funding has moved on from the outpoint the call was made on and
 //! its value has grown by the amount, which a user's splice can also do; and the node's wallet took
@@ -422,7 +424,7 @@ pub(crate) async fn cancel(db: &Database, ldk: &dyn LdkServerCalls, user_channel
             };
             (true, status.into())
         }
-        Ok(None) if manual_released => (true, "released the splice-in made by hand on this channel; a new request may go out".into()),
+        Ok(None) if manual_released => (true, "released the splice made by hand on this channel; a new request may go out".into()),
         Ok(None) => (false, "this channel has no queued splice that can be cancelled".into()),
         Err(error) => {
             let message = format!("could not cancel the queued splice: {error}");
@@ -1090,7 +1092,7 @@ fn released_by_a_failure_event(row: &QueuedSplice, now: i64) -> bool {
 /// Why a request is refused while a splice made by hand is still on the channel.
 fn manual_refusal(manual: &ManualSplice) -> String {
     format!(
-        "a splice-in made by hand on this channel at {} has not locked yet (the channel is still on {}); queue once the channel shows its new funding, or cancel with force once you have checked that the node holds no splice for it",
+        "a splice made by hand on this channel at {} has not locked yet (the channel is still on {}); queue once the channel shows its new funding, or cancel with force once you have checked that the node holds no splice for it",
         manual.made_at, manual.channel_funding_txo
     )
 }
@@ -1113,7 +1115,7 @@ fn released_for_good(row: &QueuedSplice) -> bool {
     row.status == "cancelled" && !row.pending_on_node && row.last_error.as_deref() != Some(NEGOTIATION_FAILED_ERROR)
 }
 
-/// The node negotiated a splice on the channel. On the LSP's node LDK reports a negotiation only for a splice its own wallet took part in, so it is the request's splice (or the replaced request's), with one exception: a splice the operator made by hand after the request was released. Every row with a call pending records it, whatever its status, since a signed splice keeps the call through a later negotiation failure. A row with no call pending is armed with it: the node ran a call after all that a failure event, a refusal or a release had let go, or that it held until the phone came back, so the row's call is pending again and no second call goes out. A released row is not armed by a splice made by hand since.
+/// The node negotiated a splice on the channel. On the LSP's node LDK reports a negotiation only for a splice the node contributed to, and a splice the operator makes by hand (Splice+ or Splice-) is refused while a request holds the channel, so it is the request's splice (or the replaced request's), with one exception: a splice the operator made by hand after the request was released, which left a note. Every row with a call pending records it, whatever its status, since a signed splice keeps the call through a later negotiation failure. A row with no call pending is armed with it: the node ran a call after all that a failure event, a refusal or a release had let go, or that it held until the phone came back, so the row's call is pending again and no second call goes out. A released row is not armed by a splice made by hand since.
 pub(crate) fn on_splice_negotiated(db: &Database, user_channel_id: &str, funding_txo: &str, now: i64) {
     let Some(key) = row_key(user_channel_id) else { return };
     let Some(row) = row_for_event(db, &key) else { return };
@@ -1195,7 +1197,7 @@ fn held_refusal(open: &QueuedSplice) -> String {
     )
 }
 
-/// Before the operator's manual Splice+ call: note the channel's funding, so a queued request waits until the channel has moved past it. The check for a queued row that holds the channel and the note are one transaction, so a request saved while the channels were being listed is seen. Ok says whether an earlier note was replaced; an error is the reason the call must not go out.
+/// Before the operator's manual Splice+ or Splice- call: note the channel's funding, so a queued request waits until the channel has moved past it. The check for a queued row that holds the channel and the note are one transaction, so a request saved while the channels were being listed is seen. Ok says whether an earlier note was replaced; an error is the reason the call must not go out.
 pub(crate) async fn before_manual_splice(db: &Database, ldk: &dyn LdkServerCalls, user_channel_id: &str, now: i64) -> Result<bool, String> {
     let Some(key) = row_key(user_channel_id) else {
         return Err(format!("{user_channel_id:?} is not a channel id"));
@@ -1219,7 +1221,7 @@ pub(crate) async fn before_manual_splice(db: &Database, ldk: &dyn LdkServerCalls
     }
 }
 
-/// The operator's manual Splice+ call failed. The note is cleared only when the node's answer is its own and this press made the note: an answer lost in transport may leave the call on the node, and a refused second press says nothing about the earlier splice the note is for. Otherwise the note stays until the channel moves past it or the operator cancels with force.
+/// The operator's manual Splice+ or Splice- call failed. The note is cleared only when the node's answer is its own and this press made the note: an answer lost in transport may leave the call on the node, and a refused second press says nothing about the earlier splice the note is for. Otherwise the note stays until the channel moves past it or the operator cancels with force.
 pub(crate) fn after_manual_splice_failed(db: &Database, user_channel_id: &str, replaced_a_note: bool, error: &LdkServerError) {
     let Some(key) = row_key(user_channel_id) else { return };
     if replaced_a_note || !node_answered(error) {
@@ -3322,5 +3324,31 @@ mod tests {
         on_splice_negotiated(&db, USER_CHANNEL_ID_DECIMAL, &txo(TX_C, 1), 203);
         let released = row(&db);
         assert_eq!((released.status.as_str(), released.pending_on_node, released.negotiated_txos.len()), ("cancelled", false, 0));
+    }
+
+    #[tokio::test]
+    async fn the_operators_own_splice_out_is_never_taken_for_a_requests_splice_in() {
+        let _guard = guard();
+        let dir = tempfile::tempdir().unwrap();
+        let push = service(FakeSender::new(true), dir.path(), &[]);
+        // While a request holds the channel, the Splice- route is refused by the same rule as Splice+.
+        let db = database();
+        let ldk = node(true);
+        queued(&db, 100);
+        assert!(before_manual_splice(&db, &ldk, USER_CHANNEL_ID_DECIMAL, 101).await.is_err());
+        // Once it was cancelled, the route notes the splice-out, and its negotiation (the node contributed its own output) neither arms nor locks the request.
+        let (ok, _) = cancel(&db, &ldk, USER_CHANNEL_ID_DECIMAL, false, 102).await;
+        assert!(ok);
+        assert_eq!(before_manual_splice(&db, &ldk, USER_CHANNEL_ID_DECIMAL, 103).await, Ok(false));
+        on_splice_negotiated(&db, USER_CHANNEL_ID_DECIMAL, &txo(TX_B, 0), 104);
+        on_channel_ready(&db, USER_CHANNEL_ID_DECIMAL, Some(&txo(TX_B, 0)), 105);
+        *ldk.channels.lock().unwrap() = vec![channel_with(true, TX_B, 0, LSP_SATS - 30_000)];
+        pass(&db, &ldk, &push, 106).await;
+        let cancelled = row(&db);
+        assert_eq!((cancelled.status.as_str(), cancelled.pending_on_node, cancelled.negotiated_txos.len()), ("cancelled", false, 0));
+        // A new request is then free to go out.
+        let (ok, status) = queue(&db, &ldk, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, AMOUNT_SATS, 107).await;
+        assert!(ok, "{status}");
+        assert!(ldk.splice_ins.lock().unwrap().is_empty());
     }
 }
