@@ -25,13 +25,13 @@ use sc_rest_client::sc_protos::stable::{
 	CancelQueuedSpliceRequest, CancelQueuedSpliceResponse, EditStableChannelRequest, GetPriceRequest,
 	ListChannelLedgerEventsRequest, ListChannelLedgerEventsResponse, ListQueuedSplicesRequest,
 	ListQueuedSplicesResponse, ListSettlementPaymentsRequest, ListStableChannelsRequest, LogRequest,
-	QueueSpliceInRequest, QueueSpliceInResponse, ReleaseStabilityPaymentRequest,
+	QueueSpliceInRequest, ReleaseStabilityPaymentRequest,
 };
 
 use crate::ledger::{checked_next_cursor, merge_ledger_events};
 use crate::state::{
 	ActiveTab, AppCtx, ChannelLedgerForm, ChannelLedgerRequestKey, ConnectionStatus, Dialog,
-	Drawer, LogsTab, ManualRelease, Op, QueuedRelease, SendKind, SettlementKind,
+	Drawer, LogsTab, Op, QueuedRelease, SendKind, SettlementKind,
 };
 
 /// Run `fut` for `op` unless it is already running; `on_ok` applies the result and errors toast.
@@ -1018,7 +1018,6 @@ pub fn splice_in(ctx: AppCtx) {
 		return;
 	};
 	// The daemon queues the splice, wakes the phone by push and runs it once the channel is usable.
-	let release_channel = user_channel_id.clone();
 	run_with(
 		ctx,
 		Op::SpliceIn,
@@ -1031,9 +1030,7 @@ pub fn splice_in(ctx: AppCtx) {
 				})
 				.await
 		},
-		move |ctx, v| {
-			let mut view = ctx.view;
-			view.write().manual_release = manual_release_offer(&release_channel, &v);
+		|ctx, v| {
 			if v.ok {
 				ctx.success(v.status);
 				let mut forms = ctx.forms;
@@ -1047,41 +1044,6 @@ pub fn splice_in(ctx: AppCtx) {
 		},
 		|ctx, e| ctx.error(splice_in_error(e)),
 	);
-}
-
-/// The release a Splice In answer offers: one for the splice made by hand the daemon refused the request for, none for any other answer.
-pub fn manual_release_offer(user_channel_id: &str, answer: &QueueSpliceInResponse) -> Option<ManualRelease> {
-	(!answer.ok && answer.manual_splice_made_at != 0).then(|| ManualRelease {
-		user_channel_id: user_channel_id.to_string(),
-		made_at: answer.manual_splice_made_at,
-		confirmed: false,
-	})
-}
-
-/// Release the splice made by hand that a ticked confirmation in the Splice In dialog is for. The daemon clears that one note only: it cancels or releases no queued splice, and releases nothing once another splice has been made by hand since.
-pub fn release_manual_splice(ctx: AppCtx) {
-	if busy(ctx, Op::CancelQueuedSplice) {
-		return;
-	}
-	let mut view = ctx.view;
-	let Some(release) = view.peek().manual_release.clone().filter(|release| release.confirmed) else { return };
-	view.write().manual_release = None;
-	let Some(client) = client(ctx) else { return };
-	run(
-		ctx,
-		Op::CancelQueuedSplice,
-		async move { client.cancel_queued_splice(manual_release_request(&release)).await.map(Some) },
-		cancel_answered,
-	);
-}
-
-/// The request that releases the splice made by hand `release` is for. `force` stays false, so a daemon without the field only cancels plainly.
-pub fn manual_release_request(release: &ManualRelease) -> CancelQueuedSpliceRequest {
-	CancelQueuedSpliceRequest {
-		user_channel_id: release.user_channel_id.clone(),
-		force: false,
-		manual_splice_made_at: release.made_at,
-	}
 }
 
 /// Every channel's queued splice-in. An older daemon without the route leaves the list as it was; any other failure is reported like the other fetches.
@@ -1135,12 +1097,7 @@ pub fn cancel_queued_splice(ctx: AppCtx, user_channel_id: String) {
 	run(
 		ctx,
 		Op::CancelQueuedSplice,
-		async move {
-			client
-				.cancel_queued_splice(CancelQueuedSpliceRequest { user_channel_id, force: false, manual_splice_made_at: 0 })
-				.await
-				.map(Some)
-		},
+		async move { client.cancel_queued_splice(CancelQueuedSpliceRequest { user_channel_id, force: false }).await.map(Some) },
 		cancel_answered,
 	);
 }
@@ -1172,11 +1129,7 @@ pub fn queued_release_request(release: &QueuedRelease, listed: &ListQueuedSplice
 		.splices
 		.iter()
 		.any(|row| release.is_for(row))
-		.then(|| CancelQueuedSpliceRequest {
-			user_channel_id: release.user_channel_id.clone(),
-			force: true,
-			manual_splice_made_at: 0,
-		})
+		.then(|| CancelQueuedSpliceRequest { user_channel_id: release.user_channel_id.clone(), force: true })
 }
 
 /// The daemon's answer to a Cancel or Release; None when Release found the checked call no longer pending.

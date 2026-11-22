@@ -116,35 +116,20 @@ impl PushService {
         self.last_push_failed.clear();
     }
 
-    /// Whether a push to this node may be sent now: no accepted push inside `spacing_secs` (the
-    /// cooldown, or the caller's own spacing for pushes that follow a schedule of their own), and no
+    /// Whether a push to this node may be sent now: no accepted push inside the cooldown, and no
     /// failed or still-outstanding one inside the backoff.
-    pub fn should_notify_within(&self, node_id: &str, spacing_secs: u64) -> bool {
+    pub fn should_notify(&self, node_id: &str) -> bool {
         let within = |map: &HashMap<String, Instant>, secs: u64| {
             map.get(node_id).is_some_and(|at| at.elapsed().as_secs() < secs)
         };
-        !within(&self.last_push_sent, spacing_secs)
+        !within(&self.last_push_sent, PUSH_COOLDOWN_SECS)
             && !within(&self.last_push_failed, PUSH_FAILURE_BACKOFF_SECS)
-    }
-
-    /// Treat the last accepted push to this node as sent `secs` ago.
-    #[cfg(test)]
-    pub(crate) fn age_last_push(&mut self, node_id: &str, secs: u64) {
-        if let Some(at) = self.last_push_sent.get_mut(node_id) {
-            *at = Instant::now().checked_sub(Duration::from_secs(secs)).expect("a test clock this far back");
-        }
     }
 
     /// Reserve a notification for this node, or None when it is cooling down, already being
     /// sent, or has no registered token.
-    #[cfg(test)]
     pub(crate) fn begin_notify(&mut self, node_id: &str, direction: &str) -> Option<PendingPush> {
-        self.begin_notify_within(node_id, direction, PUSH_COOLDOWN_SECS)
-    }
-
-    /// [`Self::begin_notify`] with the caller's own spacing after an accepted push in place of the cooldown.
-    pub(crate) fn begin_notify_within(&mut self, node_id: &str, direction: &str, spacing_secs: u64) -> Option<PendingPush> {
-        if !self.should_notify_within(node_id, spacing_secs) {
+        if !self.should_notify(node_id) {
             info!("[push] Skipping notification for {} (cooldown)", node_id);
             return None;
         }
@@ -190,12 +175,7 @@ impl PendingPush {
 /// it. The service lock is released for the provider request, so a slow provider delays neither
 /// other nodes' notifications nor token registration.
 pub(crate) async fn notify(push: &Arc<Mutex<PushService>>, node_id: &str, direction: &str) -> bool {
-    notify_within(push, node_id, direction, PUSH_COOLDOWN_SECS).await
-}
-
-/// [`notify`] with the caller's own spacing after an accepted push in place of the cooldown.
-pub(crate) async fn notify_within(push: &Arc<Mutex<PushService>>, node_id: &str, direction: &str, spacing_secs: u64) -> bool {
-    let Some(pending) = push.lock().await.begin_notify_within(node_id, direction, spacing_secs) else {
+    let Some(pending) = push.lock().await.begin_notify(node_id, direction) else {
         return false;
     };
     let sent = pending.send().await;
@@ -302,26 +282,6 @@ mod tests {
         assert!(service.begin_notify("node", "lsp_to_user").is_none());
         service.finish_notify("node", true);
         assert!(service.begin_notify("node", "lsp_to_user").is_none(), "cooldown now applies");
-    }
-
-    #[tokio::test]
-    async fn a_caller_with_its_own_spacing_may_push_again_inside_the_cooldown_but_not_inside_the_backoff() {
-        let dir = tempdir().unwrap();
-        let sender = FakeSender::new(true);
-        let push = service(sender.clone(), dir.path(), &["node"]);
-        assert!(notify_within(&push, "node", "lsp_splice_in", 120).await);
-        assert!(!notify_within(&push, "node", "lsp_splice_in", 120).await, "inside its own spacing");
-        push.lock().await.age_last_push("node", 130);
-        assert!(!push.lock().await.should_notify_within("node", PUSH_COOLDOWN_SECS), "other pushes still wait out the cooldown");
-        assert!(notify_within(&push, "node", "lsp_splice_in", 120).await);
-        assert_eq!(sender.sent().len(), 2);
-
-        // A send the provider rejected backs off for every caller.
-        let rejecting = FakeSender::new(false);
-        let push = service(rejecting.clone(), dir.path(), &["other"]);
-        assert!(!notify_within(&push, "other", "lsp_splice_in", 120).await);
-        assert!(!notify_within(&push, "other", "lsp_splice_in", 0).await);
-        assert_eq!(rejecting.sent().len(), 1);
     }
 
     #[tokio::test]

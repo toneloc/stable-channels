@@ -27,9 +27,7 @@ pub async fn queue_splice_in(State(state): State<AppState>, body: Bytes) -> Resp
         crate::revenue::now_secs(),
     )
     .await;
-    let manual_splice_made_at =
-        if ok { None } else { crate::queued_splice::manual_splice_refused(&state.db, &req.user_channel_id, &status) };
-    ok_response(QueueSpliceInResponse { ok, status, manual_splice_made_at: manual_splice_made_at.unwrap_or(0) })
+    ok_response(QueueSpliceInResponse { ok, status })
 }
 
 pub async fn list_queued_splices(State(state): State<AppState>, body: Bytes) -> Response {
@@ -71,18 +69,11 @@ pub async fn cancel_queued_splice(State(state): State<AppState>, body: Bytes) ->
         Ok(r) => r,
         Err(resp) => return resp,
     };
-    // A release of a splice made by hand touches that note only, whatever `force` says.
-    let (ok, status) = if req.manual_splice_made_at != 0 {
-        crate::queued_splice::release_manual_splice(&state.db, &req.user_channel_id, req.manual_splice_made_at)
-    } else {
-        crate::queued_splice::cancel(
-            &state.db,
-            state.ldk_server.as_ref() as &dyn LdkServerCalls,
-            &req.user_channel_id,
-            req.force,
-            crate::revenue::now_secs(),
-        )
-        .await
-    };
+    let (ok, status) = crate::queued_splice::cancel(
+        &state.db,
+        &req.user_channel_id,
+        req.force,
+        crate::revenue::now_secs(),
+    );
     ok_response(CancelQueuedSpliceResponse { ok, status })
 }

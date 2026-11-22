@@ -420,7 +420,6 @@ pub(crate) async fn dispatch_event(
                     btc_price,
                 )
                 .await;
-                crate::queued_splice::on_channel_ready(db, &e.user_channel_id, e.funding_txo.as_deref(), crate::revenue::now_secs());
             } else if e.state == ChannelState::Closed as i32 {
                 mgr.handle_channel_closed(
                     e.channel_id.clone(),
@@ -814,36 +813,6 @@ mod tests {
         stable_channels::audit::disable_test_capture();
         let recorded = events.iter().filter(|(name, _)| name == "CHANNEL_PENDING" || name == "CHANNEL_OPEN_FAILED").count();
         assert_eq!(recorded, NEVER_USABLE_RECORDS_PER_PEER as usize);
-    }
-
-    #[tokio::test]
-    async fn a_ready_event_on_an_outpoint_the_node_negotiated_for_a_queued_splice_locks_it() {
-        use crate::stable_manager::tests::{make_manager, FakeLdkServer, AUDIT_TEST_GUARD, COUNTERPARTY_HEX, USER_CHANNEL_ID_DECIMAL};
-        use ldk_server_client::ldk_server_grpc::events::{ChannelStateChanged, SpliceNegotiated};
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut mgr = make_manager();
-        let dir = tempfile::tempdir().unwrap();
-        let db = stable_channels::db::Database::open(dir.path()).unwrap();
-        let ldk = FakeLdkServer::new(vec![]);
-        stable_channels::audit::enable_test_capture();
-        db.queue_splice_in(USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 50_000, 100, 120, "the splice negotiation failed", None).unwrap();
-        let funding = format!("{}:1", "bb".repeat(32));
-        let negotiated = SpliceNegotiated { user_channel_id: USER_CHANNEL_ID_DECIMAL.into(), new_funding_txo: funding.clone(), ..Default::default() };
-        dispatch_event(Some(EventVariant::SpliceNegotiated(negotiated)), &mut mgr, &db, &ldk, 100_000.0).await;
-        assert!(db.load_queued_splice(USER_CHANNEL_ID_DECIMAL).unwrap().unwrap().pending_on_node);
-        let ready = ChannelStateChanged {
-            channel_id: "ab".repeat(32),
-            user_channel_id: USER_CHANNEL_ID_DECIMAL.into(),
-            counterparty_node_id: Some(COUNTERPARTY_HEX.to_string()),
-            state: ChannelState::Ready as i32,
-            funding_txo: Some(funding.clone()),
-            ..Default::default()
-        };
-        dispatch_event(Some(EventVariant::ChannelStateChanged(ready)), &mut mgr, &db, &ldk, 100_000.0).await;
-        stable_channels::audit::drain_test_capture();
-        stable_channels::audit::disable_test_capture();
-        let row = db.load_queued_splice(USER_CHANNEL_ID_DECIMAL).unwrap().unwrap();
-        assert_eq!((row.status.as_str(), row.funding_txo), ("locked", Some(funding)));
     }
 
     #[tokio::test]

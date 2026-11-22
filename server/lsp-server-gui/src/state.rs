@@ -688,11 +688,6 @@ pub struct QueuedRelease {
 	pub confirmed: bool,
 }
 
-/// Whether the call a queued splice has pending on the node may be released from here: one the node has not reported as signed, or a signed one that has stalled, which happens once its splice has had three hours to lock. A cancelled request whose call the node signed after all never stalls, so it is offered too. The daemon refuses to release a signed splice before those three hours, since it still locks once its transaction confirms.
-pub fn queued_call_releasable(row: &QueuedSpliceInfo) -> bool {
-	row.pending_on_node && (row.funding_txo.is_empty() || matches!(row.status.as_str(), "stalled" | "cancelled"))
-}
-
 impl QueuedRelease {
 	/// The confirmation for the call `row` has pending on the node, with its tick.
 	pub fn for_call(row: &QueuedSpliceInfo, confirmed: bool) -> Self {
@@ -705,22 +700,14 @@ impl QueuedRelease {
 		}
 	}
 
-	/// Whether `row` still has this confirmation's call pending on the node, and may still be released. A status change or a repeat push is still the same call.
+	/// Whether `row` still has this confirmation's call pending on the node. A status change or a repeat push is still the same call.
 	pub fn is_for(&self, row: &QueuedSpliceInfo) -> bool {
-		queued_call_releasable(row)
+		row.pending_on_node
 			&& row.user_channel_id == self.user_channel_id
 			&& row.created_at == self.created_at
 			&& row.last_attempt_at == self.last_attempt_at
 			&& row.funding_txo == self.funding_txo
 	}
-}
-
-/// An open release of a splice made by hand, offered in the Splice In dialog after the daemon refused a request for it. It belongs to the channel the request named and to that splice (`made_at`, as the daemon gave it), so the daemon releases nothing else, and nothing once another splice has been made by hand since.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct ManualRelease {
-	pub user_channel_id: String,
-	pub made_at: i64,
-	pub confirmed: bool,
 }
 
 /// Session-only UI state that must survive tab switches (filters, sorts, confirmations).
@@ -744,8 +731,6 @@ pub struct ViewState {
 	pub send_all_confirm: bool,
 	/// The queued splice-in whose Release confirmation is open, if any.
 	pub queued_release: Option<QueuedRelease>,
-	/// The splice made by hand whose release the Splice In dialog offers, if any.
-	pub manual_release: Option<ManualRelease>,
 	pub config_paste_text: String,
 	/// Payment type filter ("" = all).
 	pub payment_type: String,
@@ -798,7 +783,6 @@ impl Default for ViewState {
 			splice_out_confirm: false,
 			send_all_confirm: false,
 			queued_release: None,
-			manual_release: None,
 			config_paste_text: String::new(),
 			payment_type: String::new(),
 			revenue_window: RevenueWindow::default(),
