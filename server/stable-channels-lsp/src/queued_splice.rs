@@ -12,17 +12,20 @@
 //!
 //! A lock is attributed by what only the LSP's own splice produces. On the LSP's node LDK reports a
 //! negotiated splice only when the node contributed to it: a splice-in of its own, or a splice-out of
-//! its own. That is rust-lightning commit 41d9e711c ("Only emit Event::SpliceNegotiated when
-//! contributing"), in the 697a239 that LDK Server bd95e18 builds through ldk-node f375e4d: each emit
-//! in channelmanager.rs is under `splice_negotiated.has_local_contribution`, which counts the node's
-//! own inputs and outputs but never the shared funding input, and the shared output only for the
-//! side that started the splice (interactivetxs.rs); to a splice the phone starts, the node adds only
-//! a splice it had queued itself (`splice_init`). So a splice the phone makes alone is never reported
-//! here. The phone's own LDK is older and reports both sides' splices, so this holds on the LSP's
-//! node only, and an LDK Server bump must keep that commit. A splice the operator makes by hand, in
-//! or out, is refused while a request holds the channel and is noted otherwise, so a negotiation
-//! while a request holds the channel is the request's; a splice made straight on LDK Server, outside
-//! the daemon, is not checked. Every outpoint negotiated for a request is kept, and the request has locked once the
+//! its own. That is rust-lightning commit 41d9e711c, the 0.3 backport of 2334a2003 ("Only emit
+//! Event::SpliceNegotiated when contributing"), in the 697a239 that LDK Server bd95e18 builds through
+//! ldk-node f375e4d: each emit in channelmanager.rs is under `splice_negotiated.has_local_contribution`,
+//! which counts the node's own inputs and outputs but never the shared funding input, and the shared
+//! output only for the side that started the splice (interactivetxs.rs); to a splice the phone starts,
+//! the node adds only a splice it had queued itself (`splice_init`), or on a fee bump of it what it
+//! added before (`tx_init_rbf`). So a splice the phone makes alone is never reported here. The phone's
+//! own LDK is older and reports both sides' splices, so this holds on the LSP's node only, and an LDK
+//! Server bump must keep that change. A splice the operator makes by hand, in or out, is refused while
+//! a request holds the channel and is noted otherwise. The node may hold it behind the phone's own
+//! splice and run it once that one has locked, so its note keeps the outpoints the node negotiates
+//! while it is open, and no request is queued until the node reports one of them ready or the channel
+//! is on one, or the operator releases it. So a negotiation while a request holds the channel is the request's; a splice made
+//! straight on LDK Server, outside the daemon, is not checked. Every outpoint negotiated for a request is kept, and the request has locked once the
 //! channel is on one of them: a fee bump, or a splice-out the user added to the same transaction,
 //! does not hide it, and nothing has to be looked up. The node's ready event for such an outpoint locks the request too, even when a later
 //! splice has moved the channel on by the time the job looks. When no negotiation was seen (an event
@@ -299,9 +302,9 @@ pub(crate) async fn queue(
     if channel.counterparty_node_id != counterparty {
         return (false, format!("channel {key} is with {}, not {counterparty}", channel.counterparty_node_id));
     }
-    // A splice the operator made by hand is still on the channel until the funding moves past where it was made: a request now could not tell that splice's lock from its own. Once the channel moved past it, that splice locked or something else ended it; its note is cleared when this request is saved.
+    // A splice the operator made by hand is still to come until it has locked on an outpoint the node negotiated for it: a request now could not tell that splice's lock from its own. The node may hold it behind the phone's own splice, which moves the funding with no event here, so a move alone does not end it. Once it has locked, its note is cleared when this request is saved.
     let made_by_hand = match db.load_manual_splice(&key) {
-        Ok(Some(manual)) if channel_funding_txo(channel).as_deref() == Some(manual.channel_funding_txo.as_str()) => {
+        Ok(Some(manual)) if !manual.has_locked(channel_funding_txo(channel).as_deref()) => {
             return (false, manual_refusal(&manual));
         }
         Ok(Some(_)) => true,
@@ -437,6 +440,25 @@ pub(crate) async fn cancel(db: &Database, ldk: &dyn LdkServerCalls, user_channel
         Err(error) => {
             let message = format!("could not cancel the queued splice: {error}");
             db_failed("cancel_queued_splice", &key, error);
+            (false, message)
+        }
+    }
+}
+
+/// Release the channel's splice made by hand at `made_at` for the operator, who has checked that the node holds no splice for the channel, so a request may go out. Nothing else changes: no queued splice is cancelled or released, and a note a later press made stays.
+pub(crate) fn release_manual_splice(db: &Database, user_channel_id: &str, made_at: i64) -> (bool, String) {
+    let Some(key) = row_key(user_channel_id) else {
+        return (false, format!("{user_channel_id:?} is not a channel id"));
+    };
+    match db.clear_manual_splice_made_at(&key, made_at) {
+        Ok(true) => {
+            info!("[queued_splice] the operator released the splice by hand on {key} made at {made_at}");
+            (true, "released the splice made by hand on this channel; a new request may go out".into())
+        }
+        Ok(false) => (false, "nothing released: that splice made by hand has locked, or another one was made since".into()),
+        Err(error) => {
+            let message = format!("could not release the splice made by hand: {error}");
+            db_failed("clear_manual_splice_made_at", &key, error);
             (false, message)
         }
     }
@@ -1100,9 +1122,16 @@ fn released_by_a_failure_event(row: &QueuedSplice, now: i64) -> bool {
 /// Why a request is refused while a splice made by hand is still on the channel.
 fn manual_refusal(manual: &ManualSplice) -> String {
     format!(
-        "a splice made by hand on this channel at {} has not locked yet (the channel is still on {}); queue once the channel shows its new funding, or cancel with force once you have checked that the node holds no splice for it",
-        manual.made_at, manual.channel_funding_txo
+        "a splice made by hand on this channel at {} has not locked yet (the channel is on none of the outpoints the node negotiated for it); queue once it has, or release it once you have checked that LDK Server holds no splice for this channel",
+        manual.made_at
     )
+}
+
+/// When `status`, the answer [`queue`] gave for the channel, refused the request for a splice made by hand: when that splice was made, so the operator can be offered its release. None for any other answer, or once the note has changed.
+pub(crate) fn manual_splice_refused(db: &Database, user_channel_id: &str, status: &str) -> Option<i64> {
+    let key = row_key(user_channel_id)?;
+    let manual = db.load_manual_splice(&key).ok().flatten()?;
+    (status == manual_refusal(&manual)).then_some(manual.made_at)
 }
 
 /// Whether a splice-in call's error is the node's own answer. An internal error is the answer lost in transport, or the request never arriving: the node may hold the call.
@@ -1123,19 +1152,36 @@ fn released_for_good(row: &QueuedSplice) -> bool {
     row.status == "cancelled" && !row.pending_on_node && row.last_error.as_deref() != Some(NEGOTIATION_FAILED_ERROR)
 }
 
-/// The node negotiated a splice on the channel. On the LSP's node LDK reports a negotiation only for a splice the node contributed to (rust-lightning 41d9e711c; see the module doc), and a splice the operator makes by hand (Splice+ or Splice-) is refused while a request holds the channel, so it is the request's splice (or the replaced request's), with one exception: a splice the operator made by hand after the request was released, which left a note. Every row with a call pending records it, whatever its status, since a signed splice keeps the call through a later negotiation failure. A row with no call pending is armed with it: the node ran a call after all that a failure event, a refusal or a release had let go, or that it held until the phone came back, so the row's call is pending again and no second call goes out. A released row is not armed by a splice made by hand since.
+/// The node negotiated a splice on the channel. On the LSP's node LDK reports a negotiation only for a splice the node contributed to (rust-lightning 41d9e711c; see the module doc), and a splice the operator makes by hand (Splice+ or Splice-) is refused while a request holds the channel, so it is the request's splice (or the replaced request's), with one exception: a splice the operator made by hand after the request was released, which left a note. Every row with a call pending records it, whatever its status, since a signed splice keeps the call through a later negotiation failure. A row with no call pending is armed with it: the node ran a call after all that a failure event, a refusal or a release had let go, or that it held until the phone came back, so the row's call is pending again and no second call goes out. A released row is not armed by a splice made by hand since. A negotiation no row takes goes to the note of the splice made by hand, if there is one.
 pub(crate) fn on_splice_negotiated(db: &Database, user_channel_id: &str, funding_txo: &str, now: i64) {
     let Some(key) = row_key(user_channel_id) else { return };
-    let Some(row) = row_for_event(db, &key) else { return };
-    let (op, result) = if row.pending_on_node {
-        ("note_queued_splice_negotiated", db.note_queued_splice_negotiated(&key, row.request_id, funding_txo, now))
-    } else if row.status != "locked" && !made_by_hand_after_release(db, &row) {
-        ("arm_queued_splice_negotiated", db.arm_queued_splice_negotiated(&key, row.request_id, funding_txo, now))
-    } else {
-        return;
+    let row = match db.load_queued_splice(&key) {
+        Ok(row) => row,
+        Err(error) => {
+            audit_event("DB_READ_FAILED", json!({ "op": "load_queued_splice", "user_channel_id": key, "error": error.to_string() }));
+            return;
+        }
     };
+    let (op, result) = match &row {
+        Some(row) if row.pending_on_node => {
+            ("note_queued_splice_negotiated", db.note_queued_splice_negotiated(&key, row.request_id, funding_txo, now))
+        }
+        Some(row) if row.status != "locked" && !made_by_hand_after_release(db, row) => {
+            ("arm_queued_splice_negotiated", db.arm_queued_splice_negotiated(&key, row.request_id, funding_txo, now))
+        }
+        // No request takes it, so it is the splice made by hand, if one is noted: the note waits for the channel to lock on it.
+        _ => {
+            match db.note_manual_splice_negotiated(&key, funding_txo) {
+                Ok(true) => info!("[queued_splice] the splice by hand on {key} negotiated {funding_txo}"),
+                Ok(false) => {}
+                Err(error) => db_failed("note_manual_splice_negotiated", &key, error),
+            }
+            return;
+        }
+    };
+    let armed = !row.as_ref().is_some_and(|row| row.pending_on_node);
     match result {
-        Ok(Some(noted)) => audit("QUEUED_SPLICE_NEGOTIATED", &noted, &[("armed", json!(!row.pending_on_node))]),
+        Ok(Some(noted)) => audit("QUEUED_SPLICE_NEGOTIATED", &noted, &[("armed", json!(armed))]),
         Ok(None) => {}
         Err(error) => db_failed(op, &key, error),
     }
@@ -1146,12 +1192,18 @@ fn made_by_hand_after_release(db: &Database, row: &QueuedSplice) -> bool {
     row.status == "cancelled" && !holds_channel(row) && matches!(db.load_manual_splice(&row.user_channel_id), Ok(Some(_)))
 }
 
-/// The node reports the channel ready on `funding_txo`, which is how a splice locks. When that is an outpoint the node negotiated for the channel's request, the request's splice has locked, also when a later splice moves the channel on before the job's next look.
+/// The node reports the channel ready on `funding_txo`, which is how a splice locks. When that is an outpoint the node negotiated for the channel's request, the request's splice has locked, also when a later splice moves the channel on before the job's next look. When it is one the node negotiated for a splice made by hand, that splice has locked: its note says so, and stays until the next request is saved, so that request's checks still know a splice was made by hand.
 pub(crate) fn on_channel_ready(db: &Database, user_channel_id: &str, funding_txo: Option<&str>, now: i64) {
     let (Some(key), Some(txo)) = (row_key(user_channel_id), funding_txo) else { return };
-    let Some(row) = row_for_event(db, &key) else { return };
-    if row.status != "locked" && row.negotiated_txos.iter().any(|negotiated| negotiated == txo) {
-        record_lock(db, &row, txo, None, now);
+    if let Some(row) = row_for_event(db, &key) {
+        if row.status != "locked" && row.negotiated_txos.iter().any(|negotiated| negotiated == txo) {
+            record_lock(db, &row, txo, None, now);
+        }
+    }
+    match db.note_manual_splice_locked(&key, txo) {
+        Ok(true) => info!("[queued_splice] the splice by hand on {key} locked on {txo}"),
+        Ok(false) => {}
+        Err(error) => db_failed("note_manual_splice_locked", &key, error),
     }
 }
 
@@ -1205,7 +1257,7 @@ fn held_refusal(open: &QueuedSplice) -> String {
     )
 }
 
-/// Before the operator's manual Splice+ or Splice- call: note the channel's funding, so a queued request waits until the channel has moved past it. The check for a queued row that holds the channel and the note are one transaction, so a request saved while the channels were being listed is seen. Ok says whether an earlier note was replaced; an error is the reason the call must not go out.
+/// Before the operator's manual Splice+ or Splice- call: note it with the channel's funding, so a queued request waits until it has locked on an outpoint the node negotiated for it. The check for a queued row that holds the channel and the note are one transaction, so a request saved while the channels were being listed is seen. Ok says whether an earlier note was replaced; an error is the reason the call must not go out.
 pub(crate) async fn before_manual_splice(db: &Database, ldk: &dyn LdkServerCalls, user_channel_id: &str, now: i64) -> Result<bool, String> {
     let Some(key) = row_key(user_channel_id) else {
         return Err(format!("{user_channel_id:?} is not a channel id"));
@@ -1221,7 +1273,7 @@ pub(crate) async fn before_manual_splice(db: &Database, ldk: &dyn LdkServerCalls
     let funding = channel_funding_txo(channel).unwrap_or_default();
     match db.note_manual_splice_unless(&key, &funding, now, holds_channel) {
         Ok(ManualNoteOutcome::Noted { existed }) => {
-            info!("[queued_splice] a splice-in by hand on {key} noted on funding {funding} (replacing an earlier note: {existed})");
+            info!("[queued_splice] a splice by hand on {key} noted on funding {funding} (replacing an earlier note: {existed})");
             Ok(existed)
         }
         Ok(ManualNoteOutcome::Blocked(open)) => Err(held_refusal(&open)),
@@ -1229,11 +1281,11 @@ pub(crate) async fn before_manual_splice(db: &Database, ldk: &dyn LdkServerCalls
     }
 }
 
-/// The operator's manual Splice+ or Splice- call failed. The note is cleared only when the node's answer is its own and this press made the note: an answer lost in transport may leave the call on the node, and a refused second press says nothing about the earlier splice the note is for. Otherwise the note stays until the channel moves past it or the operator cancels with force.
+/// The operator's manual Splice+ or Splice- call failed. The note is cleared only when the node's answer is its own and this press made the note: an answer lost in transport may leave the call on the node, and a refused second press says nothing about the earlier splice the note is for. Otherwise the note stays until that splice locks or the operator releases it.
 pub(crate) fn after_manual_splice_failed(db: &Database, user_channel_id: &str, replaced_a_note: bool, error: &LdkServerError) {
     let Some(key) = row_key(user_channel_id) else { return };
     if replaced_a_note || !node_answered(error) {
-        info!("[queued_splice] the splice-in by hand on {key} failed ({error}); its note stays until the channel moves past it");
+        info!("[queued_splice] the splice by hand on {key} failed ({error}); its note stays until it locks or is released");
         return;
     }
     if let Err(error) = db.clear_manual_splice(&key) {
@@ -2960,8 +3012,12 @@ mod tests {
         assert!(ok);
         let dead = row(&db);
         assert!(open_row(&db, USER_CHANNEL_ID_DECIMAL, 102).unwrap().is_none(), "the manual route is open");
-        // The route notes the splice made by hand before its call.
+        // The route notes the splice made by hand before its call; its negotiation goes to the note, not to the dead request.
         assert_eq!(before_manual_splice(&db, &ldk, USER_CHANNEL_ID_DECIMAL, 102).await, Ok(false));
+        on_splice_negotiated(&db, USER_CHANNEL_ID_DECIMAL, &txo(TX_B, 1), 102);
+        assert_eq!(row(&db).negotiated_txos.len(), 0);
+        // It locks, and the node says so: the note still tells the next request a splice was made by hand since the release.
+        on_channel_ready(&db, USER_CHANNEL_ID_DECIMAL, Some(&txo(TX_B, 1)), 102);
         *ldk.channels.lock().unwrap() = vec![channel_with(true, TX_B, 1, LSP_SATS + AMOUNT_SATS)];
         wallet_funded_tx(&ldk, TX_B);
         stable_channels::audit::enable_test_capture();
@@ -2979,6 +3035,7 @@ mod tests {
         assert!(open_row(&db, USER_CHANNEL_ID_DECIMAL, 106).unwrap().is_none());
         *ldk.splice_in_error.lock().unwrap() = None;
         assert_eq!(before_manual_splice(&db, &ldk, USER_CHANNEL_ID_DECIMAL, 106).await, Ok(false));
+        on_splice_negotiated(&db, USER_CHANNEL_ID_DECIMAL, &txo(TX_C, 1), 106);
         *ldk.channels.lock().unwrap() = vec![channel_with(true, TX_C, 1, LSP_SATS + AMOUNT_SATS * 3)];
         wallet_funded_tx(&ldk, TX_C);
         stable_channels::audit::enable_test_capture();
@@ -2998,7 +3055,8 @@ mod tests {
         let (ok, status) = queue(&db, &ldk, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, AMOUNT_SATS, 101).await;
         assert!(!ok && status.contains("made by hand"), "{status}");
         assert!(db.load_queued_splice(USER_CHANNEL_ID_DECIMAL).unwrap().is_none());
-        // It locks: the channel moved on, so the request goes out, and that lock is nobody's in the queue.
+        // The node negotiates it, which no request takes, and it locks: the channel is on its outpoint, so the request goes out, and that lock is nobody's in the queue.
+        on_splice_negotiated(&db, USER_CHANNEL_ID_DECIMAL, &txo(TX_B, 1), 101);
         *ldk.channels.lock().unwrap() = vec![channel_with(true, TX_B, 1, LSP_SATS + AMOUNT_SATS)];
         wallet_funded_tx(&ldk, TX_B);
         stable_channels::audit::enable_test_capture();
@@ -3333,6 +3391,68 @@ mod tests {
         on_splice_negotiated(&db, USER_CHANNEL_ID_DECIMAL, &txo(TX_C, 1), 203);
         let released = row(&db);
         assert_eq!((released.status.as_str(), released.pending_on_node, released.negotiated_txos.len()), ("cancelled", false, 0));
+        assert_eq!(db.load_manual_splice(USER_CHANNEL_ID_DECIMAL).unwrap().map(|note| note.negotiated_txos), Some(vec![txo(TX_C, 1)]), "the note took it");
+    }
+
+    #[tokio::test]
+    async fn the_operators_release_of_a_splice_made_by_hand_frees_the_channel_and_touches_no_request() {
+        let _guard = guard();
+        let db = database();
+        let ldk = node(true);
+        let dir = tempfile::tempdir().unwrap();
+        let push = service(FakeSender::new(true), dir.path(), &[]);
+        // A splice made by hand the node never reports, and the phone's own splice moved the channel: the request waits.
+        assert_eq!(before_manual_splice(&db, &ldk, USER_CHANNEL_ID_DECIMAL, 100).await, Ok(false));
+        *ldk.channels.lock().unwrap() = vec![channel_sides(true, TX_B, 1, LSP_SATS, USER_SATS + 20_000)];
+        let (ok, status) = queue(&db, &ldk, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, AMOUNT_SATS, 101).await;
+        assert!(!ok, "{status}");
+        let made_at = manual_splice_refused(&db, USER_CHANNEL_ID_DECIMAL, &status).expect("refused for the splice made by hand");
+        // The operator checked LDK Server and releases it: the request goes out.
+        let (ok, status) = release_manual_splice(&db, USER_CHANNEL_ID_DECIMAL, made_at);
+        assert!(ok && status.contains("released"), "{status}");
+        let (ok, status) = release_manual_splice(&db, USER_CHANNEL_ID_DECIMAL, made_at);
+        assert!(!ok, "nothing left to release: {status}");
+        let (ok, status) = queue(&db, &ldk, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, AMOUNT_SATS, 102).await;
+        assert!(ok, "{status}");
+        // A release that arrives once a request holds the channel leaves its call pending.
+        pass(&db, &ldk, &push, 103).await;
+        assert!(!release_manual_splice(&db, USER_CHANNEL_ID_DECIMAL, made_at).0);
+        assert_eq!((row(&db).status.as_str(), row(&db).pending_on_node), ("splicing", true));
+    }
+
+    #[tokio::test]
+    async fn a_splice_made_by_hand_the_node_still_holds_is_not_taken_for_a_request_queued_after_the_phones_own_splice_moved_the_channel() {
+        let _guard = guard();
+        let db = database();
+        let ldk = node(true);
+        let dir = tempfile::tempdir().unwrap();
+        let push = service(FakeSender::new(true), dir.path(), &[]);
+        // The operator splices out by hand on funding A, and the node holds it behind the phone's own splice.
+        assert_eq!(before_manual_splice(&db, &ldk, USER_CHANNEL_ID_DECIMAL, 100).await, Ok(false));
+        // The phone's splice locks on B: the LSP's node reports no negotiation for it, only the ready event.
+        *ldk.channels.lock().unwrap() = vec![channel_sides(true, TX_B, 1, LSP_SATS, USER_SATS + 20_000)];
+        on_channel_ready(&db, USER_CHANNEL_ID_DECIMAL, Some(&txo(TX_B, 1)), 101);
+        let (ok, status) = queue(&db, &ldk, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, AMOUNT_SATS, 102).await;
+        assert!(!ok && status.contains("made by hand"), "the move was not the splice made by hand: {status}");
+        assert_eq!(manual_splice_refused(&db, USER_CHANNEL_ID_DECIMAL, &status), Some(100), "the operator is offered its release");
+        // A release names the press: one for another press releases nothing.
+        assert!(!release_manual_splice(&db, USER_CHANNEL_ID_DECIMAL, 99).0);
+        assert!(db.load_manual_splice(USER_CHANNEL_ID_DECIMAL).unwrap().is_some());
+        assert_eq!(manual_splice_refused(&db, USER_CHANNEL_ID_DECIMAL, "the on-chain wallet is short"), None);
+        assert!(db.load_queued_splice(USER_CHANNEL_ID_DECIMAL).unwrap().is_none());
+        // The node runs the held splice-out on C: no request takes its negotiation, and the node reports it locked.
+        on_splice_negotiated(&db, USER_CHANNEL_ID_DECIMAL, &txo(TX_C, 0), 103);
+        assert_eq!(db.load_manual_splice(USER_CHANNEL_ID_DECIMAL).unwrap().map(|note| note.negotiated_txos), Some(vec![txo(TX_C, 0)]));
+        on_channel_ready(&db, USER_CHANNEL_ID_DECIMAL, Some(&txo(TX_C, 0)), 104);
+        // A request goes out even after the phone's next splice moved the channel on again, and the note ends with it.
+        *ldk.channels.lock().unwrap() = vec![channel_sides(true, TX_A, 7, LSP_SATS - 30_000, USER_SATS + 40_000)];
+        let (ok, status) = queue(&db, &ldk, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, AMOUNT_SATS, 105).await;
+        assert!(ok, "{status}");
+        assert_eq!(manual_splice_refused(&db, USER_CHANNEL_ID_DECIMAL, &status), None);
+        assert!(db.load_manual_splice(USER_CHANNEL_ID_DECIMAL).unwrap().is_none());
+        pass(&db, &ldk, &push, 106).await;
+        assert_eq!((row(&db).status.as_str(), row(&db).pending_on_node, row(&db).negotiated_txos.len()), ("splicing", true, 0));
+        assert_eq!(ldk.splice_ins.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -3351,6 +3471,7 @@ mod tests {
         assert_eq!(before_manual_splice(&db, &ldk, USER_CHANNEL_ID_DECIMAL, 103).await, Ok(false));
         on_splice_negotiated(&db, USER_CHANNEL_ID_DECIMAL, &txo(TX_B, 0), 104);
         on_channel_ready(&db, USER_CHANNEL_ID_DECIMAL, Some(&txo(TX_B, 0)), 105);
+        assert_eq!(db.load_manual_splice(USER_CHANNEL_ID_DECIMAL).unwrap().and_then(|note| note.locked_txo), Some(txo(TX_B, 0)), "the note knows it locked");
         *ldk.channels.lock().unwrap() = vec![channel_with(true, TX_B, 0, LSP_SATS - 30_000)];
         pass(&db, &ldk, &push, 106).await;
         let cancelled = row(&db);

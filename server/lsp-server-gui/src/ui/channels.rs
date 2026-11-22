@@ -7,7 +7,9 @@ use sc_rest_client::sc_protos::stable::{QueuedSpliceInfo, StableChannelInfo};
 use crate::actions;
 use crate::format::{ago, format_sats, format_usd, unit_label};
 use crate::health::{has_stable_position, settle_threshold_usd, settlement, stable_drift, Drift, Settlement};
-use crate::state::{queued_call_releasable, AppCtx, ChannelSortColumn, ChannelStatusFilter, Dialog, Drawer, Op, QueuedRelease};
+use crate::state::{
+	queued_call_releasable, AppCtx, ChannelSortColumn, ChannelStatusFilter, Dialog, Drawer, ManualRelease, Op, QueuedRelease,
+};
 use crate::ui::widgets::{
 	Amount, Bubble, Card, Check, CopyBtn, Empty, Field, Gate, Hover, Icon, IdCopy, Kv, LiquidityBar, Modal, Peer, Pill,
 	RefreshBtn, SidePanel, SortTh, Spinner, Stat, TextInput, Th,
@@ -57,6 +59,7 @@ const HELP_SPLICE_IN: &str = "Add on-chain funds to an existing channel without 
 const HELP_QUEUED_SPLICES: &str = "Splice-ins queued for the phone. A call the node has not answered stays pending: no second call and no new request go out until it locks, the node drops it, or you release it. A signed splice can be released only once it has stalled, three hours after the signing.";
 const RELEASE_WARNING: &str = "Release clears the call the node has not answered, so a new request can go out. The node may still hold it and run it once the phone is back: then both can land, and the LSP's funds go into the channel twice, with a second on-chain fee. Release only if the node has restarted or dropped the call. The daemon first checks the channel for this call's splice, and marks the request locked if it is there. The tick covers this call only.";
 const SIGNED_RELEASE_WARNING: &str = "The node signed this call's splice. It locks once its transaction has confirmed and the phone is online, and a new request behind it would put the LSP's funds into the channel twice. Release it only if that transaction can never confirm, for example because its inputs were spent elsewhere. The tick covers this call only.";
+const MANUAL_RELEASE_WARNING: &str = "A splice made by hand on this channel has not locked. The node may still hold it and run it after the phone's own splice: a queued splice-in would then take its lock for its own and show a splice-in that never happened. Release it only if LDK Server holds no splice for this channel, for example after a restart. Nothing else is released, and the tick covers this splice only.";
 const HELP_SPLICE_OUT: &str = "Move funds from a channel to an on-chain address without fully closing the channel.";
 const HELP_ONCHAIN_ADDRESS: &str =
 	"The Bitcoin address for the current network. Verify it belongs to the intended recipient and network before sending.";
@@ -962,12 +965,16 @@ pub fn CloseChannelDialog() -> Element {
 pub fn SpliceInDialog() -> Element {
 	let ctx = use_context::<AppCtx>();
 	let mut forms = ctx.forms;
+	let mut view = ctx.view;
 	let form = forms.read().splice_in.clone();
 	let unit = unit_label(ctx.unit());
 	let pending = ctx.busy(Op::SpliceIn);
 	let preview = crate::format::amount_entry_preview(&form.splice_amount_sats, ctx.unit(), ctx.price_value());
+	// The release the daemon's last refusal offered, while the form still names that channel.
+	let release = view.read().manual_release.clone().filter(|release| release.user_channel_id == form.user_channel_id.trim());
 	let mut cancel = move || {
 		forms.write().splice_in = Default::default();
+		view.write().manual_release = None;
 		close_dialog(ctx);
 	};
 	rsx! {
@@ -988,6 +995,36 @@ pub fn SpliceInDialog() -> Element {
 			Field { label: "Counterparty", help: HELP_COUNTERPARTY, TextInput { value: form.counterparty_node_id.clone(), mono: true, oninput: move |v| forms.write().splice_in.counterparty_node_id = v } }
 			Field { label: "Amount ({unit})", help: HELP_SPLICE_IN, preview,
 				TextInput { value: form.splice_amount_sats.clone(), oninput: move |v| forms.write().splice_in.splice_amount_sats = v }
+			}
+			if let Some(release) = release {
+				ManualReleaseConfirm { release }
+			}
+		}
+	}
+}
+
+/// The release of a splice made by hand behind a tick, offered when the daemon refused a request for it.
+#[component]
+fn ManualReleaseConfirm(release: ManualRelease) -> Element {
+	let ctx = use_context::<AppCtx>();
+	let mut view = ctx.view;
+	let busy = ctx.busy(Op::CancelQueuedSplice);
+	let made = ago(release.made_at.max(0) as u64, *ctx.now.read());
+	let confirmed = release.confirmed;
+	rsx! {
+		div { class: "confirm-box",
+			div { class: "title", Icon { name: "alert", size: 16 } "Release the splice made by hand" }
+			span { class: "small muted", "Made {made}. {MANUAL_RELEASE_WARNING}" }
+			Check { checked: confirmed, danger: true, label: "I checked LDK Server: it holds no splice for this channel",
+				onchange: move |v| {
+					if let Some(open) = view.write().manual_release.as_mut() {
+						open.confirmed = v;
+					}
+				}
+			}
+			div { class: "row",
+				button { class: "btn ghost", onclick: move |_| view.write().manual_release = None, "Keep waiting" }
+				button { class: "btn danger solid", disabled: !confirmed || busy, onclick: move |_| actions::release_manual_splice(ctx), "Release" }
 			}
 		}
 	}
@@ -1269,6 +1306,54 @@ mod tests {
 		let tag_start = html[..at].rfind("<button")?;
 		let tag_end = at + html[at..].find('>')?;
 		Some(html[tag_start..tag_end].contains("disabled"))
+	}
+
+	#[component]
+	fn SpliceInHarness(channel: String, release: Option<ManualRelease>) -> Element {
+		use crate::state::{Connection, ConnectionStatus, Forms, Nav, Prefs};
+		let ctx = use_context_provider(|| {
+			let mut conn = Connection::new();
+			conn.status = ConnectionStatus::Connected;
+			AppCtx::new(conn, Forms::default(), Nav::default(), Prefs::default(), false)
+		});
+		use_hook(move || {
+			let mut forms = ctx.forms;
+			forms.write().splice_in.user_channel_id = channel.clone();
+			let mut view = ctx.view;
+			view.write().manual_release = release.clone();
+		});
+		rsx! { SpliceInDialog {} }
+	}
+
+	fn splice_in_html(channel: &str, release: Option<ManualRelease>) -> String {
+		let mut dom = VirtualDom::new_with_props(SpliceInHarness, SpliceInHarnessProps { channel: channel.into(), release });
+		dom.rebuild_in_place();
+		dioxus_ssr::render(&dom)
+	}
+
+	#[test]
+	fn a_refusal_for_a_splice_made_by_hand_offers_its_release_behind_a_tick_for_that_channel_only() {
+		let release = |confirmed| Some(ManualRelease { user_channel_id: "42".into(), made_at: 100, confirmed });
+		let html = splice_in_html("42", release(false));
+		assert!(html.contains("Release the splice made by hand"), "{html}");
+		assert_eq!(final_release_disabled(&html), Some(true), "not before the tick");
+		assert_eq!(final_release_disabled(&splice_in_html(" 42 ", release(true))), Some(false));
+		assert!(!splice_in_html("43", release(true)).contains("Release the splice made by hand"), "another channel's");
+		assert!(!splice_in_html("42", None).contains("Release the splice made by hand"));
+	}
+
+	#[test]
+	fn only_a_refusal_for_a_splice_made_by_hand_offers_a_release_and_the_release_names_that_splice() {
+		use sc_rest_client::sc_protos::stable::QueueSpliceInResponse;
+		let refused = QueueSpliceInResponse { ok: false, status: "made by hand".into(), manual_splice_made_at: 100 };
+		assert_eq!(
+			crate::actions::manual_release_offer("42", &refused),
+			Some(ManualRelease { user_channel_id: "42".into(), made_at: 100, confirmed: false })
+		);
+		assert_eq!(crate::actions::manual_release_offer("42", &QueueSpliceInResponse { manual_splice_made_at: 0, ..refused.clone() }), None);
+		assert_eq!(crate::actions::manual_release_offer("42", &QueueSpliceInResponse { ok: true, ..refused.clone() }), None);
+		let request = crate::actions::manual_release_request(&ManualRelease { user_channel_id: "42".into(), made_at: 100, confirmed: true });
+		assert_eq!((request.user_channel_id.as_str(), request.force, request.manual_splice_made_at), ("42", false, 100));
 	}
 
 	#[test]

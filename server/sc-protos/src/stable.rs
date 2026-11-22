@@ -333,6 +333,9 @@ pub struct QueueSpliceInResponse {
 	pub ok: bool,
 	#[prost(string, tag = "2")]
 	pub status: ::prost::alloc::string::String,
+	/// When the request was refused because a splice made by hand on the channel has not locked: when that splice was made (Unix seconds), so the operator can release it once they have checked the node. 0 otherwise, and from an older daemon.
+	#[prost(int64, tag = "3")]
+	pub manual_splice_made_at: i64,
 }
 
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -390,6 +393,9 @@ pub struct CancelQueuedSpliceRequest {
 	/// True when the operator has checked that the node holds no splice for the channel: the row's last call is no longer treated as pending, so a new request may go out.
 	#[prost(bool, tag = "2")]
 	pub force: bool,
+	/// When set, release only the channel's splice made by hand at this time (Unix seconds), as the daemon named it when it refused a request: the operator has checked that the node holds no splice for the channel. No queued splice is cancelled or released, and a note a later press made stays. `force` stays false then, so a daemon without this field only cancels plainly.
+	#[prost(int64, tag = "3")]
+	pub manual_splice_made_at: i64,
 }
 
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -446,8 +452,10 @@ mod tests {
 	fn queued_splice_messages_roundtrip() {
 		let request = QueueSpliceInRequest { user_channel_id: "42".into(), counterparty_node_id: "02ab".into(), amount_sats: 50_000 };
 		assert_eq!(QueueSpliceInRequest::decode(request.encode_to_vec().as_slice()).unwrap(), request);
-		let queued = QueueSpliceInResponse { ok: true, status: "queued".into() };
+		let queued = QueueSpliceInResponse { ok: true, status: "queued".into(), manual_splice_made_at: 0 };
 		assert_eq!(QueueSpliceInResponse::decode(queued.encode_to_vec().as_slice()).unwrap(), queued);
+		let held = QueueSpliceInResponse { ok: false, status: "made by hand".into(), manual_splice_made_at: 1_700_000_000 };
+		assert_eq!(QueueSpliceInResponse::decode(held.encode_to_vec().as_slice()).unwrap(), held);
 		let list = ListQueuedSplicesResponse {
 			splices: vec![QueuedSpliceInfo {
 				user_channel_id: "42".into(),
@@ -469,7 +477,7 @@ mod tests {
 		assert_eq!(decoded, list);
 		assert!(decoded.splices[0].pending_on_node);
 		assert_eq!(ListQueuedSplicesRequest::decode(ListQueuedSplicesRequest {}.encode_to_vec().as_slice()).unwrap(), ListQueuedSplicesRequest {});
-		let cancel = CancelQueuedSpliceRequest { user_channel_id: "42".into(), force: true };
+		let cancel = CancelQueuedSpliceRequest { user_channel_id: "42".into(), force: true, manual_splice_made_at: 1_700_000_000 };
 		assert_eq!(CancelQueuedSpliceRequest::decode(cancel.encode_to_vec().as_slice()).unwrap(), cancel);
 		let cancelled = CancelQueuedSpliceResponse { ok: false, status: "nothing to cancel".into() };
 		assert_eq!(CancelQueuedSpliceResponse::decode(cancelled.encode_to_vec().as_slice()).unwrap(), cancelled);

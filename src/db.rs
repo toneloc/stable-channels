@@ -457,12 +457,23 @@ impl QueuedSplice {
     }
 }
 
-/// A splice the operator made by hand (Splice+ or Splice-), noted so that a queued request for the channel waits until the channel has moved past the funding it was made on.
+/// A splice the operator made by hand (Splice+ or Splice-), noted so that a queued request for the channel waits until that splice has locked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManualSplice {
     pub user_channel_id: String,
     pub channel_funding_txo: String,
     pub made_at: i64,
+    /// Every outpoint the node negotiated on the channel since the note was made, oldest first: the splice made by hand, since no request holds the channel then. It has locked once the channel is on one of them; a move to anything else, such as the phone's own splice, which the LSP's node never reports, leaves it open, since the node may still hold it.
+    pub negotiated_txos: Vec<String>,
+    /// The one of them the node reported the channel ready on, once it has: the splice has locked, even if the channel has moved on since. The note stays until the next request is saved, so that request's checks still know a splice was made by hand.
+    pub locked_txo: Option<String>,
+}
+
+impl ManualSplice {
+    /// Whether the splice made by hand has locked: the node reported the channel ready on one of its outpoints, or the channel, on `channel_funding_txo`, is on one now.
+    pub fn has_locked(&self, channel_funding_txo: Option<&str>) -> bool {
+        self.locked_txo.is_some() || channel_funding_txo.is_some_and(|funding| self.negotiated_txos.iter().any(|txo| txo.as_str() == funding))
+    }
 }
 
 /// What noting a splice made by hand did.
@@ -484,7 +495,7 @@ pub enum QueueSpliceOutcome {
     PendingOnNode(QueuedSplice),
     /// The node's failure event released the channel's last call inside the backoff, and a signing can still revive it; nothing changed.
     Revivable(QueuedSplice),
-    /// A splice made by hand is noted on the funding the channel is on now; nothing changed.
+    /// A splice made by hand has not locked: the node reported none of its outpoints ready, and the channel is on none of them; nothing changed.
     ManualPending(ManualSplice),
 }
 
@@ -1067,16 +1078,21 @@ impl Database {
         let _ = conn.execute("ALTER TABLE queued_splices ADD COLUMN refusals INTEGER NOT NULL DEFAULT 0", []);
         let _ = conn.execute("ALTER TABLE queued_splices ADD COLUMN negotiated_txos TEXT", []);
 
-        // A splice-in the operator made by hand, with the funding the channel was on: a queued request
-        // for the channel waits until the channel has moved past it, so the hand-made splice is not
-        // taken for the request's lock. One note per channel.
+        // A splice the operator made by hand, with the funding the channel was on and the outpoints the
+        // node negotiated for it: a queued request for the channel waits until the channel is on one of
+        // those, so the hand-made splice is not taken for the request's lock. One note per channel.
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS manual_splices (
                 user_channel_id TEXT PRIMARY KEY,
                 channel_funding_txo TEXT NOT NULL,
-                made_at INTEGER NOT NULL
+                made_at INTEGER NOT NULL,
+                negotiated_txos TEXT,
+                locked_txo TEXT
             );",
         )?;
+        // Tables made before the columns; ignore the error if one is there already.
+        let _ = conn.execute("ALTER TABLE manual_splices ADD COLUMN negotiated_txos TEXT", []);
+        let _ = conn.execute("ALTER TABLE manual_splices ADD COLUMN locked_txo TEXT", []);
 
         // Append-only operator history. There is intentionally no pruning path.
         ledger::init_schema(&conn)?;
@@ -1344,8 +1360,9 @@ impl Database {
     /// call's signing can still revive the row. The check runs inside the transaction, so an event that lands while the
     /// caller is away from the table cannot slip a replacement past it.
     ///
-    /// With `channel_funding_txo`, the funding the caller saw the channel on, a splice made by hand and noted on that
-    /// funding refuses the request too, inside the same transaction, so a note made while the caller was away is seen.
+    /// A splice made by hand that has not locked refuses the request too (see [`ManualSplice::has_locked`], with
+    /// `channel_funding_txo`, the funding the caller saw the channel on). That runs inside the same transaction, so a
+    /// note made while the caller was away is seen.
     pub fn queue_splice_in(
         &self,
         user_channel_id: &str,
@@ -1375,12 +1392,10 @@ impl Database {
                 return Ok(QueueSpliceOutcome::Revivable(existing));
             }
         }
-        if let Some(funding) = channel_funding_txo {
-            if let Some(manual) = Self::manual_splice_on(&tx, user_channel_id)? {
-                if manual.channel_funding_txo == funding {
-                    tx.commit()?;
-                    return Ok(QueueSpliceOutcome::ManualPending(manual));
-                }
+        if let Some(manual) = Self::manual_splice_on(&tx, user_channel_id)? {
+            if !manual.has_locked(channel_funding_txo) {
+                tx.commit()?;
+                return Ok(QueueSpliceOutcome::ManualPending(manual));
             }
         }
         tx.execute(
@@ -1423,9 +1438,9 @@ impl Database {
         rows.collect()
     }
 
-    /// Notes a splice-in the operator made by hand on the channel, with the funding it was on, unless the channel's
+    /// Notes a splice the operator made by hand on the channel, with the funding it was on, unless the channel's
     /// queued row `holds_channel`; the check and the note are one transaction, so a request saved meanwhile is seen.
-    /// A later note replaces an earlier one, and says so.
+    /// A later note replaces an earlier one, outpoints included, and says so.
     pub fn note_manual_splice_unless(
         &self,
         user_channel_id: &str,
@@ -1441,7 +1456,7 @@ impl Database {
         }
         let existed = Self::manual_splice_on(&tx, user_channel_id)?.is_some();
         tx.execute(
-            "INSERT OR REPLACE INTO manual_splices (user_channel_id, channel_funding_txo, made_at) VALUES (?1, ?2, ?3)",
+            "INSERT OR REPLACE INTO manual_splices (user_channel_id, channel_funding_txo, made_at, negotiated_txos, locked_txo) VALUES (?1, ?2, ?3, NULL, NULL)",
             params![user_channel_id, channel_funding_txo, now],
         )?;
         tx.commit()?;
@@ -1450,11 +1465,34 @@ impl Database {
 
     fn manual_splice_on(conn: &Connection, user_channel_id: &str) -> SqliteResult<Option<ManualSplice>> {
         conn.query_row(
-            "SELECT user_channel_id, channel_funding_txo, made_at FROM manual_splices WHERE user_channel_id = ?1",
+            "SELECT user_channel_id, channel_funding_txo, made_at, negotiated_txos, locked_txo FROM manual_splices WHERE user_channel_id = ?1",
             params![user_channel_id],
-            |row| Ok(ManualSplice { user_channel_id: row.get(0)?, channel_funding_txo: row.get(1)?, made_at: row.get(2)? }),
+            |row| {
+                Ok(ManualSplice {
+                    user_channel_id: row.get(0)?,
+                    channel_funding_txo: row.get(1)?,
+                    made_at: row.get(2)?,
+                    negotiated_txos: row
+                        .get::<_, Option<String>>(3)?
+                        .map(|txos| txos.split_whitespace().map(str::to_string).collect())
+                        .unwrap_or_default(),
+                    locked_txo: row.get(4)?,
+                })
+            },
         )
         .optional()
+    }
+
+    /// Records an outpoint the node negotiated on the channel for its splice made by hand. Whether there was a note to take it.
+    pub fn note_manual_splice_negotiated(&self, user_channel_id: &str, funding_txo: &str) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        // The append APPEND_NEGOTIATED_TXO makes, with the outpoint as ?2.
+        Ok(conn.execute(
+            "UPDATE manual_splices SET negotiated_txos = CASE WHEN negotiated_txos IS NULL OR negotiated_txos = '' THEN ?2 \
+             WHEN instr(' ' || negotiated_txos || ' ', ' ' || ?2 || ' ') > 0 THEN negotiated_txos ELSE negotiated_txos || ' ' || ?2 END \
+             WHERE user_channel_id = ?1",
+            params![user_channel_id, funding_txo],
+        )? > 0)
     }
 
     /// The splice made by hand on the channel that the queue has not yet seen through, if any.
@@ -1463,7 +1501,22 @@ impl Database {
         Self::manual_splice_on(&conn, user_channel_id)
     }
 
-    /// Forgets the channel's hand-made splice: it locked, the node refused it, or the operator released it. Whether there was one.
+    /// Forgets the channel's hand-made splice made at `made_at`, which the operator released; a note a later press made stays. Whether a note was forgotten.
+    pub fn clear_manual_splice_made_at(&self, user_channel_id: &str, made_at: i64) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute("DELETE FROM manual_splices WHERE user_channel_id = ?1 AND made_at = ?2", params![user_channel_id, made_at])? > 0)
+    }
+
+    /// Records that the channel's hand-made splice has locked, when the node reported the channel ready on `funding_txo` and that is one of the outpoints it negotiated for it. The check and the write are one statement, so a note a later press made meanwhile, which starts with no outpoints, is left alone. Whether a note took it.
+    pub fn note_manual_splice_locked(&self, user_channel_id: &str, funding_txo: &str) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "UPDATE manual_splices SET locked_txo = ?2 WHERE user_channel_id = ?1 AND instr(' ' || negotiated_txos || ' ', ' ' || ?2 || ' ') > 0",
+            params![user_channel_id, funding_txo],
+        )? > 0)
+    }
+
+    /// Forgets the channel's hand-made splice: it locked, the node refused it, a request went out once the channel was on its outpoint, or the operator released it. Whether there was one.
     pub fn clear_manual_splice(&self, user_channel_id: &str) -> SqliteResult<bool> {
         let conn = self.conn.lock().unwrap();
         Ok(conn.execute("DELETE FROM manual_splices WHERE user_channel_id = ?1", params![user_channel_id])? > 0)
@@ -8998,18 +9051,31 @@ mod tests {
         assert_eq!(db.note_manual_splice_unless("7", "aa:0", 100, |_| true).unwrap(), ManualNoteOutcome::Noted { existed: false }, "no row, so nothing holds the channel");
         assert_eq!(
             db.load_manual_splice("7").unwrap(),
-            Some(ManualSplice { user_channel_id: "7".into(), channel_funding_txo: "aa:0".into(), made_at: 100 })
+            Some(ManualSplice { user_channel_id: "7".into(), channel_funding_txo: "aa:0".into(), made_at: 100, negotiated_txos: vec![], locked_txo: None })
         );
-        // A request on the funding the note was made on is refused inside the save; one on another funding, or with none seen, goes through.
-        assert!(matches!(db.queue_splice_in("7", "peer", 10_000, 101, 0, "", Some("aa:0")).unwrap(), QueueSpliceOutcome::ManualPending(ref note) if note.made_at == 100));
+        // Until the channel is on an outpoint the node negotiated for the note, a request is refused inside the save: on the funding the note was made on, on a move the node never reported (the phone's own splice), or with none seen.
+        for funding in [Some("aa:0"), Some("dd:0"), None] {
+            assert!(matches!(db.queue_splice_in("7", "peer", 10_000, 101, 0, "", funding).unwrap(), QueueSpliceOutcome::ManualPending(ref note) if note.made_at == 100), "{funding:?}");
+        }
         assert!(db.load_queued_splice("7").unwrap().is_none());
-        let QueueSpliceOutcome::Queued(row) = db.queue_splice_in("7", "peer", 10_000, 102, 0, "", Some("bb:0")).unwrap() else { panic!("not queued") };
+        assert!(db.note_manual_splice_negotiated("7", "bb:0").unwrap());
+        assert!(db.note_manual_splice_negotiated("7", "bb:1").unwrap());
+        assert!(db.note_manual_splice_negotiated("7", "bb:0").unwrap(), "a repeat is kept once");
+        assert!(!db.note_manual_splice_negotiated("9", "bb:0").unwrap(), "no note on that channel");
+        assert_eq!(db.load_manual_splice("7").unwrap().map(|note| note.negotiated_txos), Some(vec!["bb:0".to_string(), "bb:1".to_string()]));
+        assert!(matches!(db.queue_splice_in("7", "peer", 10_000, 101, 0, "", Some("dd:0")).unwrap(), QueueSpliceOutcome::ManualPending(_)));
+        // Once the node reports the channel ready on one of them, it has locked, even after the channel moved on again.
+        assert!(!db.note_manual_splice_locked("7", "dd:0").unwrap(), "not one of its outpoints");
+        assert!(!db.note_manual_splice_locked("7", "bb:10").unwrap(), "a whole outpoint, not a prefix");
+        assert!(db.note_manual_splice_locked("7", "bb:1").unwrap());
+        assert_eq!(db.load_manual_splice("7").unwrap().and_then(|note| note.locked_txo), Some("bb:1".into()));
+        let QueueSpliceOutcome::Queued(row) = db.queue_splice_in("7", "peer", 10_000, 102, 0, "", Some("dd:0")).unwrap() else { panic!("not queued") };
         // A later splice by hand replaces the note and says so, unless the channel's row holds the channel.
         assert_eq!(db.note_manual_splice_unless("7", "bb:1", 103, |held| held.request_id == row.request_id).unwrap(), ManualNoteOutcome::Blocked(row.clone()));
         assert_eq!(db.load_manual_splice("7").unwrap().map(|note| note.made_at), Some(100), "unchanged");
         assert_eq!(db.note_manual_splice_unless("7", "bb:1", 104, |_| false).unwrap(), ManualNoteOutcome::Noted { existed: true });
         assert_eq!(db.note_manual_splice_unless("8", "cc:0", 105, |_| false).unwrap(), ManualNoteOutcome::Noted { existed: false });
-        assert_eq!(db.load_manual_splice("7").unwrap().map(|note| (note.channel_funding_txo, note.made_at)), Some(("bb:1".into(), 104)));
+        assert_eq!(db.load_manual_splice("7").unwrap().map(|note| (note.channel_funding_txo, note.made_at, note.negotiated_txos, note.locked_txo)), Some(("bb:1".into(), 104, vec![], None)), "a new press starts with no outpoints and no lock");
         assert!(db.clear_manual_splice("7").unwrap());
         assert!(db.load_manual_splice("7").unwrap().is_none());
         assert!(db.load_manual_splice("8").unwrap().is_some());
@@ -9093,6 +9159,30 @@ mod tests {
         db.mark_queued_splice_splicing("7", row.request_id, Some("aa:0"), 500_000, 400_000, 101).unwrap();
         let noted = db.note_queued_splice_negotiated("7", row.request_id, "bb:1", 102).unwrap().unwrap();
         assert_eq!(noted.negotiated_txos, ["bb:1"]);
+    }
+
+    #[test]
+    fn a_manual_splices_table_from_before_the_negotiated_txos_column_gets_it() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let conn = Connection::open(dir.path().join(DB_FILENAME)).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE manual_splices (user_channel_id TEXT PRIMARY KEY, channel_funding_txo TEXT NOT NULL, made_at INTEGER NOT NULL);
+                INSERT INTO manual_splices (user_channel_id, channel_funding_txo, made_at) VALUES ('7', 'aa:0', 100);",
+            )
+            .unwrap();
+        }
+        let db = Database::open(dir.path()).unwrap();
+        assert_eq!(db.load_manual_splice("7").unwrap().map(|note| (note.made_at, note.negotiated_txos, note.locked_txo)), Some((100, vec![], None)));
+        assert!(db.note_manual_splice_negotiated("7", "bb:1").unwrap());
+        assert!(db.note_manual_splice_locked("7", "bb:1").unwrap());
+        assert_eq!(db.load_manual_splice("7").unwrap().map(|note| (note.negotiated_txos, note.locked_txo)), Some((vec!["bb:1".to_string()], Some("bb:1".into()))));
+        db.note_manual_splice_unless("7", "aa:0", 101, |_| false).unwrap();
+        assert!(!db.note_manual_splice_locked("7", "bb:1").unwrap(), "a new press's note has no outpoints yet");
+        // The operator's release names the press it is for.
+        assert!(!db.clear_manual_splice_made_at("7", 100).unwrap(), "an earlier press");
+        assert!(db.clear_manual_splice_made_at("7", 101).unwrap());
+        assert!(db.load_manual_splice("7").unwrap().is_none());
     }
 
     #[test]

@@ -715,6 +715,14 @@ impl QueuedRelease {
 	}
 }
 
+/// An open release of a splice made by hand, offered in the Splice In dialog after the daemon refused a request for it. It belongs to the channel the request named and to that splice (`made_at`, as the daemon gave it), so the daemon releases nothing else, and nothing once another splice has been made by hand since.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ManualRelease {
+	pub user_channel_id: String,
+	pub made_at: i64,
+	pub confirmed: bool,
+}
+
 /// Session-only UI state that must survive tab switches (filters, sorts, confirmations).
 #[derive(Clone, PartialEq)]
 pub struct ViewState {
@@ -736,6 +744,8 @@ pub struct ViewState {
 	pub send_all_confirm: bool,
 	/// The queued splice-in whose Release confirmation is open, if any.
 	pub queued_release: Option<QueuedRelease>,
+	/// The splice made by hand whose release the Splice In dialog offers, if any.
+	pub manual_release: Option<ManualRelease>,
 	pub config_paste_text: String,
 	/// Payment type filter ("" = all).
 	pub payment_type: String,
@@ -788,6 +798,7 @@ impl Default for ViewState {
 			splice_out_confirm: false,
 			send_all_confirm: false,
 			queued_release: None,
+			manual_release: None,
 			config_paste_text: String::new(),
 			payment_type: String::new(),
 			revenue_window: RevenueWindow::default(),
