@@ -5,6 +5,7 @@ use crate::constants::{
 use serde_json::Value;
 use std::error::Error;
 use std::fmt;
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -13,9 +14,15 @@ use ureq::Agent;
 const MIN_PLAUSIBLE_BTC_USD_PRICE: f64 = 1_000.0;
 const MAX_PLAUSIBLE_BTC_USD_PRICE: f64 = 10_000_000.0;
 const MIN_AGREEING_PRICE_FEEDS: usize = 3;
-const MAX_FEED_DEVIATION_RATIO: f64 = 0.05;
+const MAX_FEED_DEVIATION_RATIO: f64 = 0.01;
 const MAX_MEDIAN_MOVE_RATIO: f64 = 0.10;
 const MAX_TRUSTED_PRICE_AGE_SECS: u64 = 60;
+const MAX_CONFIRM_DEVIATION_RATIO: f64 = 0.005;
+const MAX_CANDIDATE_AGE_SECS: u64 = 120;
+const MOVE_WINDOW_SECS: u64 = 600;
+const STEADY_RUN_SECS: u64 = 300;
+const STEADY_RUN_BAND_RATIO: f64 = 0.01;
+const STEADY_RUN_MAX_GAP_SECS: u64 = 120;
 const MIN_AGREEING_PEG_FEEDS: usize = 3;
 const MIN_AGREEING_EXCHANGE_PEG_FEEDS: usize = 2;
 const MAX_USDT_PEG_DEVIATION_FROM_DOLLAR: f64 = 0.005;
@@ -27,28 +34,37 @@ const AGGREGATOR_PEG_FEED_NAMES: [&str; 3] = [
 ];
 
 lazy_static::lazy_static! {
-    static ref PRICE_CACHE: Arc<Mutex<PriceCache>> = Arc::new(Mutex::new(PriceCache {
-        price: 0.0,
-        // checked_sub avoids a Windows panic when uptime < the offset.
-        last_update: Instant::now()
-            .checked_sub(Duration::from_secs(10))
-            .unwrap_or_else(Instant::now),
-        updating: false,
-        quarantined: false,
-    }));
+    static ref PRICE_CACHE: Arc<Mutex<PriceCache>> =
+        Arc::new(Mutex::new(PriceCache::empty(Instant::now())));
 }
 
+/// The last accepted price, plus what decides whether the next consensus is accepted.
 pub struct PriceCache {
     price: f64,
     last_update: Instant,
     updating: bool,
-    quarantined: bool,
+    /// The latest consensus near the reference, which the next one must agree with to be used.
+    candidate: Option<(f64, Instant)>,
+    /// Prices accepted in the last `MOVE_WINDOW_SECS`, oldest first.
+    accepted: VecDeque<(Instant, f64)>,
+    /// Set while a big move pauses money pricing; it ends only through `admit`.
+    paused: bool,
+    /// Far answers that agree with each other while paused.
+    steady_run: Option<SteadyRun>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SteadyRun {
+    first_price: f64,
+    started: Instant,
+    last_at: Instant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PriceRefreshErrorKind {
     Transient,
     LargeMove,
+    Unconfirmed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,8 +88,11 @@ impl PriceRefreshError {
         }
     }
 
-    fn quarantines_price(&self) -> bool {
-        self.kind == PriceRefreshErrorKind::LargeMove
+    fn unconfirmed(message: impl Into<String>) -> Self {
+        Self {
+            kind: PriceRefreshErrorKind::Unconfirmed,
+            message: message.into(),
+        }
     }
 }
 
@@ -86,6 +105,118 @@ impl fmt::Display for PriceRefreshError {
 impl Error for PriceRefreshError {}
 
 impl PriceCache {
+    fn empty(now: Instant) -> Self {
+        Self {
+            price: 0.0,
+            // checked_sub avoids a Windows panic when uptime < the offset.
+            last_update: now.checked_sub(Duration::from_secs(10)).unwrap_or(now),
+            updating: false,
+            candidate: None,
+            accepted: VecDeque::new(),
+            paused: false,
+            steady_run: None,
+        }
+    }
+
+    fn seed(&mut self, price: f64, now: Instant) {
+        *self = Self::empty(now);
+        self.accept(price, now);
+    }
+
+    /// Admit one refresh's consensus; Ok only when the price is accepted for money.
+    fn admit(
+        &mut self,
+        consensus: Result<f64, PriceRefreshError>,
+        now: Instant,
+    ) -> Result<f64, PriceRefreshError> {
+        self.updating = false;
+        // A failed refresh says nothing new: a pause and its steady run stay as they are.
+        let price = consensus?;
+        let window = Duration::from_secs(MOVE_WINDOW_SECS);
+        while self.accepted.front().is_some_and(|(at, _)| now.saturating_duration_since(*at) > window) {
+            self.accepted.pop_front();
+        }
+        let largest_move = self.largest_move_from_reference(price);
+        if largest_move > MAX_MEDIAN_MOVE_RATIO {
+            if !self.paused {
+                self.paused = true;
+                eprintln!("BTC/USD moved {:.2}% from a recent price; money pricing paused until a new price holds steady", largest_move * 100.0);
+            }
+            let run = match self.steady_run {
+                Some(run)
+                    if now.saturating_duration_since(run.last_at) <= Duration::from_secs(STEADY_RUN_MAX_GAP_SECS)
+                        && relative_deviation(price, run.first_price) <= STEADY_RUN_BAND_RATIO =>
+                {
+                    SteadyRun { last_at: now, ..run }
+                },
+                _ => SteadyRun { first_price: price, started: now, last_at: now },
+            };
+            self.steady_run = Some(run);
+            if now.saturating_duration_since(run.started) >= Duration::from_secs(STEADY_RUN_SECS) {
+                // The new level held long enough to become the reference by itself.
+                self.accepted.clear();
+                self.accept(price, now);
+                return Ok(price);
+            }
+            return Err(PriceRefreshError::large_move(format!(
+                "BTC/USD moved {:.2}% from a price accepted in the last {} minutes, above the {:.2}% limit; waiting for a new price to hold steady",
+                largest_move * 100.0,
+                MOVE_WINDOW_SECS / 60,
+                MAX_MEDIAN_MOVE_RATIO * 100.0
+            )));
+        }
+        self.steady_run = None;
+        let confirmed = self.candidate.is_some_and(|(candidate, at)| {
+            now.saturating_duration_since(at) <= Duration::from_secs(MAX_CANDIDATE_AGE_SECS)
+                && relative_deviation(price, candidate) <= MAX_CONFIRM_DEVIATION_RATIO
+        });
+        if !confirmed {
+            self.candidate = Some((price, now));
+            return Err(PriceRefreshError::unconfirmed(
+                "BTC/USD consensus is waiting for the next refresh to confirm it",
+            ));
+        }
+        self.accept(price, now);
+        Ok(price)
+    }
+
+    /// The largest move from the prices accepted in the window, or from the last accepted price when none is that recent.
+    fn largest_move_from_reference(&self, price: f64) -> f64 {
+        let references: Vec<f64> = if self.accepted.is_empty() {
+            Some(self.price).filter(|last| is_plausible_price(*last)).into_iter().collect()
+        } else {
+            self.accepted.iter().map(|(_, accepted)| *accepted).collect()
+        };
+        references.into_iter().map(|reference| relative_deviation(price, reference)).fold(0.0, f64::max)
+    }
+
+    fn accept(&mut self, price: f64, now: Instant) {
+        self.price = price;
+        self.last_update = now;
+        self.accepted.push_back((now, price));
+        self.candidate = Some((price, now));
+        if self.paused {
+            self.paused = false;
+            eprintln!("BTC/USD price {price:.2} accepted; money pricing resumed");
+        }
+        self.steady_run = None;
+    }
+
+    /// The price money may use: none while paused, once the accepted price is over a minute old, or while a newer consensus away from it waits to be confirmed.
+    fn accounting_price(&self, now: Instant) -> Option<f64> {
+        let fresh = now.saturating_duration_since(self.last_update) <= Duration::from_secs(MAX_TRUSTED_PRICE_AGE_SECS);
+        // A newer answer away from the accepted price means the market may have moved, so the accepted price is stale.
+        let moved_away = self.candidate.is_some_and(|(candidate, at)| {
+            at > self.last_update && relative_deviation(candidate, self.price) > MAX_CONFIRM_DEVIATION_RATIO
+        });
+        (!self.paused && fresh && !moved_away && is_plausible_price(self.price)).then_some(self.price)
+    }
+
+    #[cfg(test)]
+    fn is_paused(&self) -> bool {
+        self.paused
+    }
+
     fn begin_refresh(&mut self) -> Result<(), String> {
         if self.updating {
             return Err("price refresh already in progress".to_string());
@@ -95,27 +226,6 @@ impl PriceCache {
         // Invalidating it here made every five-second network fetch briefly expose price=0.
         self.updating = true;
         Ok(())
-    }
-
-    fn finish_refresh(&mut self, result: &Result<f64, PriceRefreshError>) {
-        self.updating = false;
-        match result {
-            Ok(price) => {
-                self.price = *price;
-                self.last_update = Instant::now();
-                self.quarantined = false;
-            }
-            Err(error) if error.quarantines_price() => {
-                // Multiple feeds agreeing on a >10% move is evidence that the old anchor may no
-                // longer be safe for accounting. Keep it only as raw display history until a new
-                // consensus is admitted after the anchor expires.
-                self.quarantined = true;
-            }
-            Err(_) => {
-                // A transport failure or temporary lack of consensus says nothing new about the
-                // last successful price. Its age limit will expire it naturally.
-            }
-        }
     }
 }
 
@@ -133,24 +243,20 @@ pub fn get_cached_price_no_fetch() -> f64 {
 /// A stale value remains available through `get_cached_price_no_fetch` for display continuity.
 pub fn get_fresh_cached_price_no_fetch() -> f64 {
     let cache = PRICE_CACHE.lock().unwrap();
-    accounting_price_reference(cache.price, cache.last_update.elapsed(), cache.quarantined)
-        .unwrap_or(0.0)
+    cache.accounting_price(Instant::now()).unwrap_or(0.0)
 }
 
 /// Set the cached price directly — for regtest/integration testing.
 /// Bypasses all network price fetching.
 pub fn set_cached_price(price: f64) {
     let mut cache = PRICE_CACHE.lock().unwrap();
-    cache.price = price;
-    cache.last_update = Instant::now();
-    cache.updating = false;
-    cache.quarantined = false;
+    cache.seed(price, Instant::now());
 }
 
 /// Force one network refresh. Unlike `get_cached_price`, this never returns an old value as a
-/// successful refresh, so background publishers only publish newly validated consensus. A recent
-/// successful price remains readable during the fetch and after transient failures; a confirmed
-/// large-move conflict quarantines it for accounting until a new consensus is accepted.
+/// successful refresh: Ok only for a consensus the next refresh confirmed, or a new level that held
+/// steady after a big move paused pricing. A recent accepted price remains readable during the
+/// fetch and after transient failures; a big move pauses it for accounting.
 pub fn refresh_cached_price() -> Result<f64, String> {
     {
         let mut cache = PRICE_CACHE.lock().unwrap();
@@ -164,8 +270,7 @@ pub fn refresh_cached_price() -> Result<f64, String> {
     let result = get_latest_price_classified(&agent);
 
     let mut cache = PRICE_CACHE.lock().unwrap();
-    cache.finish_refresh(&result);
-    result.map_err(|error| error.to_string())
+    cache.admit(result, Instant::now()).map_err(|error| error.to_string())
 }
 
 // Get cached price or fetch a new one if needed. On refresh failure this compatibility API returns
@@ -237,21 +342,8 @@ fn relative_deviation(value: f64, reference: f64) -> f64 {
     (value - reference).abs() / reference
 }
 
-fn trusted_price_reference(price: f64, age: Duration) -> Option<f64> {
-    (is_plausible_price(price) && age <= Duration::from_secs(MAX_TRUSTED_PRICE_AGE_SECS))
-        .then_some(price)
-}
-
-fn accounting_price_reference(price: f64, age: Duration, quarantined: bool) -> Option<f64> {
-    (!quarantined)
-        .then(|| trusted_price_reference(price, age))
-        .flatten()
-}
-
-fn validate_price_consensus(
-    prices: &[(String, f64)],
-    last_trusted_price: Option<f64>,
-) -> Result<f64, PriceRefreshError> {
+/// One refresh's consensus; whether money may use it is the cache's decision (`PriceCache::admit`).
+fn validate_price_consensus(prices: &[(String, f64)]) -> Result<f64, PriceRefreshError> {
     let initial_median = calculate_median_price(prices)
         .ok_or_else(|| PriceRefreshError::transient("No plausible BTC/USD prices were returned"))?;
     let agreeing_prices: Vec<(String, f64)> = prices
@@ -273,15 +365,16 @@ fn validate_price_consensus(
     let median = calculate_median_price(&agreeing_prices).ok_or_else(|| {
         PriceRefreshError::transient("Agreeing feeds did not produce a valid median")
     })?;
-    if let Some(last_price) = last_trusted_price.filter(|price| is_plausible_price(*price)) {
-        let deviation = relative_deviation(median, last_price);
-        if deviation > MAX_MEDIAN_MOVE_RATIO {
-            return Err(PriceRefreshError::large_move(format!(
-                "BTC/USD median moved {:.2}% from the last trusted price, above the {:.2}% limit",
-                deviation * 100.0,
-                MAX_MEDIAN_MOVE_RATIO * 100.0
-            )));
-        }
+    // Dropping outliers moves the median, so count again around the price actually returned.
+    let plausible = prices.iter().filter(|(_, price)| is_plausible_price(*price)).count();
+    let supporters = prices
+        .iter()
+        .filter(|(_, price)| relative_deviation(*price, median) <= MAX_FEED_DEVIATION_RATIO)
+        .count();
+    if supporters < MIN_AGREEING_PRICE_FEEDS || supporters * 2 <= plausible {
+        return Err(PriceRefreshError::transient(format!(
+            "Price consensus needs at least {MIN_AGREEING_PRICE_FEEDS} feeds and more than half of the {plausible} answers near the median; got {supporters}"
+        )));
     }
 
     Ok(median)
@@ -448,21 +541,17 @@ pub fn fetch_prices(
     Ok(prices)
 }
 
+/// One refresh's consensus from the USD feeds, else the peg-normalized USDT feeds; the cache decides whether to use it.
 fn get_latest_price_classified(agent: &Agent) -> Result<f64, PriceRefreshError> {
-    let last_trusted_price = {
-        let cache = PRICE_CACHE.lock().unwrap();
-        trusted_price_reference(cache.price, cache.last_update.elapsed())
-    };
     let usd_prices = fetch_prices(agent, &get_default_price_feeds()).unwrap_or_default();
-    match validate_price_consensus(&usd_prices, last_trusted_price) {
+    match validate_price_consensus(&usd_prices) {
         Ok(price) => {
             println!(
-                "Accepted direct USD consensus from {} feeds",
+                "Direct USD consensus from {} feeds",
                 usd_prices.len()
             );
             return Ok(price);
         }
-        Err(error) if error.quarantines_price() => return Err(error),
         Err(error) => eprintln!("Direct USD consensus unavailable: {error}; trying USDT fallback"),
     }
 
@@ -490,16 +579,12 @@ fn get_latest_price_classified(agent: &Agent) -> Result<f64, PriceRefreshError> 
         .into_iter()
         .map(|(name, price)| (name, price * peg))
         .collect();
-    let price = validate_price_consensus(&normalized_prices, last_trusted_price)?;
+    let price = validate_price_consensus(&normalized_prices)?;
     println!(
-        "Accepted peg-normalized USDT consensus from {} feeds (USDT/USD={peg:.6})",
+        "Peg-normalized USDT consensus from {} feeds (USDT/USD={peg:.6})",
         normalized_prices.len()
     );
     Ok(price)
-}
-
-pub fn get_latest_price(agent: &Agent) -> Result<f64, Box<dyn Error>> {
-    get_latest_price_classified(agent).map_err(|error| -> Box<dyn Error> { Box::new(error) })
 }
 
 /// Fetch daily OHLC data from Kraken
@@ -699,13 +784,13 @@ mod tests {
     #[test]
     fn test_price_consensus_requires_three_agreeing_feeds() {
         let single = vec![("only".to_string(), 60_000.0)];
-        assert!(validate_price_consensus(&single, None).is_err());
+        assert!(validate_price_consensus(&single).is_err());
 
         let two = vec![
             ("low".to_string(), 40_000.0),
             ("nearby".to_string(), 40_100.0),
         ];
-        assert!(validate_price_consensus(&two, None).is_err());
+        assert!(validate_price_consensus(&two).is_err());
     }
 
     #[test]
@@ -716,42 +801,63 @@ mod tests {
             ("c".to_string(), 66_100.0),
             ("outlier".to_string(), 1_000_000.0),
         ];
-        assert_eq!(validate_price_consensus(&prices, None), Ok(66_000.0));
+        assert_eq!(validate_price_consensus(&prices), Ok(66_000.0));
     }
 
     #[test]
-    fn test_price_consensus_rejects_large_move_from_last_trusted_price() {
+    fn consensus_needs_three_feeds_near_the_final_price() {
+        // A stale quote and an outlier leave only two feeds near the recomputed median.
         let prices = vec![
-            ("a".to_string(), 65_900.0),
-            ("b".to_string(), 66_000.0),
-            ("c".to_string(), 66_100.0),
+            ("Gemini".to_string(), 55_000.0),
+            ("Coinbase".to_string(), 60_000.0),
+            ("Bitstamp".to_string(), 64_000.0),
+            ("Kraken".to_string(), 65_000.0),
         ];
-        let error = validate_price_consensus(&prices, Some(50_000.0)).unwrap_err();
-        assert_eq!(error.kind, PriceRefreshErrorKind::LargeMove);
-        assert_eq!(
-            validate_price_consensus(&prices, Some(65_000.0)),
-            Ok(66_000.0)
-        );
+        assert!(validate_price_consensus(&prices).is_err());
     }
 
     #[test]
-    fn large_move_anchor_expires_instead_of_wedging_forever() {
-        let prices = vec![
-            ("a".to_string(), 65_900.0),
-            ("b".to_string(), 66_000.0),
-            ("c".to_string(), 66_100.0),
-        ];
-        let recent =
-            trusted_price_reference(50_000.0, Duration::from_secs(MAX_TRUSTED_PRICE_AGE_SECS));
-        assert_eq!(recent, Some(50_000.0));
-        assert!(validate_price_consensus(&prices, recent).is_err());
+    fn consensus_needs_more_than_half_of_the_answers() {
+        let split: Vec<(String, f64)> = [60_000.0, 60_010.0, 60_020.0, 66_000.0, 66_010.0, 66_020.0]
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (format!("f{i}"), *p))
+            .collect();
+        assert!(validate_price_consensus(&split).is_err(), "three against three backs no price");
+        let majority: Vec<(String, f64)> = [60_000.0, 60_010.0, 60_020.0, 60_030.0, 66_000.0, 66_010.0]
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (format!("f{i}"), *p))
+            .collect();
+        assert_eq!(validate_price_consensus(&majority), Ok(60_015.0));
+    }
 
-        let expired = trusted_price_reference(
-            50_000.0,
-            Duration::from_secs(MAX_TRUSTED_PRICE_AGE_SECS + 1),
-        );
-        assert_eq!(expired, None);
-        assert_eq!(validate_price_consensus(&prices, expired), Ok(66_000.0));
+    #[test]
+    fn consensus_needs_a_majority_even_when_three_agree() {
+        let answers = |quotes: &[f64]| -> Vec<(String, f64)> {
+            quotes.iter().enumerate().map(|(i, p)| (format!("f{i}"), *p)).collect()
+        };
+        let half = answers(&[50_000.0, 60_000.0, 60_010.0, 60_020.0, 61_500.0, 70_000.0]);
+        assert!(validate_price_consensus(&half).is_err(), "three of six is only half");
+        let minority = answers(&[50_000.0, 59_000.0, 60_000.0, 60_010.0, 60_020.0, 61_500.0, 70_000.0]);
+        assert!(validate_price_consensus(&minority).is_err(), "three of seven is a minority");
+        let majority = answers(&[50_000.0, 60_000.0, 60_010.0, 60_020.0, 60_030.0, 61_500.0, 70_000.0]);
+        assert_eq!(validate_price_consensus(&majority), Ok(60_015.0));
+    }
+
+    #[test]
+    fn half_of_the_answers_cannot_pull_the_price_past_the_band() {
+        for wrong in [59_500.0, 59_000.0, 58_000.0, 57_000.0, 54_000.0] {
+            let prices = vec![
+                ("h1".to_string(), 60_000.0),
+                ("h2".to_string(), 60_000.0),
+                ("w1".to_string(), wrong),
+                ("w2".to_string(), wrong),
+            ];
+            if let Ok(price) = validate_price_consensus(&prices) {
+                assert!(relative_deviation(price, 60_000.0) <= 0.01, "{wrong} pulled the price to {price}");
+            }
+        }
     }
 
     #[test]
@@ -848,85 +954,189 @@ mod tests {
             ("c".to_string(), 64_054.0 * peg),
         ];
         assert!(
-            (validate_price_consensus(&prices, Some(64_000.0)).unwrap() - 63_999.936).abs() < 1.0
+            (validate_price_consensus(&prices).unwrap() - 63_999.936).abs() < 1.0
         );
+    }
+
+    fn at(t0: Instant, secs: u64) -> Instant {
+        t0 + Duration::from_secs(secs)
     }
 
     #[test]
     fn refresh_in_progress_keeps_recent_consensus_available() {
-        let mut cache = PriceCache {
-            price: 65_000.0,
-            last_update: Instant::now(),
-            updating: false,
-            quarantined: false,
-        };
+        let t0 = Instant::now();
+        let mut cache = PriceCache::empty(t0);
+        cache.seed(65_000.0, t0);
 
         cache.begin_refresh().unwrap();
 
         assert!(cache.updating);
-        assert_eq!(
-            accounting_price_reference(cache.price, cache.last_update.elapsed(), cache.quarantined,),
-            Some(65_000.0)
-        );
+        assert_eq!(cache.accounting_price(t0), Some(65_000.0));
     }
 
     #[test]
     fn transient_refresh_failure_keeps_recent_consensus_until_expiry() {
-        let mut cache = PriceCache {
-            price: 65_000.0,
-            last_update: Instant::now(),
-            updating: true,
-            quarantined: false,
-        };
-        let failure: Result<f64, PriceRefreshError> = Err(PriceRefreshError::transient(
-            "feeds temporarily unavailable",
-        ));
+        let t0 = Instant::now();
+        let mut cache = PriceCache::empty(t0);
+        cache.seed(65_000.0, t0);
+        cache.begin_refresh().unwrap();
 
-        cache.finish_refresh(&failure);
+        let failure = cache.admit(Err(PriceRefreshError::transient("feeds temporarily unavailable")), at(t0, 5));
 
+        assert!(failure.is_err());
         assert!(!cache.updating);
-        assert!(!cache.quarantined);
-        assert_eq!(
-            accounting_price_reference(cache.price, cache.last_update.elapsed(), cache.quarantined,),
-            Some(65_000.0)
-        );
-        assert_eq!(
-            accounting_price_reference(
-                cache.price,
-                Duration::from_secs(MAX_TRUSTED_PRICE_AGE_SECS + 1),
-                cache.quarantined,
-            ),
-            None
-        );
+        assert!(!cache.is_paused());
+        assert_eq!(cache.accounting_price(at(t0, 5)), Some(65_000.0));
+        assert_eq!(cache.accounting_price(at(t0, MAX_TRUSTED_PRICE_AGE_SECS + 1)), None);
     }
 
     #[test]
-    fn large_move_failure_quarantines_old_consensus_until_success() {
-        let mut cache = PriceCache {
-            price: 50_000.0,
-            last_update: Instant::now(),
-            updating: true,
-            quarantined: false,
-        };
-        let rejection: Result<f64, PriceRefreshError> = Err(PriceRefreshError::large_move(
-            "validated move exceeds limit",
-        ));
+    fn a_single_consensus_is_not_used_for_money() {
+        let t0 = Instant::now();
+        let mut cache = PriceCache::empty(t0);
+        assert_eq!(cache.admit(Ok(60_000.0), t0).unwrap_err().kind, PriceRefreshErrorKind::Unconfirmed);
+        assert_eq!(cache.accounting_price(t0), None);
+        assert_eq!(cache.admit(Ok(60_200.0), at(t0, 15)), Ok(60_200.0));
+        assert_eq!(cache.accounting_price(at(t0, 15)), Some(60_200.0));
+    }
 
-        cache.finish_refresh(&rejection);
+    #[test]
+    fn consecutive_answers_further_apart_than_half_a_percent_are_not_used() {
+        let t0 = Instant::now();
+        let mut cache = PriceCache::empty(t0);
+        assert!(cache.admit(Ok(60_000.0), t0).is_err());
+        assert_eq!(cache.admit(Ok(60_400.0), at(t0, 15)).unwrap_err().kind, PriceRefreshErrorKind::Unconfirmed);
+        assert_eq!(cache.admit(Ok(60_500.0), at(t0, 30)), Ok(60_500.0));
+    }
 
-        assert!(cache.quarantined);
-        assert_eq!(
-            accounting_price_reference(cache.price, cache.last_update.elapsed(), cache.quarantined,),
-            None
-        );
+    #[test]
+    fn a_candidate_older_than_two_minutes_does_not_confirm() {
+        let t0 = Instant::now();
+        let mut desktop = PriceCache::empty(t0);
+        assert!(desktop.admit(Ok(60_000.0), t0).is_err());
+        assert_eq!(desktop.admit(Ok(60_010.0), at(t0, 38)), Ok(60_010.0), "the desktop's cadence confirms");
+        let mut late = PriceCache::empty(t0);
+        assert!(late.admit(Ok(60_000.0), t0).is_err());
+        assert_eq!(late.admit(Ok(60_010.0), at(t0, 121)).unwrap_err().kind, PriceRefreshErrorKind::Unconfirmed);
+    }
 
-        cache.begin_refresh().unwrap();
-        cache.finish_refresh(&Ok(65_000.0));
-        assert!(!cache.quarantined);
-        assert_eq!(
-            accounting_price_reference(cache.price, cache.last_update.elapsed(), cache.quarantined,),
-            Some(65_000.0)
-        );
+    #[test]
+    fn a_price_the_market_has_moved_away_from_is_not_used_for_money() {
+        let t0 = Instant::now();
+        let mut cache = PriceCache::empty(t0);
+        cache.seed(60_000.0, t0);
+        // A fast 3% fall waits for confirmation, and the old price is not used meanwhile.
+        assert_eq!(cache.admit(Ok(58_200.0), at(t0, 15)).unwrap_err().kind, PriceRefreshErrorKind::Unconfirmed);
+        assert_eq!(cache.accounting_price(at(t0, 15)), None);
+        assert_eq!(cache.admit(Ok(58_250.0), at(t0, 30)), Ok(58_250.0));
+        assert_eq!(cache.accounting_price(at(t0, 30)), Some(58_250.0));
+        // One odd answer that the next contradicts leaves the accepted price in use again.
+        assert!(cache.admit(Ok(59_000.0), at(t0, 45)).is_err());
+        assert_eq!(cache.accounting_price(at(t0, 45)), None);
+        assert!(cache.admit(Ok(58_260.0), at(t0, 60)).is_err());
+        assert_eq!(cache.accounting_price(at(t0, 60)), Some(58_250.0));
+    }
+
+    #[test]
+    fn seeding_gives_a_price_that_the_next_close_answer_confirms() {
+        let t0 = Instant::now();
+        let mut cache = PriceCache::empty(t0);
+        cache.seed(60_000.0, t0);
+        assert_eq!(cache.accounting_price(t0), Some(60_000.0));
+        assert_eq!(cache.admit(Ok(60_100.0), at(t0, 15)), Ok(60_100.0));
+    }
+
+    #[test]
+    fn steps_under_ten_percent_are_caught_once_they_add_up() {
+        let t0 = Instant::now();
+        let mut cache = PriceCache::empty(t0);
+        cache.seed(60_000.0, t0);
+        // Steps minutes apart still add up within the 10-minute window.
+        assert!(cache.admit(Ok(65_000.0), at(t0, 150)).is_err());
+        assert_eq!(cache.admit(Ok(65_000.0), at(t0, 165)), Ok(65_000.0));
+        assert_eq!(cache.admit(Ok(70_000.0), at(t0, 300)).unwrap_err().kind, PriceRefreshErrorKind::LargeMove);
+        assert!(cache.is_paused());
+        assert_eq!(cache.accounting_price(at(t0, 300)), None);
+    }
+
+    #[test]
+    fn the_pause_does_not_expire_with_the_price_age() {
+        let t0 = Instant::now();
+        let mut cache = PriceCache::empty(t0);
+        cache.seed(50_000.0, t0);
+        assert_eq!(cache.admit(Ok(66_000.0), at(t0, 15)).unwrap_err().kind, PriceRefreshErrorKind::LargeMove);
+        // Long after the old price aged out and left the window, a far answer is still refused.
+        assert_eq!(cache.admit(Ok(66_000.0), at(t0, 900)).unwrap_err().kind, PriceRefreshErrorKind::LargeMove);
+        assert!(cache.is_paused());
+        assert_eq!(cache.accounting_price(at(t0, 900)), None);
+    }
+
+    #[test]
+    fn leaving_a_pause_takes_five_steady_minutes() {
+        let t0 = Instant::now();
+        let mut cache = PriceCache::empty(t0);
+        cache.seed(50_000.0, t0);
+        for secs in (15..315).step_by(15) {
+            assert_eq!(
+                cache.admit(Ok(66_000.0), at(t0, secs)).unwrap_err().kind,
+                PriceRefreshErrorKind::LargeMove,
+                "at {secs}s"
+            );
+        }
+        assert_eq!(cache.admit(Ok(66_100.0), at(t0, 315)), Ok(66_100.0));
+        assert!(!cache.is_paused());
+        assert_eq!(cache.accounting_price(at(t0, 315)), Some(66_100.0));
+        // The new level is the reference now.
+        assert_eq!(cache.admit(Ok(66_150.0), at(t0, 330)), Ok(66_150.0));
+    }
+
+    #[test]
+    fn a_jump_or_a_gap_restarts_the_steady_run() {
+        let t0 = Instant::now();
+        let mut jump = PriceCache::empty(t0);
+        jump.seed(50_000.0, t0);
+        for secs in (15..=150).step_by(15) {
+            assert!(jump.admit(Ok(66_000.0), at(t0, secs)).is_err());
+        }
+        // 1.5% off the run's first answer starts a new run at 165 s.
+        for secs in (165..465).step_by(15) {
+            assert!(jump.admit(Ok(67_000.0), at(t0, secs)).is_err(), "at {secs}s");
+        }
+        assert_eq!(jump.admit(Ok(67_000.0), at(t0, 465)), Ok(67_000.0));
+
+        let mut gap = PriceCache::empty(t0);
+        gap.seed(50_000.0, t0);
+        assert!(gap.admit(Ok(66_000.0), at(t0, 15)).is_err());
+        // 121 s without an answer starts a new run at 136 s.
+        for secs in (136..436).step_by(15) {
+            assert!(gap.admit(Ok(66_000.0), at(t0, secs)).is_err(), "at {secs}s");
+        }
+        assert_eq!(gap.admit(Ok(66_000.0), at(t0, 436)), Ok(66_000.0));
+    }
+
+    #[test]
+    fn a_price_back_near_the_old_one_ends_the_pause() {
+        let t0 = Instant::now();
+        let mut cache = PriceCache::empty(t0);
+        cache.seed(60_000.0, t0);
+        assert!(cache.admit(Ok(70_000.0), at(t0, 15)).is_err());
+        assert!(cache.is_paused());
+        // Far answers feed only the steady run, so the seeded price still confirms this one.
+        assert_eq!(cache.admit(Ok(60_100.0), at(t0, 30)), Ok(60_100.0));
+        assert!(!cache.is_paused());
+    }
+
+    #[test]
+    fn a_failed_refresh_leaves_a_pause_and_its_run_alone() {
+        let t0 = Instant::now();
+        let mut cache = PriceCache::empty(t0);
+        cache.seed(50_000.0, t0);
+        for secs in (15..315).step_by(15) {
+            let answer = if secs % 60 == 0 { Err(PriceRefreshError::transient("feeds down")) } else { Ok(66_000.0) };
+            assert!(cache.admit(answer, at(t0, secs)).is_err(), "at {secs}s");
+            assert!(cache.is_paused(), "at {secs}s");
+        }
+        assert_eq!(cache.admit(Ok(66_000.0), at(t0, 315)), Ok(66_000.0));
     }
 
     // Integration test (requires network)
@@ -1007,7 +1217,7 @@ mod tests {
     #[ignore]
     fn test_get_latest_price_returns_median() {
         let agent = Agent::new();
-        let result = get_latest_price(&agent);
+        let result = get_latest_price_classified(&agent);
         assert!(result.is_ok());
         let price = result.unwrap();
         assert!(price > 1000.0); // BTC should be > $1000

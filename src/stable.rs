@@ -524,8 +524,8 @@ pub fn apply_trade(sc: &mut StableChannel, new_expected_usd: f64, price: f64) ->
 }
 
 /// Get the current BTC/USD price, preferring cached value when available
-pub fn get_current_price(agent: &Agent) -> f64 {
-    // Accounting callers may only consume a fresh, non-quarantined cache value.
+pub fn get_current_price(_agent: &Agent) -> f64 {
+    // Accounting callers may only consume a fresh, unpaused cache value.
     let cached_price = get_fresh_cached_price_no_fetch();
 
     // Use the cached price if valid
@@ -533,7 +533,8 @@ pub fn get_current_price(agent: &Agent) -> f64 {
         return cached_price;
     }
 
-    crate::price_feeds::get_latest_price(agent).unwrap_or(0.0)
+    // A fetch goes through the cache's checks, so an unconfirmed price is never returned.
+    crate::price_feeds::refresh_cached_price().unwrap_or(0.0)
 }
 
 /// The sats effectively backing the stable position. If `backing_sats` was left unset (0) while a
