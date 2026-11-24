@@ -20,6 +20,6 @@ internal class AppUnlockTimer(private val now: () -> Long = SystemClock::elapsed
     fun awayTooLong(): Boolean = pausedAt?.let { now() - it > GRACE_MS } ?: false
 
     companion object {
-        const val GRACE_MS = 5000L
+        private const val GRACE_MS = 5000L
     }
 }
