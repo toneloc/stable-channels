@@ -869,16 +869,37 @@ final class SQLitePaymentDatabase: PaymentDatabase {
 
     // MARK: - Splice Events
 
-    func recordSpliceEvent(_ receipt: SpliceEventReceipt) -> Bool {
+    func recordSpliceEvent(_ receipt: SpliceEventReceipt, lspSplice: Bool) -> Bool {
         guard let db = openDB() else { return false }
         defer { sqlite3_close(db) }
         for sql in SpliceEventRecorder.createTableStatements
             where sqlite3_exec(db, sql, nil, nil, nil) != SQLITE_OK {
             return false
         }
+        var lspSpliceColumns = Set<String>()
+        var columns: OpaquePointer?
+        if sqlite3_prepare_v2(db, SpliceEventRecorder.lspSpliceColumnsSQL, -1, &columns, nil) == SQLITE_OK {
+            while sqlite3_step(columns) == SQLITE_ROW {
+                lspSpliceColumns.insert(columnText(columns, 0))
+            }
+        }
+        sqlite3_finalize(columns)
+        for sql in SpliceEventRecorder.addLspSpliceColumnsSQL(existing: lspSpliceColumns)
+            where sqlite3_exec(db, sql, nil, nil, nil) != SQLITE_OK {
+            return false
+        }
         guard sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else { return false }
-        let committed = runSpliceStatement(db, SpliceEventRecorder.insertEventSQL, receipt)
+        let lsp: Int64 = lspSplice ? 1 : 0
+        let now = Int64(Date().timeIntervalSince1970)
+        let inserted = SpliceEventRecorder.settleSpliceOutStatements.allSatisfy { runSpliceStatement(db, $0, receipt) }
+            && runSpliceStatement(db, SpliceEventRecorder.insertEventSQL, receipt, extra: [lsp])
+        // Only the event's first receipt can record the LSP's splice, as in the app.
+        let firstReceipt = inserted && sqlite3_changes(db) > 0
+        let committed = inserted
             && runSpliceStatement(db, SpliceEventRecorder.attachFundingSQL, receipt)
+            && (!firstReceipt
+                || runSpliceStatement(db, SpliceEventRecorder.recordLspSpliceSQL, receipt, extra: [lsp, now]))
+            && runSpliceStatement(db, SpliceEventRecorder.lockLspSpliceSQL, receipt, extra: [lsp, now])
             && SpliceEventRecorder.assignmentStatements.allSatisfy { runSpliceStatement(db, $0, nil) }
             && sqlite3_exec(db, "COMMIT", nil, nil, nil) == SQLITE_OK
         if !committed {
@@ -902,8 +923,13 @@ final class SQLitePaymentDatabase: PaymentDatabase {
         }
     }
 
-    /// Binds the receipt in SpliceEventRecorder parameter order (?1...?6).
-    private func runSpliceStatement(_ db: OpaquePointer?, _ sql: String, _ receipt: SpliceEventReceipt?) -> Bool {
+    /// Binds the receipt in SpliceEventRecorder parameter order (?1...?6 and ?9), then `extra` from ?7.
+    private func runSpliceStatement(
+        _ db: OpaquePointer?,
+        _ sql: String,
+        _ receipt: SpliceEventReceipt?,
+        extra: [Int64] = []
+    ) -> Bool {
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return false }
         defer { sqlite3_finalize(stmt) }
@@ -921,6 +947,14 @@ final class SQLitePaymentDatabase: PaymentDatabase {
                 sqlite3_bind_int64(stmt, 6, Int64(vout))
             } else {
                 sqlite3_bind_null(stmt, 6)
+            }
+            for (index, value) in extra.enumerated() {
+                sqlite3_bind_int64(stmt, Int32(7 + index), value)
+            }
+            if let value = receipt.channelValueSats {
+                sqlite3_bind_int64(stmt, 9, Int64(clamping: value))
+            } else {
+                sqlite3_bind_null(stmt, 9)
             }
         }
         return sqlite3_step(stmt) == SQLITE_DONE

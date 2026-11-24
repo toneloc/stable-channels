@@ -28,6 +28,7 @@ struct ContentView: View {
             case .loading, .onboarding, .syncing:
                 SyncingView(
                     isSyncComplete: appState.hasCompletedInitialSync,
+                    isRetrying: appState.isRetryingNodeStart,
                     onBalanced: {
                         withAnimation(.easeInOut(duration: 0.35)) {
                             appState.phase = .wallet
@@ -57,7 +58,7 @@ struct ContentView: View {
             }
 
             // Auth overlay: shown only when locked and biometric is enabled
-            if !appState.isUnlocked && biometricEnabled {
+            if appState.isAppLocked {
                 Color.black
                     .ignoresSafeArea()
                     .overlay {
@@ -93,7 +94,7 @@ struct ContentView: View {
                 Task { @MainActor in
                     // 200ms delay lets .inactive from app switcher/Face ID fully settle first
                     try? await Task.sleep(nanoseconds: 200_000_000)
-                    if !appState.isUnlocked && biometricEnabled && !authFailed && scenePhase == .active {
+                    if appState.isAppLocked && !authFailed && scenePhase == .active {
                         await runAuth()
                     }
                 }
@@ -185,6 +186,7 @@ struct ContentView: View {
 
 struct SyncingView: View {
     var isSyncComplete: Bool = false
+    var isRetrying: Bool = false
     var onBalanced: (() -> Void)?
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -237,7 +239,12 @@ struct SyncingView: View {
                             .font(.title3.weight(.bold))
                             .foregroundStyle(.primary)
 
-                        Text(String(localized: "status_syncing_moment", defaultValue: "This may take a moment"))
+                        Text(isRetrying
+                            ? String(
+                                localized: "status_network_retrying",
+                                defaultValue: "Network unstable. Retrying wallet sync..."
+                            )
+                            : String(localized: "status_syncing_moment", defaultValue: "This may take a moment"))
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }

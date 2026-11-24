@@ -2,12 +2,61 @@ package com.stablechannels.app.services
 
 import android.content.ContentValues
 import android.database.sqlite.SQLiteDatabase
+import androidx.core.database.getLongOrNull
 import androidx.core.database.sqlite.transaction
+import org.lightningdevkit.ldknode.ChannelDetails
 import org.lightningdevkit.ldknode.Event
 import org.lightningdevkit.ldknode.OutPoint
 
+/**
+ * A splice the LSP made into the channel: negotiated on it with no Move of the user's own claiming
+ * it. Kept apart from the user's history, so it never shows as something received.
+ */
+data class LspSplice(
+    val txid: String,
+    val userChannelId: String,
+    val channelId: String,
+    /** "negotiated" until the channel is ready on the new funding, then "locked". */
+    val status: String,
+    val valueBeforeSats: Long?,
+    val valueAfterSats: Long?,
+    val createdAt: Long,
+    val lockedAt: Long?,
+) {
+    /** What the LSP added, once the channel's value is known on both sides of the splice. */
+    val addedSats: Long?
+        get() =
+            if (valueBeforeSats != null && valueAfterSats != null) valueAfterSats - valueBeforeSats
+            else null
+}
+
+/** A channel's value as the node listed it, with the funding it was on at the time. */
+data class ChannelValue(val fundingTxid: String?, val valueSats: Long)
+
+/** The channel's value on the funding it is on now. */
+internal fun ChannelDetails.channelValue(): ChannelValue =
+    ChannelValue(fundingTxo?.txid, channelValueSats.toLong())
+
+/** The value of the one listed channel with these IDs, if there is one. */
+internal fun List<ChannelDetails>.channelValue(
+    userChannelId: String,
+    channelId: String,
+): ChannelValue? = singleOrNull {
+    it.userChannelId == userChannelId && it.channelId == channelId
+}
+    ?.channelValue()
+
+/** The funding outpoint of the channel with the LSP, if there is one. */
+internal fun List<ChannelDetails>.lspFunding(lspPubkey: String): OutPoint? = firstOrNull {
+    it.counterpartyNodeId == lspPubkey
+}
+    ?.fundingTxo
+
 /** Durable operation identity and event receipt, shared by the foreground and push service. */
 object SpliceEventRecorder {
+    /** A negotiated LSP splice older than this no longer holds the books repair back. */
+    const val LSP_SPLICE_PENDING_MAX_AGE_SECS = 24 * 60 * 60L
+
     internal fun createTables(db: SQLiteDatabase) {
         db.execSQL(
             """
@@ -29,6 +78,21 @@ object SpliceEventRecorder {
                 txid TEXT,
                 vout INTEGER,
                 payment_row_id INTEGER
+            )
+        """
+        )
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS lsp_splices (
+                txid TEXT PRIMARY KEY,
+                user_channel_id TEXT NOT NULL,
+                channel_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                value_before_sats INTEGER,
+                value_after_sats INTEGER,
+                created_at INTEGER NOT NULL,
+                locked_at INTEGER,
+                move_row_id INTEGER
             )
         """
         )
@@ -58,10 +122,25 @@ object SpliceEventRecorder {
     /**
      * Returns false for other event types; true means the event is committed and safe to
      * acknowledge. Unmatched events are kept but never reassigned to a later operation.
+     *
+     * A negotiation no operation claims is recorded as the LSP's splice, and the ready event on its
+     * funding locks it. With [lspSplice] the caller expects the LSP's splice (the LSP pushed for it
+     * and nothing of the user's is in flight), so a Move still waiting for its transaction is not
+     * given this one; a replay of the user's own negotiation is still recognised by its
+     * transaction. A splice-out waiting for its transaction is the one exception: the negotiation
+     * names no size, so the ready event settles it by the channel's (see [settleWaitingSpliceOut]).
+     * [channelValue] lists the channel as the node shows it now and [channelValueSeen] as it was
+     * last listed before this event; the value before the splice comes from whichever still shows
+     * another funding, the value after from the live listing on the new one, so the LSP's amount is
+     * known.
      */
     fun record(
         service: DatabaseService,
         event: Event,
+        lspSplice: Boolean = false,
+        channelValue: (String, String) -> ChannelValue? = { _, _ -> null },
+        channelValueSeen: (String, String) -> ChannelValue? = { _, _ -> null },
+        nowEpochSecs: Long = System.currentTimeMillis() / 1000,
         fundingForReady: (Event.ChannelReady) -> OutPoint?,
     ): Boolean {
         val kind: String
@@ -86,6 +165,8 @@ object SpliceEventRecorder {
             else -> return false
         }
         val db = service.writableDatabase
+        var lspChange: LspSplice? = null
+        var movedTo: Long? = null
         db.transaction {
             // Deduplicate from the event itself, never a changing live snapshot, so an
             // outpoint-less legacy ready replay cannot capture a newer operation.
@@ -101,7 +182,32 @@ object SpliceEventRecorder {
                     it.moveToFirst()
                 }
             if (!seen) {
-                val rowId = findOperation(db, kind, userChannelId, channelId, funding?.txid)
+                val valueAfter = funding?.let { newFunding ->
+                    channelValue(userChannelId, channelId)
+                        ?.takeIf { it.fundingTxid == newFunding.txid }
+                        ?.valueSats
+                }
+                val settled =
+                    if (kind == "ready" && funding != null)
+                        settleWaitingSpliceOut(
+                            db,
+                            userChannelId,
+                            channelId,
+                            funding.txid,
+                            valueAfter,
+                        )
+                    else null
+                val rowId =
+                    if (settled != null) settled.moveRowId
+                    else
+                        findOperation(
+                            db,
+                            kind,
+                            userChannelId,
+                            channelId,
+                            funding?.txid,
+                            matchPending = !lspSplice,
+                        )
                 insertOrThrow(
                     "splice_events",
                     null,
@@ -113,6 +219,49 @@ object SpliceEventRecorder {
                         put("payment_row_id", rowId)
                     },
                 )
+                if (kind == "negotiated" && rowId == null && funding != null) {
+                    // Nothing of the user's claims the splice, so it is the LSP's.
+                    insertWithOnConflict(
+                        "lsp_splices",
+                        null,
+                        ContentValues().apply {
+                            put("txid", funding.txid)
+                            put("user_channel_id", userChannelId)
+                            put("channel_id", channelId)
+                            put("status", "negotiated")
+                            put(
+                                "value_before_sats",
+                                valueBefore(
+                                    channelValue(userChannelId, channelId),
+                                    channelValueSeen(userChannelId, channelId),
+                                    funding.txid,
+                                ),
+                            )
+                            put("created_at", nowEpochSecs)
+                            if (lspSplice) {
+                                put(
+                                    "move_row_id",
+                                    waitingSpliceOut(db, userChannelId, channelId, funding.txid),
+                                )
+                            }
+                        },
+                        SQLiteDatabase.CONFLICT_IGNORE,
+                    )
+                    lspChange = lspSplice(this, funding.txid)
+                }
+                val moveRowId = settled?.moveRowId
+                if (moveRowId != null && funding != null) {
+                    // The channel shrank, so the splice was the user's splice-out, not the LSP's.
+                    delete("lsp_splices", "txid = ?", arrayOf(funding.txid))
+                    update(
+                        "splice_events",
+                        ContentValues().apply { put("payment_row_id", moveRowId) },
+                        "event_type = 'negotiated' AND user_channel_id = ? AND channel_id = ? " +
+                            "AND txid = ? AND payment_row_id IS NULL",
+                        arrayOf(userChannelId, channelId, funding.txid),
+                    )
+                    movedTo = moveRowId
+                }
             }
             if (funding != null) {
                 update(
@@ -125,17 +274,190 @@ object SpliceEventRecorder {
                     arrayOf(key),
                 )
             }
+            if (kind == "ready" && funding != null) {
+                val locked =
+                    update(
+                        "lsp_splices",
+                        ContentValues().apply {
+                            put("status", "locked")
+                            put(
+                                "value_after_sats",
+                                channelValue(userChannelId, channelId)
+                                    ?.takeIf { it.fundingTxid == funding.txid }
+                                    ?.valueSats,
+                            )
+                            put("locked_at", nowEpochSecs)
+                        },
+                        "txid = ? AND status = 'negotiated'",
+                        arrayOf(funding.txid),
+                    )
+                if (locked == 1) lspChange = lspSplice(this, funding.txid)
+            }
             recoverAssignments(service)
+        }
+        movedTo?.let { rowId ->
+            AuditService.log(
+                "LSP_SPLICE_WAS_SPLICE_OUT",
+                mapOf(
+                    "channel_id" to channelId,
+                    "user_channel_id" to userChannelId,
+                    "txid" to funding?.txid,
+                    "payment_row_id" to rowId,
+                ),
+            )
+        }
+        lspChange?.let { splice ->
+            AuditService.log(
+                if (splice.status == "locked") "LSP_SPLICE_LOCKED" else "LSP_SPLICE_NEGOTIATED",
+                mapOf(
+                    "channel_id" to splice.channelId,
+                    "user_channel_id" to splice.userChannelId,
+                    "txid" to splice.txid,
+                    "value_before_sats" to splice.valueBeforeSats,
+                    "value_after_sats" to splice.valueAfterSats,
+                    "added_sats" to splice.addedSats,
+                ),
+            )
         }
         return true
     }
 
+    /**
+     * The channel's value before the splice on [newTxid]. A 0-conf splice can lock before the app
+     * handles its negotiation, so a listing counts only while it shows another funding: the live
+     * one first, else the last one seen before the event. Null when neither does, rather than the
+     * new size as the old.
+     */
+    internal fun valueBefore(live: ChannelValue?, seen: ChannelValue?, newTxid: String): Long? =
+        listOf(live, seen).firstNotNullOfOrNull { value ->
+            value?.takeIf { it.fundingTxid != newTxid }?.valueSats
+        }
+
+    /** The LSP splice on [txid], if one was recorded. */
+    fun lspSplice(service: DatabaseService, txid: String): LspSplice? =
+        lspSplice(service.readableDatabase, txid)
+
+    private fun lspSplice(db: SQLiteDatabase, txid: String): LspSplice? =
+        db.rawQuery(
+                """
+            SELECT txid, user_channel_id, channel_id, status, value_before_sats, value_after_sats,
+                   created_at, locked_at
+            FROM lsp_splices WHERE txid = ?
+        """,
+                arrayOf(txid),
+            )
+            .use { c ->
+                if (!c.moveToFirst()) null
+                else
+                    LspSplice(
+                        txid = c.getString(0),
+                        userChannelId = c.getString(1),
+                        channelId = c.getString(2),
+                        status = c.getString(3),
+                        valueBeforeSats = c.getLongOrNull(4),
+                        valueAfterSats = c.getLongOrNull(5),
+                        createdAt = c.getLong(6),
+                        lockedAt = c.getLongOrNull(7),
+                    )
+            }
+
+    /**
+     * Whether the LSP negotiated a splice in the last [maxAgeSecs] that has not locked: the channel
+     * is changing under the books, which must not be repaired against it meanwhile.
+     */
+    fun hasPendingLspSplice(
+        service: DatabaseService,
+        nowEpochSecs: Long,
+        maxAgeSecs: Long = LSP_SPLICE_PENDING_MAX_AGE_SECS,
+    ): Boolean =
+        service.readableDatabase
+            .rawQuery(
+                "SELECT 1 FROM lsp_splices WHERE status = 'negotiated' AND created_at > ? LIMIT 1",
+                arrayOf((nowEpochSecs - maxAgeSecs).toString()),
+            )
+            .use { it.moveToFirst() }
+
+    /** How the ready event settled a splice recorded as the LSP's while a splice-out waited. */
+    private data class Settled(
+        /** The splice-out's row when the splice was its own; null when it was the LSP's. */
+        val moveRowId: Long?
+    )
+
+    /**
+     * The one Move waiting for its transaction on the channel, when it is a splice-out. A splice
+     * negotiated inside the window of the LSP's push could be either, since the negotiation names
+     * no size: the LSP's splice-in only adds to the channel, and a splice-out takes from it. Null
+     * for a splice-in (which the LSP's splice is never given), or when none or several wait.
+     */
+    private fun waitingSpliceOut(
+        db: SQLiteDatabase,
+        userChannelId: String,
+        channelId: String,
+        txid: String,
+    ): Long? =
+        db.rawQuery(
+                """
+            SELECT p.id, p.payment_type FROM payments p JOIN splice_operations s ON s.payment_row_id = p.id
+            WHERE p.status = 'pending' AND p.txid IS NULL
+              AND s.user_channel_id = ? AND s.channel_id = ?
+              AND (s.previous_funding_txid IS NULL OR s.previous_funding_txid != ?)
+            LIMIT 2
+        """,
+                arrayOf(userChannelId, channelId, txid),
+            )
+            .use { c -> buildList { while (c.moveToNext()) add(c.getLong(0) to c.getString(1)) } }
+            .singleOrNull()
+            ?.takeIf { it.second == "splice_out" }
+            ?.first
+
+    /**
+     * Settles a splice on [txid] that was recorded as the LSP's while a splice-out waited for its
+     * transaction ([waitingSpliceOut]), now that the channel is ready on it: it was the splice-out
+     * when the channel shrank and the splice-out is still waiting, else the LSP's. Null when no
+     * such splice is open on the channel, so the ready event is matched as any other.
+     */
+    private fun settleWaitingSpliceOut(
+        db: SQLiteDatabase,
+        userChannelId: String,
+        channelId: String,
+        txid: String,
+        valueAfter: Long?,
+    ): Settled? {
+        val (moveRowId, valueBefore) =
+            db.rawQuery(
+                    """
+                SELECT move_row_id, value_before_sats FROM lsp_splices
+                WHERE txid = ? AND user_channel_id = ? AND channel_id = ?
+                  AND status = 'negotiated' AND move_row_id IS NOT NULL
+            """,
+                    arrayOf(txid, userChannelId, channelId),
+                )
+                .use { c ->
+                    if (!c.moveToFirst()) return null
+                    c.getLong(0) to c.getLongOrNull(1)
+                }
+        val shrank = valueBefore != null && valueAfter != null && valueAfter < valueBefore
+        val waiting =
+            db.rawQuery(
+                    "SELECT 1 FROM payments WHERE id = ? AND payment_type = 'splice_out' " +
+                        "AND status = 'pending' AND txid IS NULL",
+                    arrayOf(moveRowId.toString()),
+                )
+                .use { it.moveToFirst() }
+        return Settled(moveRowId.takeIf { shrank && waiting })
+    }
+
+    /**
+     * With [matchPending] false, or for an LSP splice already recorded, only an operation already
+     * carrying the transaction is found: a Move still waiting for its own is not given the LSP's.
+     */
     private fun findOperation(
         db: SQLiteDatabase,
         kind: String,
         userChannelId: String,
         channelId: String,
         txid: String?,
+        matchPending: Boolean = true,
     ): Long? {
         // Exact txid matches also recognize terminal replays, without reviving their rows.
         val exact =
@@ -152,6 +474,7 @@ object SpliceEventRecorder {
                     buildList { while (c.moveToNext()) add(c.getLong(0)) }
                 }
         if (exact.isNotEmpty()) return exact.singleOrNull()
+        if (!matchPending || txid != null && lspSplice(db, txid) != null) return null
 
         // LDK keeps the channel ID across a splice, so a ready event must also prove funding
         // changed from the saved outpoint, or an initial channel-ready replay would look like a

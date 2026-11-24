@@ -7,8 +7,12 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.google.firebase.messaging.FirebaseMessaging
 import com.stablechannels.app.models.*
+import com.stablechannels.app.push.CpuHold
 import com.stablechannels.app.push.FCMService
+import com.stablechannels.app.push.LspSpliceExpectation
+import com.stablechannels.app.push.LspSpliceHoldBridge
 import com.stablechannels.app.push.StabilityProcessingService
+import com.stablechannels.app.push.lspSpliceLocked
 import com.stablechannels.app.services.*
 import com.stablechannels.app.services.CloseTxidResolver
 import com.stablechannels.app.services.fees.FeeRateService
@@ -84,6 +88,14 @@ class AppState(private val context: Context) : ViewModel() {
         }
 
         /**
+         * Whether Move can splice into a channel: it must be ready, with its funding confirmed. A
+         * zero-conf channel is ready before its funding reaches the chain, and a splice of it could
+         * then never be broadcast (#467).
+         */
+        fun isMoveTarget(isChannelReady: Boolean, confirmations: UInt?): Boolean =
+            isChannelReady && (confirmations ?: 0u) > 0u
+
+        /**
          * Set to true right before launching an in-app activity that backgrounds the app (e.g. the
          * log share sheet). [MainActivity] honors this only for a short grace window (see
          * `SHARE_SUPPRESS_WINDOW_MS`): if the app resumes within that window the node stop/restart
@@ -94,9 +106,9 @@ class AppState(private val context: Context) : ViewModel() {
          */
         @Volatile var suppressNextBackgroundCycle = false
 
-        // Covers ordinary quick app-switches without keeping an unserviced cached Android
-        // process in control of the node for longer than the common return window.
-        private const val QUICK_SWITCH_GRACE_MS = 10_000L
+        // The LSP's job waits up to 60 s for the channel and sends splice_init a few seconds
+        // after its push; the lock follows within seconds.
+        private const val LSP_SPLICE_HOLD_MS = 60_000L
 
         data class ChannelState(
             val hasReady: Boolean,
@@ -626,6 +638,20 @@ class AppState(private val context: Context) : ViewModel() {
     // it triggers doesn't tear down and resync the LDK node.
     @Volatile var isPickingMedia = false
 
+    /**
+     * Until when the node is held for an LSP splice-in the LSP announced by push (#473); 0 when it
+     * is not. The app gets no LDK event before splice_init, so the push is its only warning.
+     */
+    @Volatile private var lspSpliceHoldUntilMs = 0L
+
+    /** The LSP channel's funding txid when the hold began, so only its splice locking ends it. */
+    @Volatile private var lspSpliceFundingBeforeTxid: String? = null
+    private val isHoldingForLspSplice: Boolean
+        get() = lspSpliceHoldUntilMs > System.currentTimeMillis()
+
+    /** Keeps the phone from suspending while it holds the node for the LSP's splice. */
+    private val lspSpliceCpuHold by lazy { CpuHold(context, "stablechannels:lsp-splice") }
+
     private val _errorMessage = MutableStateFlow("")
     val errorMessage: StateFlow<String> = _errorMessage
 
@@ -770,6 +796,11 @@ class AppState(private val context: Context) : ViewModel() {
         )
     val hasReadyChannel: StateFlow<Boolean>
         get() = _hasReadyChannel
+
+    /** A ready channel with confirmed funding, which Move can splice into ([isMoveTarget]). */
+    private val _canMoveToChannel = MutableStateFlow(false)
+    val canMoveToChannel: StateFlow<Boolean>
+        get() = _canMoveToChannel
 
     private val _pendingSweepBalanceSats = MutableStateFlow(0L)
     val pendingSweepBalanceSats: StateFlow<Long>
@@ -1439,6 +1470,11 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     fun stop() {
+        LspSpliceHoldBridge.holder = null
+        lspSpliceHoldUntilMs = 0L
+        lspSpliceCpuHold.release()
+        // A push in the seconds after this would otherwise be left to an app with no node.
+        FCMService.clearHeartbeat(context)
         cancelBackgroundStop()
         stabilityJob?.cancel()
         heartbeatJob?.cancel()
@@ -1462,35 +1498,98 @@ class AppState(private val context: Context) : ViewModel() {
 
     fun stopNodeForBackground() {
         isInBackground = true
-        val negotiatingSplice = isNegotiatingSplice
-        if (!isWaitingForPayment && !isPickingMedia && !negotiatingSplice) {
+        val plan =
+            backgroundStopPlan(
+                isWaitingForPayment = isWaitingForPayment,
+                isPickingMedia = isPickingMedia,
+                negotiatingSplice = isNegotiatingSplice,
+                holdingForLspSplice = isHoldingForLspSplice,
+            )
+        val reason = plan.foregroundServiceReason
+        if (reason == null) {
             // Defer the stop so a quick app-switch reconnects instantly instead of forcing a
             // full LDK restart + chain resync on every return. If the user stays away past the
             // window, the deferred stop below runs and the node is torn down as normal.
             Log.d("AppState", "Scheduling node stop after quick-switch grace period")
-            launchBackgroundStop(delayMs = QUICK_SWITCH_GRACE_MS)
+            launchBackgroundStop(delayMs = plan.delayMs)
             return
         }
 
-        // A payment wait, an open in-app picker, or a negotiating splice all route through the
-        // existing bounded 60s grace path rather than skipping the stop outright — so a stuck-true
-        // isPickingMedia
-        // (e.g. launch() threw, or the composition was disposed) degrades to "stop after 60s"
-        // instead of "never stop the node again".
-        Log.d("AppState", "Scheduling node stop after 60s grace period")
+        // A payment wait, an open in-app picker, a negotiating splice, or an LSP splice the push
+        // announced all route through the existing bounded 60s grace path rather than skipping
+        // the stop outright — so a stuck-true isPickingMedia (e.g. launch() threw, or the
+        // composition was disposed) degrades to "stop after 60s" instead of "never stop the node
+        // again".
+        Log.d("AppState", "Scheduling node stop after 60s grace period ($reason)")
         backgroundStopJob?.cancel()
 
         // Start Foreground Service to keep CPU and network active
         try {
-            val reason =
-                if (negotiatingSplice) LdkBackgroundService.REASON_SPLICE
-                else LdkBackgroundService.REASON_PAYMENT
             LdkBackgroundService.start(context, reason)
         } catch (e: Exception) {
             Log.e("AppState", "Failed to start LdkBackgroundService", e)
         }
 
-        launchBackgroundStop(delayMs = 60000L)
+        launchBackgroundStop(delayMs = plan.delayMs)
+    }
+
+    /**
+     * The LSP is about to splice funds into the channel and needs this node online for the whole
+     * negotiation. Keep it for [LSP_SPLICE_HOLD_MS]: in the background, replace the quick-switch
+     * stop with the long grace behind the foreground service; in the foreground, remember the hold
+     * so a background switch inside the window keeps the node too. Runs on the main thread like the
+     * other background hooks, since the push arrives on a Firebase thread.
+     */
+    fun holdNodeForLspSplice() {
+        viewModelScope.launch {
+            // The push may land while a background stop is already letting go of the node.
+            if (LspSpliceHoldBridge.holder == null || !nodeService.isRunning) {
+                FCMService.flagPendingPayment(context)
+                return@launch
+            }
+            lspSpliceFundingBeforeTxid = lspChannelFundingTxid()
+            lspSpliceHoldUntilMs = System.currentTimeMillis() + LSP_SPLICE_HOLD_MS
+            lspSpliceCpuHold.hold(LSP_SPLICE_HOLD_MS)
+            AuditService.log(
+                "LSP_SPLICE_HOLD",
+                mapOf("in_background" to isInBackground, "hold_ms" to LSP_SPLICE_HOLD_MS),
+            )
+            if (isInBackground) {
+                backgroundStopJob?.cancel()
+                try {
+                    LdkBackgroundService.start(context, LdkBackgroundService.REASON_LSP_SPLICE)
+                } catch (e: Exception) {
+                    Log.e("AppState", "Failed to start LdkBackgroundService", e)
+                }
+                launchBackgroundStop(delayMs = LSP_SPLICE_HOLD_MS)
+            }
+            withContext(Dispatchers.IO) { ensureLSPConnected() }
+        }
+    }
+
+    private fun lspChannelFundingTxid(): String? {
+        val lspPubkey = LspPreferencesManager.getLspPubkey(context)
+        return nodeService.node?.listChannels()?.lspFunding(lspPubkey)?.txid
+    }
+
+    /**
+     * The splice locked, so the node is no longer needed for it. In the background, the stop is
+     * brought forward to the quick-switch grace unless something else still holds the node for the
+     * long one.
+     */
+    private fun releaseLspSpliceHold(reason: String) {
+        if (lspSpliceHoldUntilMs == 0L) return
+        // Node events arrive on the IO thread; the stop job is only ever replaced on main, like
+        // the hold and the background hooks do, or two writers could leave a stop untracked.
+        viewModelScope.launch {
+            if (lspSpliceHoldUntilMs == 0L) return@launch
+            lspSpliceHoldUntilMs = 0L
+            lspSpliceCpuHold.release()
+            AuditService.log("LSP_SPLICE_HOLD_RELEASED", mapOf("reason" to reason))
+            if (isInBackground && !isWaitingForPayment && !isPickingMedia && !isNegotiatingSplice) {
+                launchBackgroundStop(delayMs = QUICK_SWITCH_GRACE_MS)
+            }
+        }
     }
 
     private fun launchBackgroundStop(delayMs: Long = 0L) {
@@ -1544,13 +1643,23 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     private fun performBackgroundStop() {
+        // A stop job that outlived a return to the foreground must not take the node down.
+        if (!isInBackground) return
+        // Unregister before anything else, so a push landing during the stop is flagged for the
+        // next start instead of asking an app that is letting go of its node to hold it.
+        LspSpliceHoldBridge.holder = null
         try {
             LdkBackgroundService.stop(context)
         } catch (e: Exception) {
             Log.e("AppState", "Failed to stop LdkBackgroundService", e)
         }
+        lspSpliceHoldUntilMs = 0L
+        lspSpliceCpuHold.release()
         heartbeatJob?.cancel()
         heartbeatJob = null
+        // Without this a push in the seconds after the stop would be left to an app that no
+        // longer owns the node.
+        FCMService.clearHeartbeat(context)
         stabilityJob?.cancel()
         stabilityJob = null
         pendingDepositJob?.cancel()
@@ -2160,7 +2269,18 @@ class AppState(private val context: Context) : ViewModel() {
                 nodeService.refreshChannels()
                 val db =
                     databaseService ?: throw IllegalStateException("Splice history unavailable")
-                SpliceEventRecorder.record(db, event) { ready ->
+                // As at its negotiation, the LSP's splice locking within the window of its push is
+                // not given to a Move the app lost track of.
+                SpliceEventRecorder.record(
+                    db,
+                    event,
+                    lspSplice =
+                        LspSpliceExpectation.expectsLspSplice(
+                            context,
+                            moveInFlight = pendingSplice != null,
+                        ),
+                    channelValue = ::liveChannelValue,
+                ) { ready ->
                     nodeService.channels
                         .singleOrNull {
                             it.userChannelId == ready.userChannelId &&
@@ -2180,6 +2300,16 @@ class AppState(private val context: Context) : ViewModel() {
                 // durably attached, never a funding fallback.
                 resumePendingSpliceConfirmation()
                 AuditService.log("CHANNEL_READY", mapOf("channel_id" to event.channelId))
+                // Another channel opening or a replayed event leaves the LSP channel's funding as
+                // it was. The user's own Move moves it too, to a txid the app recorded as its own.
+                if (
+                    isHoldingForLspSplice &&
+                        lspSpliceLocked(lspSpliceFundingBeforeTxid, lspChannelFundingTxid()) {
+                            db.paymentExistsForTxid(it)
+                        }
+                ) {
+                    releaseLspSpliceHold("locked")
+                }
             }
             is Event.PaymentReceived -> {
                 handlePaymentReceived(
@@ -2245,7 +2375,25 @@ class AppState(private val context: Context) : ViewModel() {
             is Event.SpliceNegotiated -> {
                 val db =
                     databaseService ?: throw IllegalStateException("Splice history unavailable")
-                SpliceEventRecorder.record(db, event) { null }
+                // A 0-conf splice may have locked already, so the value before it is the last
+                // listing that still showed the old funding.
+                val seen = liveChannelValue(event.userChannelId, event.channelId)
+                nodeService.refreshChannels()
+                // With no Move of its own in flight, a splice negotiated within the window of the
+                // LSP's push is the LSP's; a Move the app lost track of is not given it.
+                SpliceEventRecorder.record(
+                    db,
+                    event,
+                    lspSplice =
+                        LspSpliceExpectation.expectsLspSplice(
+                            context,
+                            moveInFlight = pendingSplice != null,
+                        ),
+                    channelValue = ::liveChannelValue,
+                    channelValueSeen = { _, _ -> seen },
+                ) {
+                    null
+                }
                 handleSplicePending(
                     event.channelId,
                     event.userChannelId,
@@ -2253,6 +2401,9 @@ class AppState(private val context: Context) : ViewModel() {
                 )
             }
             is Event.SpliceNegotiationFailed -> {
+                // The hold is not released here: the event names no funding, so it may be the
+                // user's own Move failing, with the LSP's splice still to come. The hold ends at
+                // the lock or after LSP_SPLICE_HOLD_MS.
                 // Snapshot to local vals: spliceTxid/pendingSplice/spliceGeneration can all be
                 // mutated concurrently by the IO-thread confirmation monitor or by a brand-new
                 // splice starting, so re-reading them after the async check below would be a
@@ -2278,63 +2429,23 @@ class AppState(private val context: Context) : ViewModel() {
                     // later attempt), so verify against esplora rather than assuming: if the tx
                     // was never broadcast, this is a real failure, and it must be handled or the
                     // confirmation monitor + "Move" lock (isSweeping) hang forever.
-                    when (doesTxExist(capturedTxid)) {
-                        TxBroadcastStatus.EXISTS -> {
-                            AuditService.log(
-                                "SPLICE_FAILED_IGNORED_STALE",
-                                mapOf(
-                                    "channel_id" to event.channelId,
-                                    "splice_txid" to capturedTxid,
-                                ),
-                            )
-                        }
-                        TxBroadcastStatus.INCONCLUSIVE -> {
-                            // Can't prove the tx doesn't exist (timeouts/429/5xx/no connectivity)
-                            // — preserve the splice rather than risk a false failure.
-                            AuditService.log(
-                                "SPLICE_FAILED_CHECK_INCONCLUSIVE",
-                                mapOf(
-                                    "channel_id" to event.channelId,
-                                    "splice_txid" to capturedTxid,
-                                ),
-                            )
-                        }
-                        TxBroadcastStatus.NOT_FOUND -> {
-                            // The DB row genuinely failed regardless of what's current now — this
-                            // uses the captured row id, never a live re-read, so it can only ever
-                            // touch the row that belonged to this specific splice.
-                            databaseService?.failNegotiatedSplice(
-                                capturedTxid,
-                                capturedPaymentRowId,
-                            )
-                            if (spliceGeneration.get() != capturedGeneration) {
-                                // A newer splice has started while the check was in flight — none
-                                // of its in-memory state belongs to this stale handler.
-                                AuditService.log(
-                                    "SPLICE_FAILED_STALE_GENERATION",
-                                    mapOf(
-                                        "channel_id" to event.channelId,
-                                        "splice_txid" to capturedTxid,
-                                    ),
-                                )
-                            } else {
-                                isSweeping = false
-                                spliceConfirmationJob?.cancel()
-                                spliceConfirmationJob = null
-                                monitoredSpliceTxid = null
-                                pendingSplice = null
-                                if (spliceTxid == capturedTxid) spliceTxid = null
-                                AuditService.log(
-                                    "SPLICE_FAILED",
-                                    mapOf(
-                                        "channel_id" to event.channelId,
-                                        "splice_txid" to capturedTxid,
-                                        "reason" to "txid_never_broadcast",
-                                    ),
-                                )
-                            }
-                        }
-                    }
+                    failSpliceIfNeverBroadcast(
+                        event.channelId,
+                        capturedTxid,
+                        capturedGeneration,
+                        capturedPaymentRowId,
+                    )
+                } else if (
+                    capturedPaymentRowId == null &&
+                        (LspSpliceExpectation.expectsLspSplice(context) ||
+                            databaseService?.lspSpliceHoldsAMove() == true)
+                ) {
+                    // No Move of the app's own is negotiating. Inside the LSP's push window the
+                    // splice that failed is taken to be the LSP's, and a Move an LSP splice named
+                    // waits for that splice: neither is failed for it, and its lock stays. A Move
+                    // left over from an earlier run expires on its own. Outside the window, after
+                    // a relaunch, the leftover is failed below, as before.
+                    AuditService.log("LSP_SPLICE_FAILED", mapOf("channel_id" to event.channelId))
                 } else {
                     // Pre-negotiation failure. The row still failed regardless of what's current
                     // now. The generation guard here is defensive rather than closing a real race:
@@ -2722,7 +2833,12 @@ class AppState(private val context: Context) : ViewModel() {
         when (result.status) {
             TradeControlApplyStatus.RETRY -> {
                 try {
-                    db.markTradeResponseNotCommittable(message)
+                    if (db.markTradeResponseNotCommittable(message)) {
+                        // Merge, not replace: a trade whose payment id was never stored is
+                        // not in the query, and its fee is recognised by this entry.
+                        val unresolved = db.unresolvedTradePayments()
+                        _pendingTradePayments.update { it + unresolved }
+                    }
                 } catch (_: Exception) {}
                 return deferSyncOrGiveUp(paymentHash, "Signed trade result could not be committed")
             }
@@ -3169,6 +3285,10 @@ class AppState(private val context: Context) : ViewModel() {
         return true
     }
 
+    /** The channel's value as last listed, for the size of an LSP splice. */
+    private fun liveChannelValue(userChannelId: String, channelId: String): ChannelValue? =
+        nodeService.channels.channelValue(userChannelId, channelId)
+
     private fun handleSplicePending(
         channelId: String,
         userChannelId: String,
@@ -3177,6 +3297,12 @@ class AppState(private val context: Context) : ViewModel() {
         val txid = newFundingTxo.split(":").firstOrNull() ?: newFundingTxo
         val row = databaseService?.getSplice(txid)?.takeIf { it.status == "pending" }
         if (row == null) {
+            if (databaseService?.getLspSplice(txid) != null) {
+                // The LSP's splice, recorded on its own; nothing of the user's moves, and the
+                // books follow the channel once it is ready on the new funding.
+                refreshBalances()
+                return
+            }
             AuditService.log(
                 "SPLICE_TXID_UNMATCHED",
                 mapOf(
@@ -3395,6 +3521,13 @@ class AppState(private val context: Context) : ViewModel() {
         spliceTxid = txid
         _statusMessage.value = "Move pending confirmation"
         startSpliceConfirmationMonitor(txid)
+        // No channel is left: the splice's channel closed, maybe while the app was not running.
+        if (nodeService.isRunning && nodeService.channels.isEmpty()) {
+            val generation = spliceGeneration.get()
+            viewModelScope.launch(Dispatchers.IO) {
+                failSpliceIfNeverBroadcast("", txid, generation, row.id)
+            }
+        }
     }
 
     /**
@@ -3411,6 +3544,64 @@ class AppState(private val context: Context) : ViewModel() {
         val urls =
             listOf(chainUrl, Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL).distinct()
         return spliceBroadcastChecker.checkStatus(txid, urls)
+    }
+
+    /**
+     * Fails the splice [txid] when esplora has never heard of it: it can't confirm, and it would
+     * otherwise hold the confirmation monitor and the "Move" lock (isSweeping) forever (#467). Its
+     * in-memory state is torn down unless a newer splice started after [generation] was read.
+     */
+    private fun failSpliceIfNeverBroadcast(
+        channelId: String,
+        txid: String,
+        generation: Long,
+        paymentRowId: Long?,
+    ) {
+        when (doesTxExist(txid)) {
+            TxBroadcastStatus.EXISTS -> {
+                AuditService.log(
+                    "SPLICE_FAILED_IGNORED_STALE",
+                    mapOf("channel_id" to channelId, "splice_txid" to txid),
+                )
+            }
+            TxBroadcastStatus.INCONCLUSIVE -> {
+                // Can't prove the tx doesn't exist (timeouts/429/5xx/no connectivity) — preserve
+                // the splice rather than risk a false failure.
+                AuditService.log(
+                    "SPLICE_FAILED_CHECK_INCONCLUSIVE",
+                    mapOf("channel_id" to channelId, "splice_txid" to txid),
+                )
+            }
+            TxBroadcastStatus.NOT_FOUND -> {
+                // The DB row genuinely failed regardless of what's current now — this uses the
+                // captured row id, never a live re-read, so it can only ever touch the row that
+                // belonged to this specific splice.
+                databaseService?.failNegotiatedSplice(txid, paymentRowId)
+                if (spliceGeneration.get() != generation) {
+                    // A newer splice has started while the check was in flight — none of its
+                    // in-memory state belongs to this stale handler.
+                    AuditService.log(
+                        "SPLICE_FAILED_STALE_GENERATION",
+                        mapOf("channel_id" to channelId, "splice_txid" to txid),
+                    )
+                } else {
+                    isSweeping = false
+                    spliceConfirmationJob?.cancel()
+                    spliceConfirmationJob = null
+                    monitoredSpliceTxid = null
+                    pendingSplice = null
+                    if (spliceTxid == txid) spliceTxid = null
+                    AuditService.log(
+                        "SPLICE_FAILED",
+                        mapOf(
+                            "channel_id" to channelId,
+                            "splice_txid" to txid,
+                            "reason" to "txid_never_broadcast",
+                        ),
+                    )
+                }
+            }
+        }
     }
 
     private fun isTxConfirmed(txid: String): Boolean {
@@ -3785,9 +3976,20 @@ class AppState(private val context: Context) : ViewModel() {
         // to avoid double-counting with on-chain. refreshBalances() clears it when ready.
         refreshBalances()
         _statusMessage.value = if (isChannelClosing) "Channel closing…" else "Channel closed"
+
+        // A splice can't complete once its channel has closed.
+        databaseService?.getPendingSpliceTxid(userChannelId, channelId)?.let { txid ->
+            failSpliceIfNeverBroadcast(
+                channelId,
+                txid,
+                spliceGeneration.get(),
+                databaseService?.getSplice(txid)?.id,
+            )
+        }
     }
 
     private fun startStabilityTimer() {
+        LspSpliceHoldBridge.holder = { holdNodeForLspSplice() }
         heartbeatJob?.cancel()
         FCMService.updateHeartbeat(context)
         heartbeatJob =
@@ -4485,9 +4687,14 @@ class AppState(private val context: Context) : ViewModel() {
         }
 
         val channel =
-            nodeService.channels.find { it.isChannelReady }
+            nodeService.channels.find { isMoveTarget(it.isChannelReady, it.confirmations) }
                 ?: run {
-                    _statusMessage.value = "No ready channel"
+                    _statusMessage.value =
+                        if (nodeService.channels.any { it.isChannelReady }) {
+                            "Move is available once the channel confirms"
+                        } else {
+                            "No ready channel"
+                        }
                     return
                 }
 
@@ -4606,6 +4813,9 @@ class AppState(private val context: Context) : ViewModel() {
     suspend fun startRestoredNode(mnemonic: String, channelMayExist: Boolean) {
         ownForceClose.clear()
         nodeService.stop()
+        // A restored seed is a different node: forget the old wallet's email and prompt answers.
+        // Before the start, which wipes the old wallet even when it then fails.
+        EmailPromptStore.get(context).reset()
         toRemoteRecovery.startAfterRestore(fundingTxid, fundingVout, repeat = channelMayExist)
         chainUrl = resolveChainUrl()
         nodeService.start(Network.BITCOIN, chainUrl, mnemonic)
@@ -4962,6 +5172,8 @@ class AppState(private val context: Context) : ViewModel() {
         _lightningBalanceSats.value = lightning
         _onchainBalanceSats.value = onchain
         _hasReadyChannel.value = hasReady
+        _canMoveToChannel.value =
+            nodeService.channels.any { isMoveTarget(it.isChannelReady, it.confirmations) }
         _spendableOnchainSats.value = spendable
         ldkClosedChannelFunds =
             ClosedChannelFunds.from(
@@ -5326,6 +5538,15 @@ class AppState(private val context: Context) : ViewModel() {
         if (
             try {
                 db.hasPendingSplice()
+            } catch (_: Exception) {
+                true
+            }
+        )
+            return
+        // A splice the LSP is making changes the channel under the books; repair once it locks.
+        if (
+            try {
+                db.hasPendingLspSplice()
             } catch (_: Exception) {
                 true
             }

@@ -2,12 +2,12 @@ import Foundation
 
 /// Adapts LDK Node and SQLite database checks to PaymentStatusProviding.
 final class LDKPaymentStatusAdapter: PaymentStatusProviding {
-    private let nodeService: NodeService
+    private let nodeService: any NodeServiceProtocol
     private let databaseService: DatabaseService
     private let hasPendingNodePaymentCheck: () -> Bool
 
     init(
-        nodeService: NodeService,
+        nodeService: any NodeServiceProtocol,
         databaseService: DatabaseService,
         hasPendingNodePaymentCheck: (() -> Bool)? = nil
     ) {
@@ -40,8 +40,11 @@ final class DatabaseSpliceStatusAdapter: SpliceStatusProviding {
         self.databaseService = databaseService
     }
 
+    /// Also while the LSP's own splice is negotiated and not locked: the channel is changing under
+    /// the books.
     func hasPendingSplice() -> Bool {
-        (try? databaseService.spliceRepo.hasPendingSplice()) ?? true
+        let repo = databaseService.spliceRepo
+        return (try? repo.hasPendingSplice() || repo.hasPendingLspSplice()) ?? true
     }
 }
 

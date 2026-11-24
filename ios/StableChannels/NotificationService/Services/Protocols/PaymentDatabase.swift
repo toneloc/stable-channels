@@ -29,7 +29,8 @@ protocol PaymentDatabase {
     func reconcilePendingOutgoingPayment(node: LDKNode.Node) -> Bool
     func isSettlementSeen(settlementId: String) -> Bool
     /// Commits a splice event (and any txid it lets an operation claim) before it is acknowledged.
-    func recordSpliceEvent(_ receipt: SpliceEventReceipt) -> Bool
+    /// With `lspSplice` the splice is known to be the LSP's (see `SpliceEventRecorder`).
+    func recordSpliceEvent(_ receipt: SpliceEventReceipt, lspSplice: Bool) -> Bool
     /// nil when the database cannot be read.
     func hasPendingSplice() -> Bool?
     /// Commit an outbound payment's success; false means do not ack the LDK event.

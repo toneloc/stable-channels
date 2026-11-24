@@ -2,7 +2,6 @@ import Foundation
 import SwiftUI
 import LDKNode
 import SCForceClose
-import SQLite3
 
 private enum SyncMessageHandlingResult {
     case notSync
@@ -32,6 +31,12 @@ class AppState {
         case wallet
         case offline
         case error(String)
+
+        /// A failed start from these phases comes from recovery after a failed launch (the
+        /// network monitor or a scheduled retry), so it routes like a launch failure.
+        var isRecoveringNodeStart: Bool {
+            self == .offline || self == .syncing
+        }
     }
 
     var phase: Phase = .loading
@@ -45,6 +50,11 @@ class AppState {
     /// Whether user has passed biometric/passcode auth this session.
     /// Reset to false on app termination (no persistence = no bypass on restart).
     private(set) var isUnlocked: Bool = false
+
+    /// True while App Access is on and this session has not passed it, so app content stays covered.
+    var isAppLocked: Bool {
+        !isUnlocked && seedAccessDefaults.bool(forKey: Constants.appUnlockEnabledKey)
+    }
 
     /// Prevents double-trigger of auth (onAppear + onChange both firing).
     var isAuthenticating: Bool = false
@@ -96,7 +106,9 @@ class AppState {
 
     // MARK: - Services
 
-    let nodeService: NodeService
+    let nodeService: any AppNodeService
+    /// The wallet folder, owned by the node service so both always open the same wallet.
+    private var walletDir: URL { nodeService.dataDir }
     let priceService = PriceService()
     let priceChartService: any PriceChartFetching = PriceChartService.shared
     var priceHistoryProvider: any PriceHistoryProviding
@@ -157,12 +169,15 @@ class AppState {
     let networkMonitor: any NetworkMonitoring
 
     init(
-        nodeService: NodeService = NodeService(),
+        nodeService: any AppNodeService = NodeService(),
         spliceBroadcastChecker: SpliceBroadcastChecking = SpliceBroadcastChecker(),
         verifyTradeSignature: (([UInt8], String, String) -> Bool)? = nil,
         repairBooksUseCase: RepairBooksUseCase? = nil,
         networkMonitor: any NetworkMonitoring = NWPathNetworkMonitor.shared,
-        seedAccessDefaults: UserDefaults = .standard
+        seedAccessDefaults: UserDefaults = .standard,
+        nodeStartup: NodeStartupCoordinator? = nil,
+        chainSourceProbe: ChainSourceProbe = .live,
+        makeDatabase: @escaping (URL) throws -> DatabaseService = { try DatabaseService(dataDir: $0) }
     ) {
         self.seedAccessDefaults = seedAccessDefaults
         self.nodeService = nodeService
@@ -171,6 +186,12 @@ class AppState {
         self.priceHistoryProvider = PriceHistoryService(databaseService: nil)
         self.customRepairBooksUseCase = repairBooksUseCase
         self.networkMonitor = networkMonitor
+        self.nodeStartup = nodeStartup ?? NodeStartupCoordinator(
+            log: { AuditService.log($0, data: $1) },
+            chainURLStore: UserDefaultsChainURLStore(defaults: UserDefaults(suiteName: Constants.appGroupIdentifier))
+        )
+        self.chainSourceProbe = chainSourceProbe
+        self.makeDatabase = makeDatabase
         self.isOnline = networkMonitor.isOnline
 
         self.networkMonitor.onStatusChange = { [weak self] status in
@@ -305,6 +326,9 @@ class AppState {
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
         return ud?.bool(forKey: BalanceCacheKey.hasReadyChannel) ?? false
     }()
+
+    /// A channel Move can splice into (`moveChannel(in:)`).
+    var canMoveToChannel = false
 
     var pendingOutboundSend: BalanceCalculator.PendingOutboundSend = {
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
@@ -632,6 +656,7 @@ class AppState {
         case activeChannelDetected
         case channelCheckUnavailable
         case walletBusy
+        case interrupted
 
         var errorDescription: String? {
             switch self {
@@ -644,12 +669,14 @@ class AppState {
                 return "Could not verify whether this wallet has an open Lightning channel."
             case .walletBusy:
                 return "Wallet is busy in another process. Please try again."
+            case .interrupted:
+                return "Restore was interrupted when the app went to the background. Please try again."
             }
         }
     }
 
     private func initializeDatabaseServices() throws {
-        let db = try DatabaseService(dataDir: Constants.userDataDir)
+        let db = try makeDatabase(walletDir)
         databaseService = db
         nodeService.databaseService = databaseService
         priceHistoryProvider = PriceHistoryService(databaseService: db)
@@ -831,16 +858,29 @@ class AppState {
         // Own the wallet dir before stopping/wiping: restore can be reached
         // while the lock is not held (e.g. after a startup failure released
         // it), and wiping under a live NSE node would corrupt its state.
-        if await !(NodeDirLock.shared.acquire(dataDir: Constants.userDataDir, timeout: 35)) {
-            AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": "restoreWalletFromMnemonic"])
+        guard await NodeDirLock.shared.acquireReportingTimeout(
+            dataDir: walletDir,
+            timeout: Constants.nodeDirLockTimeoutSecs,
+            caller: "restoreWalletFromMnemonic",
+            log: AuditService.log
+        ).held else {
             phase = priorPhase
             statusMessage = ""
             throw WalletRestoreError.walletBusy
         }
 
+        // Backgrounded while restore waited for the wallet dir: leave the current wallet untouched.
+        if nodeStartup.isPaused {
+            phase = priorPhase
+            statusMessage = ""
+            endStartPaused("WALLET_RESTORE_PAUSED", data: ["wiped": "false"], keepPending: false)
+            throw WalletRestoreError.interrupted
+        }
+
         stabilityTimer?.cancel()
         stabilityTimer = nil
         txidResolutionService.cancelAllLaunchers()
+        nodeStartup.reset()
         nodeService.stop()
 
         // Kept for the recovery below: the reset clears it.
@@ -850,6 +890,8 @@ class AppState {
         wipeWalletPersistence()
 
         do {
+            // The restored words replace the wiped seed at once, so no later start can create a new wallet.
+            try nodeService.saveSeedPhrase(words)
             try initializeDatabaseServices()
             seedHistoricalPrices()
             Task {
@@ -873,15 +915,19 @@ class AppState {
             refreshBalances()
             updateStableBalances()
             startStabilityTimer()
-            blockHeightService.start()
-            mempoolWebSocketService.connect()
+            startChainWatchers()
             if let addr = transactionLinkService.onchainReceiveAddress, !addr.isEmpty {
                 mempoolWebSocketService.trackAddress(addr)
             }
-            Task { await confirmationPollingService?.pollOnce() }
             reregisterPushTokenIfNeeded()
             statusMessage = ""
             NotificationCenter.default.post(name: .priceHistoryUpdated, object: nil)
+        } catch is CancellationError {
+            phase = priorPhase
+            statusMessage = ""
+            // The restored seed is saved, so the pending start opens the restored wallet on foreground.
+            endStartPaused("WALLET_RESTORE_PAUSED", data: ["wiped": "true"])
+            throw WalletRestoreError.interrupted
         } catch {
             // If we failed before the node came up (e.g. DB init threw), no
             // node owns the wallet dir — release so the NSE isn't blocked.
@@ -916,6 +962,7 @@ class AppState {
         lightningBalanceSats = 0
         onchainBalanceSats = 0
         hasReadyChannel = false
+        canMoveToChannel = false
         spendableOnchainSats = 0
         pendingSweepBalanceSats = 0
         ldkClosedChannelFunds = nil
@@ -927,6 +974,7 @@ class AppState {
         transactionLinkService.clearReceiveTxid()
         pendingTradePayments.removeAll()
         pendingSplice = nil
+        pendingOnlineRetry = false
 
         let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
         shared?.removeObject(forKey: "funding_txid")
@@ -939,6 +987,7 @@ class AppState {
         shared?.set(false, forKey: BalanceCacheKey.hasReadyChannel)
         clearPendingOutboundSendCache(from: shared)
         shared?.set(false, forKey: "pending_push_payment")
+        EmailPromptStore.shared.reset()
     }
 
     private func dropDatabaseServices() {
@@ -957,9 +1006,9 @@ class AppState {
     }
 
     private func wipeWalletPersistence() {
-        NodeService.wipeWalletData()
+        nodeService.wipeWalletData()
 
-        let dir = Constants.userDataDir
+        let dir = walletDir
         let filesToDelete = [
             DatabaseService.dbFilename,
             "\(DatabaseService.dbFilename)-wal",
@@ -984,21 +1033,7 @@ class AppState {
         config.network = .bitcoin
         let builder = Builder.fromConfig(config: config)
         // A chain source is required to build; nothing syncs without start().
-        let syncConfig = EsploraSyncConfig(
-            backgroundSyncConfig: BackgroundSyncConfig(
-                onchainWalletSyncIntervalSecs: Constants.onchainWalletSyncIntervalSecs,
-                lightningWalletSyncIntervalSecs: Constants.lightningWalletSyncIntervalSecs,
-                feeRateCacheUpdateIntervalSecs: Constants.feeRateCacheUpdateIntervalSecs
-            ),
-            timeoutsConfig: SyncTimeoutsConfig(
-                onchainWalletSyncTimeoutSecs: 60,
-                lightningWalletSyncTimeoutSecs: 60,
-                feeRateCacheUpdateTimeoutSecs: 60,
-                txBroadcastTimeoutSecs: 30,
-                perRequestTimeoutSecs: 15
-            )
-        )
-        builder.setChainSourceEsplora(serverUrl: Constants.primaryChainURL, config: syncConfig)
+        builder.setChainSourceEsplora(serverUrl: Constants.primaryChainURL, config: Constants.esploraSyncConfig)
         let entropy = NodeEntropy.fromBip39Mnemonic(mnemonic: mnemonic, passphrase: nil)
         guard let node = try? builder.build(nodeEntropy: entropy) else { return nil }
         return node.nodeId()
@@ -1054,14 +1089,18 @@ class AppState {
         // Pick best esplora endpoint BEFORE taking the lock — pure network,
         // no DB access, and it can stall; no reason to hold the dir for it.
         let chainStart = Date()
-        chainURL = await resolveChainURL()
+        chainURL = await chainSourceProbe.resolve()
         let chainMs = elapsedMs(chainStart)
 
         // Take the wallet-dir lock before any DB access (network-graph purge,
         // database init, node start). Kernel-enforced; outlasts a live NSE.
         let lockStart = Date()
-        if await !(NodeDirLock.shared.acquire(dataDir: Constants.userDataDir, timeout: 35)) {
-            AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": "AppState.start"])
+        guard await NodeDirLock.shared.acquireReportingTimeout(
+            dataDir: walletDir,
+            timeout: Constants.nodeDirLockTimeoutSecs,
+            caller: "AppState.start",
+            log: AuditService.log
+        ).held else {
             await MainActor.run { phase = .error("Wallet is busy. Please reopen the app.") }
             return
         }
@@ -1122,8 +1161,8 @@ class AppState {
         subscribeToPushNotifications()
 
         // Check for existing wallet (keys_seed from default path, OR seed_phrase from mnemonic path)
-        let seedPath = Constants.userDataDir.appendingPathComponent("keys_seed")
-        let seedPhrasePath = Constants.userDataDir.appendingPathComponent("seed_phrase")
+        let seedPath = walletDir.appendingPathComponent("keys_seed")
+        let seedPhrasePath = walletDir.appendingPathComponent("seed_phrase")
         if FileManager.default.fileExists(atPath: seedPath.path)
             || FileManager.default.fileExists(atPath: seedPhrasePath.path) {
             if !networkMonitor.isOnline {
@@ -1138,7 +1177,7 @@ class AppState {
             }
 
             // Purge empty network graph from DB to force fresh RGS sync
-            purgeEmptyNetworkGraph()
+            runGossipMaintenance("purge") { try $0.purgeEmptyGraph() }
 
             do {
                 try await startNodeWithFailover(mnemonic: "")
@@ -1157,13 +1196,6 @@ class AppState {
                     }
                     refreshBalances()
                     updateStableBalances()
-                    // Restore fundingTxid from UserDefaults
-                    fundingTxid = UserDefaults(suiteName: Constants.appGroupIdentifier)?
-                        .string(forKey: "funding_txid")
-                    resumePendingSpliceConfirmation()
-                    blockHeightService.start()
-                    mempoolWebSocketService.connect()
-                    Task { await confirmationPollingService?.pollOnce() }
                 }
                 Task {
                     try? await Task.sleep(nanoseconds: 3_000_000_000)
@@ -1175,28 +1207,18 @@ class AppState {
                         }
                     }
                 }
-                startStabilityTimer()
                 // Ensure LSP connection shortly after startup — initial connect may not have completed
                 Task {
                     try? await Task.sleep(nanoseconds: 3_000_000_000)
                     await MainActor.run { ensureLSPConnected() }
                 }
-                // Re-register push token with node_id now that node is running
-                reregisterPushTokenIfNeeded()
-                // Check if NSE flagged a pending payment while app was killed
-                await processPendingPushPayment()
-                reconcilePendingLightningPayments()
-                txidResolutionService.replayPendingChannelCloses()
-                txidResolutionService.replayPendingOnchainReceives()
+                await resumeAfterNodeStart()
+            } catch is CancellationError {
+                endStartPaused("STARTUP_LAUNCH_PAUSED")
             } catch {
-                if !networkMonitor.isOnline || NetworkReachabilityEvaluator.shouldPresentOfflineNotice(
-                    error: error,
-                    isNetworkOffline: !networkMonitor.isOnline
-                ) {
+                await handleNodeStartFailure(error, failPrefix: "Node start failed") {
                     AuditService.log("STARTUP_OFFLINE", data: ["error": error.localizedDescription])
                     await transitionToOfflineAfterSplash(since: prologueStart)
-                } else {
-                    await MainActor.run { phase = .error("Node start failed: \(error.localizedDescription)") }
                 }
             }
         } else {
@@ -1224,9 +1246,7 @@ class AppState {
                     if isTestingEnvironment {
                         phase = .wallet
                     }
-                    blockHeightService.start()
-                    mempoolWebSocketService.connect()
-                    Task { await confirmationPollingService?.pollOnce() }
+                    startChainWatchers()
                     refreshBalances()
                     updateStableBalances()
                 }
@@ -1242,17 +1262,13 @@ class AppState {
                 }
                 startStabilityTimer()
                 reregisterPushTokenIfNeeded()
-                txidResolutionService.replayPendingChannelCloses()
-                txidResolutionService.replayPendingOnchainReceives()
+                replayPendingTxidWork()
+            } catch is CancellationError {
+                endStartPaused("WALLET_CREATE_PAUSED")
             } catch {
-                if !networkMonitor.isOnline || NetworkReachabilityEvaluator.shouldPresentOfflineNotice(
-                    error: error,
-                    isNetworkOffline: !networkMonitor.isOnline
-                ) {
+                await handleNodeStartFailure(error, failPrefix: "Wallet creation failed") {
                     AuditService.log("WALLET_CREATE_OFFLINE", data: ["error": error.localizedDescription])
                     await transitionToOfflineAfterSplash(since: prologueStart)
-                } else {
-                    await MainActor.run { phase = .error("Wallet creation failed: \(error.localizedDescription)") }
                 }
             }
         }
@@ -1262,7 +1278,10 @@ class AppState {
         NSClassFromString("XCTestCase") != nil
     }
 
-    private func ensureMinimumSplashDuration(since startTime: Date, minDuration: TimeInterval = 1.6) async {
+    private func ensureMinimumSplashDuration(
+        since startTime: Date,
+        minDuration: TimeInterval = Constants.minimumSplashDuration
+    ) async {
         guard !isTestingEnvironment else { return }
         let elapsed = Date().timeIntervalSince(startTime)
         if elapsed < minDuration {
@@ -1281,12 +1300,14 @@ class AppState {
         }
     }
 
-    /// Retries connection to the network and node services after an offline condition.
-    func retryConnection() async {
-        guard !isRetryingConnection else { return }
+    /// Retries connection to the network and node services after an offline condition. Returns
+    /// false when turned away because another retry or node start is already in flight.
+    @discardableResult
+    func retryConnection() async -> Bool {
+        guard !isRetryingConnection else { return false }
         guard !nodeFlowInProgress, !nodeService.isStarting else {
             pendingOnlineRetry = true
-            return
+            return false
         }
         isRetryingConnection = true
         defer { isRetryingConnection = false }
@@ -1295,7 +1316,7 @@ class AppState {
 
         if !networkMonitor.isOnline {
             AuditService.log("RETRY_CONNECTION_STILL_OFFLINE", data: [:])
-            return
+            return true
         }
 
         let previousPhase = phase
@@ -1312,24 +1333,24 @@ class AppState {
                     UserDefaults(suiteName: Constants.appGroupIdentifier)?
                         .set(nodeId, forKey: "node_id")
                 }
+                // The NSE may have written the wallet DB while this start waited; reload it now
+                // that this process holds the lock, before stability work resumes.
+                reloadStateWrittenWhileSuspended()
                 await synchronizeActiveWalletState()
-                blockHeightService.start()
-                Task { await confirmationPollingService?.pollOnce() }
-                startStabilityTimer()
-                reregisterPushTokenIfNeeded()
-                await processPendingPushPayment()
-                reconcilePendingLightningPayments()
-                txidResolutionService.replayPendingChannelCloses()
-                txidResolutionService.replayPendingOnchainReceives()
+                await resumeAfterNodeStart()
+            } catch is CancellationError {
+                // Paused mid-start: the backoff is kept, and rescheduled now if foreground is already back.
+                let schedule = nodeStartup.rescheduleIfResumed(
+                    maxDelay: Constants.nodeStartRetryMaxDelay,
+                    reason: "resumed after pause",
+                    run: nodeStartRetryRun()
+                )
+                if let schedule { showRetrySchedule(schedule) }
+                endStartPaused("NODE_START_RETRY_PAUSED", keepPending: schedule == nil)
             } catch {
-                if previousPhase == .offline {
-                    if !networkMonitor.isOnline || NetworkReachabilityEvaluator.shouldPresentOfflineNotice(
-                        error: error,
-                        isNetworkOffline: !networkMonitor.isOnline
-                    ) {
-                        phase = .offline
-                    } else {
-                        phase = .error("Node start failed: \(error.localizedDescription)")
+                if previousPhase.isRecoveringNodeStart {
+                    await handleNodeStartFailure(error, failPrefix: "Node start failed") {
+                        self.phase = .offline
                     }
                 } else {
                     AuditService.log("RETRY_CONNECTION_WALLET_FAILED", data: [
@@ -1339,7 +1360,137 @@ class AppState {
             }
         } else {
             await synchronizeActiveWalletState()
+            mempoolWebSocketService.connect()
         }
+        return true
+    }
+
+    /// Classifies a failed node start for `NodeStartupPolicy`.
+    private func nodeStartFailureOutcome(for error: Error) -> NodeStartupPolicy.FailureOutcome {
+        let isNetworkOffline = !networkMonitor.isOnline
+        return NodeStartupPolicy.failureOutcome(
+            isNetworkOffline: isNetworkOffline,
+            looksOffline: NetworkReachabilityEvaluator.shouldPresentOfflineNotice(
+                error: error,
+                isNetworkOffline: isNetworkOffline
+            ),
+            isRetryable: error.isRetryableNodeStartError
+        )
+    }
+
+    /// Routes a failed node start by `NodeStartupPolicy`: offline runs `onOffline`, a transient
+    /// failure retries with backoff, anything else shows the error screen.
+    private func handleNodeStartFailure(
+        _ error: Error,
+        failPrefix: String,
+        onOffline: () async -> Void
+    ) async {
+        switch nodeStartFailureOutcome(for: error) {
+        case .offline:
+            await onOffline()
+        case .retry:
+            retryNodeStartLater(reason: error.localizedDescription)
+        case .fail:
+            nodeStartup.reset()
+            pendingOnlineRetry = false
+            phase = .error("\(failPrefix): \(error.localizedDescription)")
+        }
+    }
+
+    /// Keeps the syncing screen up and retries node start with backoff after a transient
+    /// chain-source failure.
+    private func retryNodeStartLater(reason: String) {
+        showRetrySchedule(nodeStartup.scheduleRetry(
+            maxDelay: Constants.nodeStartRetryMaxDelay,
+            maxRetries: Constants.nodeStartMaxRetries,
+            reason: reason,
+            run: nodeStartRetryRun()
+        ))
+    }
+
+    /// Syncing while a retry is scheduled; once the budget is spent, the error screen, whose
+    /// Try Again starts a fresh launch.
+    private func showRetrySchedule(_ schedule: NodeStartupCoordinator.RetrySchedule) {
+        switch schedule {
+        case .scheduled:
+            phase = .syncing
+        case .exhausted:
+            phase = .error(String(
+                localized: "error_network_unstable_sync",
+                defaultValue: "Could not sync your wallet. The network is unstable right now. Please try again."
+            ))
+        }
+    }
+
+    /// The node-start retry steps for `NodeStartupCoordinator`.
+    private func nodeStartRetryRun() -> NodeStartupCoordinator.RetryRun {
+        NodeStartupCoordinator.RetryRun(
+            shouldRun: { [weak self] in
+                guard let self else { return false }
+                switch NodeStartupPolicy.retryGate(
+                    isNodeRunning: self.nodeService.isRunning,
+                    isNetworkOffline: !self.networkMonitor.isOnline
+                ) {
+                case .run:
+                    return true
+                case .skip:
+                    return false
+                case .offline:
+                    // Offline recovery belongs to the network monitor, which calls retryConnection when back online.
+                    self.phase = .offline
+                    return false
+                }
+            },
+            // Re-probe providers so the retry doesn't start against the one that just stalled.
+            probe: { [weak self] in await self?.chainSourceProbe.resolve() ?? Constants.primaryChainURL },
+            start: { [weak self] url in
+                guard let self else { return false }
+                self.chainURL = url
+                return await self.retryConnection()
+            }
+        )
+    }
+
+    /// True while the 30s background stop is armed and has not run yet; read by tests, which cannot wait 30 s.
+    var hasPendingBackgroundStop: Bool { backgroundStopWorkItem != nil }
+
+    /// A start that ended paused: no node starts while suspended, so with no node running the wallet
+    /// dir goes back to the notification extension, and a kept-pending start runs on foreground.
+    private func endStartPaused(_ event: String, data: [String: Any] = [:], keepPending: Bool = true) {
+        AuditService.log(event, data: data)
+        if !nodeService.isRunning {
+            NodeDirLock.shared.release()
+        }
+        if keepPending {
+            pendingOnlineRetry = true
+        }
+    }
+
+    /// Post-start steps shared by launch and recovered starts: resume a pending splice, start
+    /// chain watchers and timers, and replay work queued while the node was down.
+    private func resumeAfterNodeStart() async {
+        fundingTxid = UserDefaults(suiteName: Constants.appGroupIdentifier)?
+            .string(forKey: "funding_txid")
+        resumePendingSpliceConfirmation()
+        startChainWatchers()
+        startStabilityTimer()
+        reregisterPushTokenIfNeeded()
+        await processPendingPushPayment()
+        reconcilePendingLightningPayments()
+        replayPendingTxidWork()
+    }
+
+    /// Starts block-height and mempool watchers and polls confirmations once after a node start.
+    private func startChainWatchers() {
+        blockHeightService.start()
+        mempoolWebSocketService.connect()
+        Task { await confirmationPollingService?.pollOnce() }
+    }
+
+    /// Replays channel closes and on-chain receives whose txids were queued while the node was down.
+    private func replayPendingTxidWork() {
+        txidResolutionService.replayPendingChannelCloses()
+        txidResolutionService.replayPendingOnchainReceives()
     }
 
     @MainActor
@@ -1351,7 +1502,6 @@ class AppState {
         await priceService.fetchPrice()
         recordCurrentPrice()
         ensureLSPConnected()
-        mempoolWebSocketService.connect()
         priceService.startAutoRefresh()
     }
 
@@ -1376,7 +1526,7 @@ class AppState {
     private func migrateDataDirIfNeeded() {
         let oldDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("StableChannels").appendingPathComponent("user")
-        let newDir = Constants.userDataDir
+        let newDir = walletDir
         let fm = FileManager.default
 
         // Only migrate if old seed exists and new seed does not
@@ -1409,6 +1559,7 @@ class AppState {
     // every launch then burned the full 30s ceiling waiting on a dead process.
 
     func stop() {
+        nodeStartup.reset()
         stabilityTimer?.cancel()
         stabilityTimer = nil
         heartbeatTimer?.cancel()
@@ -1436,7 +1587,15 @@ class AppState {
     /// isStarting. performBackgroundStop must not release the wallet-dir lock
     /// out from under such a flow.
     private var nodeFlowInProgress = false
+    var isNodeFlowInProgress: Bool { nodeFlowInProgress }
     private var pendingOnlineRetry = false
+    /// Node-start failover and automatic retry after transient chain-source failures.
+    let nodeStartup: NodeStartupCoordinator
+    private let chainSourceProbe: ChainSourceProbe
+    /// Opens the wallet database; injected so tests can open their own.
+    private let makeDatabase: (URL) throws -> DatabaseService
+    /// True while node start is being retried after a transient chain-source failure.
+    var isRetryingNodeStart: Bool { nodeStartup.isRetrying }
 
     private func finishNodeFlow() {
         nodeFlowInProgress = false
@@ -1478,8 +1637,11 @@ class AppState {
         }
     }
 
-    private func performBackgroundStop() {
+    func performBackgroundStop() {
         backgroundStopWorkItem = nil
+        // A suspended app must not start the node and take the wallet dir from the NSE;
+        // foreground resumes the retry with the same backoff.
+        nodeStartup.pause()
         guard nodeService.isRunning else {
             // Backgrounded before the node came up. If no start/restore flow
             // is live, a held lock serves no one — release it so the NSE isn't
@@ -1505,9 +1667,9 @@ class AppState {
         monitoredSpliceTxid = nil
         mempoolWebSocketService.disconnect()
         nodeService.stop()
-        extractGossipFromDB()
+        runGossipMaintenance("extract") { try $0.extractGossip() }
         let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
-        shared?.set(Date().timeIntervalSince1970, forKey: "main_app_last_active")
+        shared?.set(Date().timeIntervalSince1970, forKey: Constants.SharedDefaultsKey.mainAppLastActive)
         // Last DB write is done — hand the wallet dir to the NSE.
         NodeDirLock.shared.release()
         if backgroundTaskID != .invalid {
@@ -1518,6 +1680,26 @@ class AppState {
 
     /// Restore gossip data and restart the node when returning to foreground.
     func restartNodeFromForeground() async {
+        cancelBackgroundStop()
+        // Every foreground ends the pause, whatever the phase, so a later start keeps its node.
+        nodeStartup.resume()
+        if NodeStartupPolicy.shouldResumeRetry(
+            isSyncing: phase == .syncing,
+            isRetrying: nodeStartup.isRetrying,
+            isNodeRunning: nodeService.isRunning
+        ) {
+            nodeStartup.resumeIfIdle(
+                maxDelay: Constants.nodeStartRetryMaxDelay,
+                reason: "resumed on foreground",
+                run: nodeStartRetryRun()
+            )
+            return
+        }
+        if pendingOnlineRetry {
+            pendingOnlineRetry = false
+            await retryConnection()
+            return
+        }
         guard case .wallet = phase else { return }
         // buildOwnForceClose has the node stopped and starts it again itself.
         if ownForceCloseBuilding {
@@ -1526,15 +1708,11 @@ class AppState {
         }
         nodeFlowInProgress = true
         defer { finishNodeFlow() }
-        cancelBackgroundStop()
-        loadChannelFromDB()
-        // Payments received while backgrounded are recorded by the NSE, not the foreground
-        // event loop — so refresh the banner from the newest DB row instead of leaving it stale.
-        refreshLatestPaymentStatus()
-        // Same story for trade results: the NSE writes accepted/rejected to SQLite while
-        // we're backgrounded, so pull any terminal outcomes into the in-memory map.
-        refreshAllTradeOutcomes()
+        // Reload only while holding the wallet dir: the NSE writes the books until then, and the
+        // save after start would overwrite those writes with an earlier read.
         if nodeService.isRunning {
+            // A running node still holds the lock, so the NSE could not write since this read.
+            reloadStateWrittenWhileSuspended()
             // Node never stopped, so gossip was never extracted — do NOT touch
             // ldk_node_data.sqlite while LDK has it open (a stale
             // network_graph.bin would otherwise be written into the live DB).
@@ -1550,26 +1728,28 @@ class AppState {
         }
         print("[App] Restarting node from foreground")
         // Reclaim the wallet dir before writing gossip back into the LDK DB.
-        if await !(NodeDirLock.shared.acquire(dataDir: Constants.userDataDir, timeout: 35)) {
-            AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": "restartNodeFromForeground"])
+        guard await NodeDirLock.shared.acquireReportingTimeout(
+            dataDir: walletDir,
+            timeout: Constants.nodeDirLockTimeoutSecs,
+            caller: "restartNodeFromForeground",
+            log: AuditService.log
+        ).held else {
+            // No lock means no save, but still show what the extension wrote meanwhile.
+            reloadStateWrittenWhileSuspended()
             return
         }
-        restoreGossipToDB()
+        reloadStateWrittenWhileSuspended()
+        runGossipMaintenance("restore") { try $0.restoreGossip() }
         do {
             try await startNodeWithFailover(mnemonic: "")
             refreshBalances()
-            blockHeightService.start()
-            mempoolWebSocketService.connect()
-            Task { await confirmationPollingService?.pollOnce() }
             updateStableBalances()
             StabilityService.reconcileIncoming(&stableChannel)
             saveChannelToDB()
-            resumePendingSpliceConfirmation()
-            reregisterPushTokenIfNeeded()
-            startStabilityTimer()
-            await processPendingPushPayment()
-            reconcilePendingLightningPayments()
+            await resumeAfterNodeStart()
             clearSyncStatusMessage()
+        } catch is CancellationError {
+            endStartPaused("FOREGROUND_RESTART_PAUSED")
         } catch {
             print("[App] Node restart failed: \(error)")
         }
@@ -1624,136 +1804,13 @@ class AppState {
 
     // MARK: - Gossip Data Management
 
-    /// Extract network_graph blob from SQLite to a file, then delete it from the DB.
-    /// This shrinks the DB from ~8.7MB to ~30KB so the NSE can load it.
-    private func extractGossipFromDB() {
-        let dbPath = Constants.userDataDir.appendingPathComponent("ldk_node_data.sqlite").path
-        let gossipPath = Constants.userDataDir.appendingPathComponent("network_graph.bin")
-        let metricsPath = Constants.userDataDir.appendingPathComponent("node_metrics.bin")
-
-        var db: OpaquePointer?
-        guard sqlite3_open(dbPath, &db) == SQLITE_OK else { return }
-        defer { sqlite3_close(db) }
-
-        // Extract network_graph
-        var stmt: OpaquePointer?
-        let query = "SELECT value FROM ldk_node_data WHERE key = 'network_graph'"
-        guard sqlite3_prepare_v2(db, query, -1, &stmt, nil) == SQLITE_OK else { return }
-
-        if sqlite3_step(stmt) == SQLITE_ROW {
-            let blobSize = sqlite3_column_bytes(stmt, 0)
-            if blobSize > 1024, let blobPtr = sqlite3_column_blob(stmt, 0) {
-                let data = Data(bytes: blobPtr, count: Int(blobSize))
-                try? data.write(to: gossipPath)
-                print("[App] Saved network_graph (\(blobSize) bytes) to file")
-            }
+    /// Runs gossip upkeep on the LDK DB and audits a failure; callers hold the wallet-dir lock, no node running.
+    private func runGossipMaintenance(_ step: String, _ work: (LdkDbMaintenance) throws -> Void) {
+        do {
+            try work(LdkDbMaintenance(dataDir: walletDir, log: { print("[App] \($0)") }))
+        } catch {
+            AuditService.log("GOSSIP_MAINTENANCE_FAILED", data: ["step": step, "error": "\(error)"])
         }
-        sqlite3_finalize(stmt)
-
-        // Extract node_metrics (contains RGS timestamp)
-        var metricsStmt: OpaquePointer?
-        let metricsQuery = "SELECT value FROM ldk_node_data WHERE key = 'node_metrics'"
-        if sqlite3_prepare_v2(db, metricsQuery, -1, &metricsStmt, nil) == SQLITE_OK {
-            if sqlite3_step(metricsStmt) == SQLITE_ROW {
-                let size = sqlite3_column_bytes(metricsStmt, 0)
-                if size > 0, let ptr = sqlite3_column_blob(metricsStmt, 0) {
-                    try? Data(bytes: ptr, count: Int(size)).write(to: metricsPath)
-                }
-            }
-            sqlite3_finalize(metricsStmt)
-        }
-
-        // Only delete from DB if file was saved successfully
-        if FileManager.default.fileExists(atPath: gossipPath.path) {
-            sqlite3_exec(db, "DELETE FROM ldk_node_data WHERE key = 'network_graph'", nil, nil, nil)
-            sqlite3_exec(db, "DELETE FROM ldk_node_data WHERE key = 'node_metrics'", nil, nil, nil)
-            sqlite3_exec(db, "DELETE FROM ldk_node_data WHERE key = 'scorer'", nil, nil, nil)
-            print("[App] Stripped gossip data from DB")
-        }
-    }
-
-    /// Delete network_graph from SQLite if it's too small (empty graph with stale timestamp).
-    /// Also deletes scorer data so routing starts fresh.
-    private func purgeEmptyNetworkGraph() {
-        let dbPath = Constants.userDataDir.appendingPathComponent("ldk_node_data.sqlite").path
-        var db: OpaquePointer?
-        guard sqlite3_open(dbPath, &db) == SQLITE_OK else { return }
-        defer { sqlite3_close(db) }
-
-        var stmt: OpaquePointer?
-        let sql = "SELECT LENGTH(value) FROM ldk_node_data WHERE key = 'network_graph'"
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
-        defer { sqlite3_finalize(stmt) }
-
-        let needsPurge: Bool
-        if sqlite3_step(stmt) == SQLITE_ROW {
-            let size = sqlite3_column_int64(stmt, 0)
-            needsPurge = size < 500_000
-            if needsPurge {
-                print("[App] network_graph in DB too small (\(size) bytes), purging for fresh RGS sync")
-            }
-        } else {
-            // No network_graph row at all — check if node_metrics has a stale timestamp
-            needsPurge = true
-            print("[App] No network_graph in DB, purging node_metrics for fresh RGS sync")
-        }
-
-        if needsPurge {
-            sqlite3_exec(db, "DELETE FROM ldk_node_data WHERE key = 'network_graph'", nil, nil, nil)
-            sqlite3_exec(db, "DELETE FROM ldk_node_data WHERE key = 'scorer'", nil, nil, nil)
-            sqlite3_exec(db, "DELETE FROM ldk_node_data WHERE key = 'node_metrics'", nil, nil, nil)
-        }
-    }
-
-    /// Restore network_graph and node_metrics from files back into SQLite.
-    private func restoreGossipToDB() {
-        let dbPath = Constants.userDataDir.appendingPathComponent("ldk_node_data.sqlite").path
-        let gossipPath = Constants.userDataDir.appendingPathComponent("network_graph.bin")
-        let metricsPath = Constants.userDataDir.appendingPathComponent("node_metrics.bin")
-
-        guard FileManager.default.fileExists(atPath: gossipPath.path),
-              let graphData = try? Data(contentsOf: gossipPath) else { return }
-
-        // Skip restoring an empty/corrupt graph
-        if graphData.count < 1024 {
-            print("[App] network_graph.bin too small (\(graphData.count) bytes), deleting for fresh sync")
-            try? FileManager.default.removeItem(at: gossipPath)
-            try? FileManager.default.removeItem(at: metricsPath)
-            return
-        }
-
-        var db: OpaquePointer?
-        guard sqlite3_open(dbPath, &db) == SQLITE_OK else { return }
-        defer { sqlite3_close(db) }
-
-        // Restore network_graph
-        let upsert = "INSERT OR REPLACE INTO ldk_node_data (primary_namespace, secondary_namespace, key, value) VALUES ('', '', 'network_graph', ?)"
-        var stmt: OpaquePointer?
-        if sqlite3_prepare_v2(db, upsert, -1, &stmt, nil) == SQLITE_OK {
-            graphData.withUnsafeBytes { ptr in
-                sqlite3_bind_blob(stmt, 1, ptr.baseAddress, Int32(graphData.count), nil)
-            }
-            sqlite3_step(stmt)
-            sqlite3_finalize(stmt)
-        }
-
-        // Restore node_metrics (contains RGS timestamp — must match the graph)
-        if let metricsData = try? Data(contentsOf: metricsPath), !metricsData.isEmpty {
-            let metricsUpsert = "INSERT OR REPLACE INTO ldk_node_data (primary_namespace, secondary_namespace, key, value) VALUES ('', '', 'node_metrics', ?)"
-            var metricsStmt: OpaquePointer?
-            if sqlite3_prepare_v2(db, metricsUpsert, -1, &metricsStmt, nil) == SQLITE_OK {
-                metricsData.withUnsafeBytes { ptr in
-                    sqlite3_bind_blob(metricsStmt, 1, ptr.baseAddress, Int32(metricsData.count), nil)
-                }
-                sqlite3_step(metricsStmt)
-                sqlite3_finalize(metricsStmt)
-            }
-        }
-
-        // Clean up files
-        try? FileManager.default.removeItem(at: gossipPath)
-        try? FileManager.default.removeItem(at: metricsPath)
-        print("[App] Restored network_graph (\(graphData.count) bytes) + node_metrics to DB")
     }
 
     // MARK: - Push Token Re-registration
@@ -1912,10 +1969,10 @@ class AppState {
 
         case .channelReady(let channelId, let userChannelId, _, _):
             nodeService.refreshChannels()
-            let channels = nodeService.channels
-            persistSpliceEvent(SpliceEventReceipt(event: event) {
-                SpliceEventReceipt.liveFunding(in: channels, userChannelId: $0, channelId: $1)
-            }, ackToken: ackToken)
+            persistSpliceEvent(
+                SpliceEventReceipt(event: event, channels: nodeService.channels),
+                ackToken: ackToken, lspSplice: expectsLspSplice
+            )
 
             stableChannel.channelId = channelId
             refreshBalances()
@@ -2814,6 +2871,13 @@ class AppState {
             data["counterparty_node_id"] = "\(counterpartyNodeId)"
         }
         AuditService.log("CHANNEL_CLOSED", data: data)
+        let spliceOfClosedChannel = try? databaseService?.spliceRepo.getPendingSpliceTxid(
+            userChannelId: "\(userChannelId)",
+            channelId: "\(channelId)"
+        )
+        if let txid = spliceOfClosedChannel {
+            checkSpliceOfClosedChannel(txid: txid, channelId: "\(channelId)", userChannelId: "\(userChannelId)")
+        }
 
         // Funding txid is NOT close txid; defer payments row to handleCloseTxidResolved
 
@@ -2929,14 +2993,23 @@ class AppState {
         ])
 
         let txidStr = "\(newFundingTxo.txid)"
+        nodeService.refreshChannels()
         let receipt = SpliceEventReceipt(
             kind: .negotiated, userChannelId: userChannelId, channelId: channelId,
-            identityTxid: txidStr, funding: newFundingTxo
+            identityTxid: txidStr, funding: newFundingTxo, channels: nodeService.channels
         )
-        guard persistSpliceEvent(receipt, ackToken: ackToken) else { return }
+        guard persistSpliceEvent(receipt, ackToken: ackToken, lspSplice: expectsLspSplice) else { return }
         // The recorder matched this event to the operation that started it. A replay for a
         // finished or unknown operation must not take over the in-memory splice state or monitor.
         guard (try? databaseService?.spliceRepo.isPendingSplice(txid: txidStr)) == true else {
+            if (try? databaseService?.spliceRepo.isLspSplice(txid: txidStr)) == true {
+                // The LSP's own splice: no Move of the user's, so only the funding and the balances
+                // change.
+                fundingTxid = txidStr
+                refreshBalances()
+                updateStableBalances()
+                return
+            }
             AuditService.log("SPLICE_TXID_UNMATCHED", data: [
                 "channel_id": "\(channelId)",
                 "user_channel_id": "\(userChannelId)",
@@ -2955,16 +3028,38 @@ class AppState {
         startSpliceConfirmationMonitor(txid: txidStr)
     }
 
+    /// Where the extension notes the LSP's splice push.
+    @ObservationIgnored var lspSpliceDefaults = UserDefaults(suiteName: Constants.appGroupIdentifier)
+
+    private var expectsLspSplice: Bool {
+        SpliceOwnership.expectsLspSplice(lspSpliceDefaults, moveInFlight: pendingSplice != nil)
+    }
+
     /// Commits a splice event before NodeService acknowledges it; on failure the event stays in
-    /// LDK and is redelivered.
+    /// LDK and is redelivered. `lspSplice` says the splice is known to be the LSP's.
     @discardableResult
-    private func persistSpliceEvent(_ receipt: SpliceEventReceipt?, ackToken: EventAckToken?) -> Bool {
+    private func persistSpliceEvent(
+        _ receipt: SpliceEventReceipt?,
+        ackToken: EventAckToken?,
+        lspSplice: Bool = false
+    ) -> Bool {
         guard let receipt else { return true }
         do {
             guard let databaseService else {
                 throw DatabaseError.executeFailed("Database unavailable for splice history")
             }
-            try databaseService.spliceRepo.recordEvent(receipt)
+            if let change = try databaseService.spliceRepo.recordEvent(receipt, lspSplice: lspSplice) {
+                let name = switch change {
+                case .negotiated: "LSP_SPLICE_NEGOTIATED"
+                case .locked: "LSP_SPLICE_LOCKED"
+                case .wasSpliceOut: "LSP_SPLICE_WAS_SPLICE_OUT"
+                }
+                AuditService.log(name, data: [
+                    "channel_id": receipt.channelId,
+                    "user_channel_id": receipt.userChannelId,
+                    "txid": receipt.fundingTxid ?? ""
+                ])
+            }
             return true
         } catch {
             ackToken?.shouldAck = false
@@ -3028,6 +3123,22 @@ class AppState {
                     txid: capturedTxid, channelId: "\(channelId)", userChannelId: "\(userChannelId)"
                 )
                 Task { [weak self] in await self?.retryPendingSpliceFailureChecks() }
+            } else if expectsLspSplice {
+                // No Move of the app's own is in flight and the LSP's splice is expected, so the
+                // negotiation that failed is taken to be the LSP's. A Move left without its
+                // transaction expires on its own after 10 minutes, unless an LSP splice named it:
+                // then it waits until that splice locks, at most a day from the first one that did.
+                AuditService.log("LSP_SPLICE_FAILED", data: [
+                    "channel_id": "\(channelId)",
+                    "user_channel_id": "\(userChannelId)"
+                ])
+            } else if try databaseService.spliceRepo.lspSpliceHoldsFailableSplice(rowId: pendingSplice?.rowId) {
+                // An LSP splice named the Move, so the negotiation that failed is not the Move's:
+                // it stays pending until that splice locks.
+                AuditService.log("LSP_SPLICE_FAILED", data: [
+                    "channel_id": "\(channelId)",
+                    "user_channel_id": "\(userChannelId)"
+                ])
             } else {
                 guard databaseService.spliceRepo.failPendingSplice(rowId: pendingSplice?.rowId) else {
                     throw DatabaseError.executeFailed("Could not persist splice failure")
@@ -3041,6 +3152,20 @@ class AppState {
     }
 
     private var isCheckingSpliceFailures = false
+
+    /// A splice can't complete once its channel has closed. Queues the check that fails it if its
+    /// tx never reached the network, so it stops blocking Move and on-chain sends (#467).
+    func checkSpliceOfClosedChannel(txid: String, channelId: String, userChannelId: String) {
+        do {
+            try databaseService?.spliceRepo.deferFailureCheck(
+                txid: txid, channelId: channelId, userChannelId: userChannelId
+            )
+        } catch {
+            AuditService.log("SPLICE_FAILURE_QUEUE_FAILED", data: ["error": error.localizedDescription])
+            return
+        }
+        Task { [weak self] in await self?.retryPendingSpliceFailureChecks() }
+    }
 
     func retryPendingSpliceFailureChecks() async {
         guard !isCheckingSpliceFailures, let databaseService else { return }
@@ -3305,6 +3430,10 @@ class AppState {
         // before its txid has arrived.
         isSweeping = true
         guard let txid = (try? spliceRepo.getPendingSpliceTxid()) ?? nil else { return }
+        // No channel is left: the splice's channel closed, maybe while the app was not running.
+        if nodeService.isRunning, nodeService.channels.isEmpty {
+            checkSpliceOfClosedChannel(txid: txid, channelId: "", userChannelId: "")
+        }
         let alreadyMonitoring = Self.shouldSkipGenerationBumpOnResume(
             monitorActive: spliceConfirmationTask != nil,
             monitoredTxid: monitoredSpliceTxid,
@@ -3432,12 +3561,12 @@ class AppState {
         heartbeatTimer?.cancel()
 
         let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
-        shared?.set(Date().timeIntervalSince1970, forKey: "main_app_last_active")
+        shared?.set(Date().timeIntervalSince1970, forKey: Constants.SharedDefaultsKey.mainAppLastActive)
         heartbeatTimer = Task {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
                 guard !Task.isCancelled else { break }
-                shared?.set(Date().timeIntervalSince1970, forKey: "main_app_last_active")
+                shared?.set(Date().timeIntervalSince1970, forKey: Constants.SharedDefaultsKey.mainAppLastActive)
             }
         }
 
@@ -4154,6 +4283,12 @@ class AppState {
         }
     }
 
+    /// The channel Move splices into: ready, with its funding confirmed. A zero-conf channel is ready
+    /// before its funding reaches the chain, and a splice of it could then never be broadcast (#467).
+    nonisolated static func moveChannel(in channels: [ChannelDetails]) -> ChannelDetails? {
+        channels.first { $0.isChannelReady && ($0.confirmations ?? 0) > 0 }
+    }
+
     func sweepToChannel() {
         guard !isSweeping else {
             statusMessage = "Sweep already in progress"
@@ -4163,8 +4298,10 @@ class AppState {
         statusMessage = "Starting move..."
 
         // No suspension before the row is saved: the stale-lock release frees a lock without one.
-        guard let channel = nodeService.channels.first(where: { $0.isChannelReady }) else {
-            statusMessage = "No ready channel"
+        guard let channel = Self.moveChannel(in: nodeService.channels) else {
+            statusMessage = nodeService.channels.contains { $0.isChannelReady }
+                ? "Move is available once the channel confirms"
+                : "No ready channel"
             isSweeping = false
             return
         }
@@ -4224,117 +4361,46 @@ class AppState {
         }
     }
 
-    /// Starts the node with the current chainURL, and automatically falls back to the
-    /// secondary Esplora source (e.g. mempool.space) if primary startup encounters an
-    /// Esplora fee-rate estimation failure or timeout.
+    /// Starts the node with the current chainURL and, on an Esplora fee-rate estimation
+    /// failure or timeout, walks `NodeStartupPolicy.attempts`: every other provider once, then
+    /// the preferred provider again after a short delay.
     ///
-    /// Two failover layers exist by design: `resolveChainURL()` probes connectivity once
+    /// Two failover layers exist by design: `ChainSourceProbe` probes connectivity once
     /// at launch and picks the starting provider; this helper covers failures that only
     /// surface inside `node.start()` itself (fee-rate estimation against the chosen host).
-    /// Both record the working URL in the app group so the NSE starts from it too.
+    /// The coordinator records the working URL in the app group so the NSE starts from it too.
     ///
-    /// On total failure the wallet-dir lock is released (a no-op when NodeService.start
-    /// already released its own lease) so a broken app process never starves the NSE.
+    /// One wallet-dir lease spans every provider attempt (a no-op where the caller already
+    /// holds it), so a failed attempt never frees the dir for the NSE before the next one.
+    /// On total failure the lock is released so a broken app process never starves the NSE;
+    /// on success the running node keeps it, unless the app was paused meanwhile.
     private func startNodeWithFailover(mnemonic: String = "") async throws {
-        do {
-            try await startNodeOrFailover(mnemonic: mnemonic)
-        } catch {
-            if !nodeService.isRunning {
-                NodeDirLock.shared.release()
-            }
-            throw error
-        }
-    }
-
-    private func startNodeOrFailover(mnemonic: String) async throws {
-        let initialURL = chainURL
-        do {
-            try await nodeService.start(
-                network: .bitcoin,
-                esploraURL: initialURL,
-                mnemonic: mnemonic,
-                lspConfig: activeLSP
-            )
-            publishWorkingChainURL(initialURL)
-        } catch {
-            guard error.isRetryableEsploraStartupError else {
-                // Non-Esplora errors (database, storage, lock, entropy, already running)
-                // must propagate immediately without retrying.
-                throw error
-            }
-
-            let initialError = error
-            AuditService.log("NODE_START_INITIAL_FAILED", data: [
-                "esploraURL": initialURL,
-                "error": initialError.localizedDescription
-            ])
-
-            let fallbackURL = (initialURL == Constants.primaryChainURL)
-                ? Constants.fallbackChainURL
-                : Constants.primaryChainURL
-
-            do {
-                try await nodeService.start(
+        // Backgrounded: leave the wallet dir to the notification extension; the caller keeps the start pending.
+        guard !nodeStartup.isPaused else { throw CancellationError() }
+        chainURL = try await NodeDirLock.shared.withHeldLock(
+            dataDir: walletDir,
+            timeout: Constants.nodeDirLockTimeoutSecs,
+            caller: "startNodeWithFailover",
+            log: AuditService.log,
+            isNodeRunning: { nodeService.isRunning }
+        ) {
+            try await nodeStartup.startWithFailover(
+                preferred: chainURL,
+                isRetryable: { $0.isRetryableEsploraStartupError }
+            ) { url in
+                try await self.nodeService.start(
                     network: .bitcoin,
-                    esploraURL: fallbackURL,
+                    esploraURL: url,
                     mnemonic: mnemonic,
-                    lspConfig: activeLSP
+                    lspConfig: self.activeLSP
                 )
-                self.chainURL = fallbackURL
-                publishWorkingChainURL(fallbackURL)
-                AuditService.log("NODE_START_FAILOVER_SUCCESS", data: [
-                    "primary": initialURL,
-                    "using": fallbackURL
-                ])
-            } catch let fallbackError {
-                AuditService.log("NODE_START_FAILOVER_FAILED", data: [
-                    "primary": initialURL,
-                    "fallback": fallbackURL,
-                    "primary_error": initialError.localizedDescription,
-                    "fallback_error": fallbackError.localizedDescription
-                ])
-                // Preserve the original primary error when fallback also fails
-                throw initialError
             }
         }
-    }
-
-    /// Record the Esplora URL a node actually started against, so the NSE begins with a
-    /// known-working provider instead of paying a degraded primary's failure first.
-    private func publishWorkingChainURL(_ url: String) {
-        UserDefaults(suiteName: Constants.appGroupIdentifier)?
-            .set(url, forKey: "esplora_chain_url")
-    }
-
-    /// Test Blockstream connectivity; fall back to mempool.space if unreachable.
-    private func resolveChainURL() async -> String {
-        guard let url = URL(string: "\(Constants.primaryChainURL)/blocks/tip/height") else {
-            return Constants.fallbackChainURL
+        // LDK's start can't be cancelled: a node that came up after the pause gets the background stop it missed.
+        guard !nodeStartup.isPaused else {
+            performBackgroundStop()
+            throw CancellationError()
         }
-        // This sits on the critical path before first paint, so it gets a short
-        // budget of its own: URLSession.shared defaults to a 60s request timeout,
-        // which would hold the launch screen for a minute on a slow primary.
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 2
-        config.timeoutIntervalForResource = 3
-        let session = URLSession(configuration: config)
-        let startedAt = Date()
-        do {
-            let (_, response) = try await session.data(from: url)
-            if let http = response as? HTTPURLResponse, http.statusCode == 200 {
-                AuditService.log("CHAIN_SOURCE_RESOLVED", data: [
-                    "using": Constants.primaryChainURL,
-                    "ms": "\(Int(Date().timeIntervalSince(startedAt) * 1000))"
-                ])
-                return Constants.primaryChainURL
-            }
-        } catch {}
-        AuditService.log("CHAIN_SOURCE_FALLBACK", data: [
-            "primary": Constants.primaryChainURL,
-            "using": Constants.fallbackChainURL,
-            "ms": "\(Int(Date().timeIntervalSince(startedAt) * 1000))"
-        ])
-        return Constants.fallbackChainURL
     }
 
     // MARK: - Balance Refresh
@@ -4405,7 +4471,7 @@ class AppState {
     /// mnemonics.
     private func walletSeed() -> Data? {
         if let words = nodeService.savedMnemonic { return ToRemoteKeys.bip39Seed(words) }
-        let data = try? Data(contentsOf: Constants.userDataDir.appendingPathComponent("keys_seed"))
+        let data = try? Data(contentsOf: walletDir.appendingPathComponent("keys_seed"))
         return data?.count == 64 ? data : nil
     }
 
@@ -4449,7 +4515,7 @@ class AppState {
         heartbeatTimer = nil
         mempoolWebSocketService.disconnect()
         nodeService.stop()
-        let dataDir = Constants.userDataDir
+        let dataDir = walletDir
         let built = await Task.detached {
             Result { try OwnForceClose.build(dataDir: dataDir, channelId: channelId, seed: seed) }
         }.value
@@ -4562,6 +4628,7 @@ class AppState {
         lightningBalanceSats = lightning
         onchainBalanceSats = onchain
         hasReadyChannel = nodeService.channels.contains { $0.isChannelReady }
+        canMoveToChannel = Self.moveChannel(in: nodeService.channels) != nil
         spendableOnchainSats = spendable
         ldkClosedChannelFunds = ClosedChannelFunds.from(
             lightningBalances: balances.lightningBalances,
@@ -4722,6 +4789,15 @@ class AppState {
         } catch {
             AuditService.log("DB_SAVE_CHANNEL_FAILED", data: ["error": error.localizedDescription])
         }
+    }
+
+    /// Pulls in what the NSE wrote to SQLite while the app was suspended, before stability work
+    /// resumes: the channel books, the newest received payment for the banner, and terminal
+    /// trade outcomes (the NSE records accepted/rejected, not the foreground event loop).
+    func reloadStateWrittenWhileSuspended() {
+        loadChannelFromDB()
+        refreshLatestPaymentStatus()
+        refreshAllTradeOutcomes()
     }
 
     @discardableResult

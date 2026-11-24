@@ -52,7 +52,8 @@ public final class SpliceBroadcastChecker: SpliceBroadcastChecking, Sendable {
 
             for baseURL in urls {
                 let trimmedBase = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                guard let url = URL(string: "\(trimmedBase)/tx/\(normalizedTxid)/status") else {
+                // Not /status: Esplora answers it with 200 even for a txid it has never seen (#467).
+                guard let url = URL(string: "\(trimmedBase)/tx/\(normalizedTxid)/hex") else {
                     continue
                 }
 

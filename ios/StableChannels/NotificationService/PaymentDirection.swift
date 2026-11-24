@@ -5,6 +5,7 @@ enum PaymentDirection: String {
     case lspToUser = "lsp_to_user" // LSP owes user (price dropped)
     case userToLsp = "user_to_lsp" // User owes LSP (price rose)
     case incomingPayment = "incoming_payment" // Wake to receive pending
+    case lspSpliceIn = "lsp_splice_in" // LSP splices its own funds into the channel; both sides sign
 
     init(from userInfo: [AnyHashable: Any]) {
         if let stability = userInfo["stability"] as? [String: Any],
@@ -24,6 +25,7 @@ enum PaymentDirection: String {
         switch self {
         case .userToLsp: return "payment_sent"
         case .incomingPayment, .lspToUser: return "payment_received"
+        case .lspSpliceIn: return LspSpliceNotice.notificationType
         }
     }
 }

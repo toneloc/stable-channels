@@ -57,6 +57,11 @@ class FCMService : FirebaseMessagingService() {
             getPrefs(context).edit().putLong(KEY_MAIN_APP_LAST_ACTIVE, now).apply()
         }
 
+        /** The app let go of the node, so a push must not be left to it any more. */
+        fun clearHeartbeat(context: Context) {
+            getPrefs(context).edit().remove(KEY_MAIN_APP_LAST_ACTIVE).apply()
+        }
+
         fun registerTokenWithLSP(token: String, nodeId: String) {
             try {
                 val json =
@@ -103,29 +108,41 @@ class FCMService : FirebaseMessagingService() {
                 "lsp_to_user"
             }
 
+        // Whoever ends up owning the node, a splice negotiated soon is the LSP's.
+        if (direction == LSP_SPLICE_IN_DIRECTION) LspSpliceExpectation.note(this)
+
         val prefs = getPrefs(this)
         val lastActive = prefs.getLong(KEY_MAIN_APP_LAST_ACTIVE, 0)
         val now = System.currentTimeMillis() / 1000
 
-        if (now - lastActive < HEARTBEAT_THRESHOLD_SECS) {
-            // Main app is running — let it handle on next stability cycle
-            Log.d(TAG, "Main app active, flagging pending payment")
-            flagPendingPayment(this)
-            return
-        }
-
-        if (LdkNodeOwner.isOwnedBy(LdkNodeOwner.MAIN_APP) || StabilityProcessingService.isRunning) {
-            Log.d(TAG, "LDK node already owned in-process, flagging pending payment")
-            flagPendingPayment(this)
-            return
-        }
-
-        // Main app not running — start ForegroundService
-        Log.d(TAG, "Starting StabilityProcessingService direction=$direction")
-        val intent =
-            Intent(this, StabilityProcessingService::class.java).apply {
-                putExtra("direction", direction)
+        val route =
+            routePush(
+                direction,
+                mainAppActive = now - lastActive < HEARTBEAT_THRESHOLD_SECS,
+                nodeOwnedInProcess = LdkNodeOwner.isOwnedBy(LdkNodeOwner.MAIN_APP),
+                serviceRunning = StabilityProcessingService.isRunning,
+                appCanHold = LspSpliceHoldBridge.canHold,
+            )
+        when (route) {
+            PushRoute.HOLD_IN_APP -> {
+                // The app owns the node and the LSP is about to splice: the app keeps it up.
+                Log.d(TAG, "Main app owns the node, holding it for the LSP splice")
+                if (!LspSpliceHoldBridge.requestHold()) flagPendingPayment(this)
             }
-        startForegroundService(intent)
+            PushRoute.FLAG_FOR_APP -> {
+                // Main app or background service owns the node — let it handle on next cycle
+                Log.d(TAG, "LDK node owned in-process, flagging pending payment")
+                flagPendingPayment(this)
+            }
+            PushRoute.START_SERVICE -> {
+                // Main app not running — start ForegroundService
+                Log.d(TAG, "Starting StabilityProcessingService direction=$direction")
+                val intent =
+                    Intent(this, StabilityProcessingService::class.java).apply {
+                        putExtra("direction", direction)
+                    }
+                startForegroundService(intent)
+            }
+        }
     }
 }

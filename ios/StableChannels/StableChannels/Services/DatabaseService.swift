@@ -265,6 +265,11 @@ final class DatabaseService {
         for sql in statements + SpliceEventRecorder.createTableStatements {
             try rawSQL.execute(sql)
         }
+        let lspSpliceColumns = try rawSQL.query(SpliceEventRecorder.lspSpliceColumnsSQL)
+            .compactMap { $0[0] as? String }
+        for sql in SpliceEventRecorder.addLspSpliceColumnsSQL(existing: Set(lspSpliceColumns)) {
+            try rawSQL.execute(sql)
+        }
 
         // Migrate: add receiver_sats and latest_price if missing
         let cols = try rawSQL.query("PRAGMA table_info(channels)")

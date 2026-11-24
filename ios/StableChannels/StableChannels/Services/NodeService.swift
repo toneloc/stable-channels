@@ -56,7 +56,7 @@ final class NodeDirLock: @unchecked Sendable {
     }
 
     /// Polling variant of `tryAcquireReportingNew` — see that method for the
-    /// ownership semantics.
+    /// ownership semantics. Returns not held as soon as the calling task is cancelled.
     func acquireReportingNew(dataDir: URL, timeout: TimeInterval) async -> (held: Bool, newlyAcquired: Bool) {
         let deadline = Date().addingTimeInterval(timeout)
         while true {
@@ -67,8 +67,27 @@ final class NodeDirLock: @unchecked Sendable {
             if Date() >= deadline {
                 return (held: false, newlyAcquired: false)
             }
-            try? await Task.sleep(nanoseconds: 200_000_000)
+            do {
+                try await Task.sleep(for: Constants.nodeDirLockPollInterval)
+            } catch {
+                return (held: false, newlyAcquired: false)
+            }
         }
+    }
+
+    /// `acquireReportingNew` that logs `NODE_LOCK_TIMEOUT` for `caller` when the wait times out, not
+    /// when a pause cancelled it.
+    func acquireReportingTimeout(
+        dataDir: URL,
+        timeout: TimeInterval,
+        caller: String,
+        log: (String, [String: Any]) -> Void
+    ) async -> (held: Bool, newlyAcquired: Bool) {
+        let lease = await acquireReportingNew(dataDir: dataDir, timeout: timeout)
+        if !lease.held, !Task.isCancelled {
+            log("NODE_LOCK_TIMEOUT", ["where": caller])
+        }
+        return lease
     }
 
     /// Release if held. Safe to call when not holding (no-op).
@@ -98,6 +117,38 @@ final class NodeDirLock: @unchecked Sendable {
     }
 }
 
+extension NodeDirLock {
+    /// Runs `body` under one wallet-dir lease (a no-op acquire under an outer lease). When `body`
+    /// fails, no node is running and this call took the lock, it is released so a broken start never
+    /// starves the NSE; an outer lease stays with its owner.
+    /// A wait cancelled by a pause throws `CancellationError`; a timed-out wait logs
+    /// `NODE_LOCK_TIMEOUT` for `caller` and throws `NodeServiceError.dataDirLocked`.
+    @MainActor
+    func withHeldLock<T>(
+        dataDir: URL,
+        timeout: TimeInterval,
+        caller: String,
+        log: (String, [String: Any]) -> Void,
+        isNodeRunning: () -> Bool,
+        _ body: () async throws -> T
+    ) async throws -> T {
+        let lease = await acquireReportingTimeout(dataDir: dataDir, timeout: timeout, caller: caller, log: log)
+        guard lease.held else {
+            // A paused retry gave up waiting; report the pause, not a locked wallet dir.
+            try Task.checkCancellation()
+            throw NodeServiceError.dataDirLocked
+        }
+        do {
+            return try await body()
+        } catch {
+            if lease.newlyAcquired, !isNodeRunning() {
+                release()
+            }
+            throw error
+        }
+    }
+}
+
 /// Passed in notification userInfo so the handler can veto the eventHandled() call.
 /// NotificationCenter.post() is synchronous on MainActor, so all observers run
 /// before NodeService checks shouldAck — no race condition.
@@ -117,8 +168,57 @@ protocol NodeServiceProtocol {
     func syncWallets() throws
 }
 
+/// The node as AppState and the views reading `appState.nodeService` use it.
+protocol AppNodeService: NodeServiceProtocol, EmailRequestSigning, AnyObject {
+    var isStarting: Bool { get }
+    /// The wallet folder the node, its seed and its database live in.
+    var dataDir: URL { get }
+    func saveSeedPhrase(_ words: String) throws
+    func wipeWalletData()
+    var databaseService: DatabaseService? { get set }
+    func clearSavedMnemonic()
+    func refreshChannels()
+    func balances() -> BalanceDetails?
+    func inboundOnchain() -> WalletInboundOnchain?
+    func spendableOnchainSats() -> UInt64
+    func lightningSyncAgeSecs() -> UInt64?
+    func newOnchainAddress() throws -> String
+    func signMessage(_ message: [UInt8]) throws -> String
+    func verifySignature(message: [UInt8], signature: String, pubkey: PublicKey) -> Bool
+    func connectAndOpenChannel(pubkey: String, address: String, amountSats: UInt64) async throws
+    func requestChannelClose(
+        userChannelId: UserChannelId,
+        counterpartyNodeId: PublicKey,
+        fundingOutpointTxid: String,
+        fundingOutpointVout: UInt32,
+        balanceSats: UInt64,
+        balanceUsd: Double?,
+        btcPrice: Double?,
+        counterparty: String?,
+        force: Bool
+    ) async throws
+    func spliceInWithAll(userChannelId: UserChannelId, counterpartyNodeId: PublicKey) throws
+    func spliceOut(
+        userChannelId: UserChannelId,
+        counterpartyNodeId: PublicKey,
+        address: String,
+        amountSats: UInt64
+    ) throws
+    func outboundPaymentStatus(paymentHash: PaymentHash) -> PaymentStatus?
+    func sendPayment(invoice: Bolt11Invoice) throws -> PaymentId
+    func sendPaymentUsingAmount(invoice: Bolt11Invoice, amountMsat: UInt64) throws -> PaymentId
+    func sendBolt12UsingAmount(offer: Offer, amountMsat: UInt64) throws -> PaymentId
+    func sendKeysendWithTLV(amountMsat: UInt64, to nodeId: PublicKey, tlvs: [CustomTlvRecord]) throws -> PaymentId
+    func sendStabilityPayment(amountMsat: UInt64, to nodeId: PublicKey, tlvs: [CustomTlvRecord]) throws -> PaymentId
+    func sendOnchain(address: String, amountSats: UInt64, feeRateSatVb: Double?) throws -> Txid
+    func sendAllOnchain(address: String, feeRateSatVb: Double?) throws -> Txid
+    func receivePayment(amountMsat: UInt64, description: String) throws -> Bolt11Invoice
+    func receiveVariablePayment(description: String) throws -> Bolt11Invoice
+    func receiveViaJitChannel(amountMsat: UInt64, description: String) throws -> Bolt11Invoice
+}
+
 @Observable
-class NodeService: NodeServiceProtocol {
+class NodeService: AppNodeService {
     static let shared = NodeService()
 
     private(set) var node: Node?
@@ -147,11 +247,14 @@ class NodeService: NodeServiceProtocol {
     private var eventTask: Task<Void, Never>?
 
     weak var databaseService: DatabaseService?
+    /// The wallet folder: seed files, LDK storage and its log.
+    let dataDir: URL
 
-    init() {
+    init(dataDir: URL = Constants.userDataDir) {
+        self.dataDir = dataDir
         // Pre-load saved mnemonic from disk so it's available immediately,
         // even before start() completes (avoids race with early UI display)
-        let path = Constants.userDataDir.appendingPathComponent("seed_phrase")
+        let path = dataDir.appendingPathComponent("seed_phrase")
         if let words = try? String(contentsOfFile: path.path, encoding: .utf8) {
             let trimmed = words.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {
@@ -169,9 +272,15 @@ class NodeService: NodeServiceProtocol {
 
         // Cross-process exclusivity: never open the wallet dir while another
         // process (the NSE) has a node on it. No-op if already held.
-        let lease = await NodeDirLock.shared.acquireReportingNew(dataDir: Constants.userDataDir, timeout: 35)
+        let lease = await NodeDirLock.shared.acquireReportingTimeout(
+            dataDir: dataDir,
+            timeout: Constants.nodeDirLockTimeoutSecs,
+            caller: "NodeService.start",
+            log: AuditService.log
+        )
         guard lease.held else {
-            AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": "NodeService.start"])
+            // A paused retry gave up waiting; report the pause, not a locked wallet dir.
+            try Task.checkCancellation()
             throw NodeServiceError.dataDirLocked
         }
         // A failed start leaves no node; free the dir for the NSE — but only when this
@@ -195,13 +304,11 @@ class NodeService: NodeServiceProtocol {
             }
         }
 
-        let dataDir = Constants.userDataDir.path
-
         // Ensure data directory exists
-        try? FileManager.default.createDirectory(atPath: dataDir, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
 
         var config = defaultConfig()
-        config.storageDirPath = dataDir
+        config.storageDirPath = dataDir.path
         config.network = network
         config.trustedPeers0conf = [lspConfig.pubkey]
 
@@ -213,24 +320,10 @@ class NodeService: NodeServiceProtocol {
 
         let builder = Builder.fromConfig(config: config)
 
-        let logPath = Constants.userDataDir.appendingPathComponent("ldk-node.log").path
+        let logPath = dataDir.appendingPathComponent("ldk-node.log").path
         builder.setFilesystemLogger(logFilePath: logPath, maxLogLevel: .debug)
 
-        let syncConfig = EsploraSyncConfig(
-            backgroundSyncConfig: BackgroundSyncConfig(
-                onchainWalletSyncIntervalSecs: Constants.onchainWalletSyncIntervalSecs,
-                lightningWalletSyncIntervalSecs: Constants.lightningWalletSyncIntervalSecs,
-                feeRateCacheUpdateIntervalSecs: Constants.feeRateCacheUpdateIntervalSecs
-            ),
-            timeoutsConfig: SyncTimeoutsConfig(
-                onchainWalletSyncTimeoutSecs: 60,
-                lightningWalletSyncTimeoutSecs: 60,
-                feeRateCacheUpdateTimeoutSecs: 60,
-                txBroadcastTimeoutSecs: 30,
-                perRequestTimeoutSecs: 15
-            )
-        )
-        builder.setChainSourceEsplora(serverUrl: esploraURL, config: syncConfig)
+        builder.setChainSourceEsplora(serverUrl: esploraURL, config: Constants.esploraSyncConfig)
 
         switch network {
         case .bitcoin:
@@ -250,8 +343,8 @@ class NodeService: NodeServiceProtocol {
             token: lspConfig.token
         )
 
-        let seedPhrasePath = Constants.userDataDir.appendingPathComponent("seed_phrase")
-        let keySeedPath = Constants.userDataDir.appendingPathComponent("keys_seed")
+        let seedPhrasePath = dataDir.appendingPathComponent("seed_phrase")
+        let keySeedPath = dataDir.appendingPathComponent("keys_seed")
 
         // Determine which mnemonic to use
         let words: String
@@ -265,7 +358,7 @@ class NodeService: NodeServiceProtocol {
             words = saved.trimmingCharacters(in: .whitespacesAndNewlines)
         } else if !FileManager.default.fileExists(atPath: keySeedPath.path) {
             // Truly new wallet — no seed_phrase, no keys_seed
-            Self.wipeWalletData()
+            wipeWalletData()
             words = generateEntropyMnemonic(wordCount: nil)
         } else {
             // Pre-upgrade wallet with only keys_seed, no mnemonic available
@@ -275,7 +368,7 @@ class NodeService: NodeServiceProtocol {
         // Save mnemonic to file and derive node entropy (now passed to build()).
         let nodeEntropy: NodeEntropy
         if !words.isEmpty {
-            try words.write(toFile: seedPhrasePath.path, atomically: true, encoding: .utf8)
+            try saveSeedPhrase(words)
             self.savedMnemonic = words
             nodeEntropy = NodeEntropy.fromBip39Mnemonic(mnemonic: words, passphrase: nil)
         } else {
@@ -735,10 +828,16 @@ class NodeService: NodeServiceProtocol {
         node?.verifySignature(msg: message, sig: signature, pkey: pubkey) ?? false
     }
 
+    /// Writes the wallet's seed words, which every later start of the app or the notification extension opens.
+    func saveSeedPhrase(_ words: String) throws {
+        let path = dataDir.appendingPathComponent("seed_phrase")
+        try words.write(to: path, atomically: true, encoding: .utf8)
+    }
+
     /// Wipe all wallet data files (keys_seed, SQLite + journals, seed_phrase)
     /// so a fresh wallet can be created without descriptor conflicts.
-    static func wipeWalletData() {
-        let dir = Constants.userDataDir
+    func wipeWalletData() {
+        let dir = dataDir
         let filesToDelete = [
             "keys_seed",
             "seed_phrase",
@@ -819,18 +918,15 @@ extension Notification.Name {
     static let ldkEventReceived = Notification.Name("ldkEventReceived")
 }
 
-// Keep in sync with NotificationService/Services/NodeStarter.swift.
 extension Error {
-    /// Determines whether a startup error is an Esplora feerate estimation failure or timeout
-    /// eligible for provider failover. Non-Esplora errors (database, storage, lock, entropy)
-    /// return false and should not be retried.
-    var isRetryableEsploraStartupError: Bool {
-        // Typed match only: NodeError's description is a human sentence ("Failed to
-        // update fee rate estimates."), so string-matching case names never fires for
-        // real errors and could false-positive on a bridged error carrying the text.
+    /// Determines whether a failed node start is a transient chain-source failure (fee
+    /// estimation or wallet sync) worth retrying with backoff instead of showing the error
+    /// screen. Typed match only, for the same reason as `isRetryableEsploraStartupError`.
+    var isRetryableNodeStartError: Bool {
+        if isRetryableEsploraStartupError { return true }
         guard let nodeError = self as? NodeError else { return false }
         switch nodeError {
-        case .FeerateEstimationUpdateFailed, .FeerateEstimationUpdateTimeout:
+        case .TxSyncFailed, .TxSyncTimeout:
             return true
         default:
             return false

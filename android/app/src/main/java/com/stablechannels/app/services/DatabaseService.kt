@@ -4,6 +4,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
+import android.database.sqlite.SQLiteException
 import android.database.sqlite.SQLiteOpenHelper
 import androidx.core.database.sqlite.transaction
 import com.stablechannels.app.models.*
@@ -68,6 +69,16 @@ class DatabaseService(context: Context) :
         private const val DB_FILENAME = "stablechannels.db"
         internal const val DB_VERSION = 4
         internal const val PENDING_SPLICE_WITHOUT_TXID_TIMEOUT_SECS = 10 * 60L
+
+        /**
+         * Whether a negotiated LSP splice names the Move [row] and none named it at or before the
+         * one `?` cutoff: the Move waits for that splice for at most a day from the first one that
+         * named it, so a later one (an RBF of it, or a new splice) cannot extend it.
+         */
+        internal fun heldByLspSpliceSql(row: String) =
+            "EXISTS (SELECT 1 FROM lsp_splices l WHERE l.move_row_id = $row AND l.status = 'negotiated' " +
+                "AND NOT EXISTS (SELECT 1 FROM lsp_splices f WHERE f.move_row_id = $row AND f.created_at <= ?))"
+
         // Nodes drop unconfirmed transactions after about two weeks.
         internal const val STALE_PENDING_ONCHAIN_SECS = 14 * 86400L
 
@@ -123,6 +134,7 @@ class DatabaseService(context: Context) :
                 trade_payment_id TEXT,
                 old_expected_usd REAL,
                 new_expected_usd REAL,
+                old_backing_sats INTEGER,
                 new_backing_sats INTEGER,
                 quote_price REAL,
                 fee_msat INTEGER NOT NULL DEFAULT 0,
@@ -261,8 +273,30 @@ class DatabaseService(context: Context) :
         createPendingStabilitySendTable(db)
         createStabilitySettlementsTable(db)
         createTradeIndexes(db)
+        addTradeOldBackingColumn(db)
         pruneHistoricalData(db)
     }
+
+    /**
+     * Added on open instead of with a version bump: SQLiteOpenHelper refuses to open a database
+     * whose version is newer than the build's, so a bump would lock out any older build.
+     */
+    private fun addTradeOldBackingColumn(db: SQLiteDatabase) {
+        if (tradesHaveOldBackingColumn(db)) return
+        try {
+            db.execSQL("ALTER TABLE trades ADD COLUMN old_backing_sats INTEGER")
+        } catch (e: SQLiteException) {
+            // Another open of this database added it first.
+            if (!tradesHaveOldBackingColumn(db)) throw e
+        }
+    }
+
+    private fun tradesHaveOldBackingColumn(db: SQLiteDatabase): Boolean =
+        db.rawQuery("PRAGMA table_info(trades)", null).use { c ->
+            var found = false
+            while (!found && c.moveToNext()) found = c.getString(1) == "old_backing_sats"
+            found
+        }
 
     private fun createPendingStabilitySendTable(db: SQLiteDatabase) {
         db.execSQL(
@@ -712,6 +746,7 @@ class DatabaseService(context: Context) :
                     put("request_payload", trade.requestPayload)
                     put("old_expected_usd", trade.oldExpectedUsd)
                     put("new_expected_usd", trade.newExpectedUsd)
+                    put("old_backing_sats", trade.oldBackingSats)
                     put("new_backing_sats", trade.newBackingSats)
                     put("quote_price", trade.quotePrice)
                     put("fee_msat", trade.feeMsat)
@@ -1123,7 +1158,8 @@ class DatabaseService(context: Context) :
                 db.rawQuery(
                         """
                         SELECT id, channel_id, user_channel_id, trade_payment_id, new_expected_usd,
-                               new_backing_sats, status, action
+                               new_backing_sats, status, action, old_backing_sats,
+                               old_expected_usd
                         FROM trades
                         WHERE trade_id = ? AND request_hash = ?
                           AND (trade_payment_id = ? OR trade_payment_id IS NULL)
@@ -1148,6 +1184,8 @@ class DatabaseService(context: Context) :
                                 c.getLong(5),
                                 c.getString(6),
                                 c.getString(7),
+                                c.getLongOrNull(8),
+                                c.getDoubleOrNull(9),
                             )
                     } ?: return rollbackResult(db, TradeControlApplyStatus.INVALID)
             val tradeId = trade[0] as Long
@@ -1158,11 +1196,14 @@ class DatabaseService(context: Context) :
             val storedBacking = trade[5] as Long
             val status = trade[6] as String
             val action = trade[7] as String
+            val storedOldBacking = trade[8] as Long?
+            val storedOldExpected = trade[9] as Double?
             if (
                 tradeChannelId != sync.channelId ||
                     tradeUserChannelId != sync.userChannelId ||
                     storedPaymentId != null && storedPaymentId != correlation.tradePaymentId ||
-                    kotlin.math.abs(storedExpected - sync.expectedUsd) > 0.000000001
+                    kotlin.math.abs(storedExpected - sync.expectedUsd) >
+                        TradeProtocol.EXPECTED_USD_TOLERANCE
             )
                 return rollbackResult(db, TradeControlApplyStatus.INVALID)
             if (status == "accepted") {
@@ -1180,7 +1221,7 @@ class DatabaseService(context: Context) :
             }
             val channel =
                 db.rawQuery(
-                        "SELECT channel_id, receiver_sats, sync_version, stable_sats FROM channels WHERE user_channel_id = ?",
+                        "SELECT channel_id, receiver_sats, sync_version, stable_sats, expected_usd FROM channels WHERE user_channel_id = ?",
                         arrayOf(sync.userChannelId),
                     )
                     .use { c ->
@@ -1191,6 +1232,7 @@ class DatabaseService(context: Context) :
                                 c.getLong(1),
                                 c.getLong(2),
                                 c.getLong(3),
+                                c.getDouble(4),
                             )
                     } // A missing row means the channel has since closed (deleteChannel runs on
                     // close) —
@@ -1202,15 +1244,24 @@ class DatabaseService(context: Context) :
             val receiverSats = channel[1] as Long
             val currentVersion = channel[2] as Long
             val currentBacking = channel[3] as Long
+            val currentExpected = channel[4] as Double
             val allocationApplied = sync.syncVersion > currentVersion
+            val acceptedBacking =
+                TradeProtocol.acceptedTradeBacking(
+                    newBackingSats = storedBacking,
+                    oldBackingSats = storedOldBacking,
+                    currentBackingSats = currentBacking,
+                    oldExpectedUsd = storedOldExpected,
+                    currentExpectedUsd = currentExpected,
+                )
             if (allocationApplied) {
-                if (storedBacking < 0L || storedBacking > receiverSats) {
+                if (acceptedBacking < 0L || acceptedBacking > receiverSats) {
                     return rollbackResult(db, TradeControlApplyStatus.RETRY)
                 }
                 val channelValues =
                     ContentValues().apply {
                         put("expected_usd", sync.expectedUsd)
-                        put("stable_sats", storedBacking)
+                        put("stable_sats", acceptedBacking)
                         put("sync_version", sync.syncVersion)
                         put("updated_at", System.currentTimeMillis() / 1000L)
                     }
@@ -1239,7 +1290,7 @@ class DatabaseService(context: Context) :
             db.execSQL("COMMIT")
             return TradeControlApplyResult(
                 TradeControlApplyStatus.APPLIED,
-                if (allocationApplied) storedBacking else currentBacking,
+                if (allocationApplied) acceptedBacking else currentBacking,
                 sync.backingSats,
                 correlation.tradePaymentId,
                 action,
@@ -2753,6 +2804,31 @@ class DatabaseService(context: Context) :
         return txids.singleOrNull()
     }
 
+    /** The LSP's splice on [txid], if the app saw it negotiated. */
+    fun getLspSplice(txid: String): LspSplice? = SpliceEventRecorder.lspSplice(this, txid)
+
+    /** Whether the LSP has a splice negotiated on the channel that has not locked yet. */
+    fun hasPendingLspSplice(nowEpochSecs: Long = System.currentTimeMillis() / 1000L): Boolean =
+        SpliceEventRecorder.hasPendingLspSplice(this, nowEpochSecs)
+
+    /** The txid of the pending splice on this channel, if there is exactly one. */
+    fun getPendingSpliceTxid(userChannelId: String, channelId: String): String? {
+        val txids =
+            readableDatabase
+                .rawQuery(
+                    "SELECT p.txid FROM payments p " +
+                        "JOIN splice_operations s ON s.payment_row_id = p.id " +
+                        "WHERE p.status = 'pending' AND p.txid IS NOT NULL " +
+                        "AND p.payment_type IN ('splice_in','splice_out') " +
+                        "AND s.user_channel_id = ? AND s.channel_id = ? LIMIT 2",
+                    arrayOf(userChannelId, channelId),
+                )
+                .use { cursor ->
+                    buildList { while (cursor.moveToNext()) add(cursor.getString(0)) }
+                }
+        return txids.singleOrNull()
+    }
+
     fun hasPendingSplice(): Boolean {
         // If the app died before SpliceNegotiated delivered a txid, there is no
         // durable in-flight splice to wait for. Let that pre-negotiation lock heal.
@@ -2762,10 +2838,15 @@ class DatabaseService(context: Context) :
         val noTxidCutoff =
             System.currentTimeMillis() / 1000 - PENDING_SPLICE_WITHOUT_TXID_TIMEOUT_SECS
         // Only an event whose txid can still be assigned proves negotiation; if assignment keeps
-        // refusing the txid, that operation must still expire.
+        // refusing the txid, that operation must still expire. A splice-out whose negotiation may
+        // have been recorded as the LSP's splice waits for the ready event to settle which it was,
+        // for at most a day from the first LSP splice that named it, so a later one (an RBF of it,
+        // or a new splice) cannot extend it.
+        val lspSpliceCutoff =
+            System.currentTimeMillis() / 1000 - SpliceEventRecorder.LSP_SPLICE_PENDING_MAX_AGE_SECS
         writableDatabase.execSQL(
-            "UPDATE payments SET status = 'failed' WHERE status = 'pending' AND payment_type IN ('splice_in','splice_out') AND txid IS NULL AND created_at < ? AND NOT EXISTS (SELECT 1 FROM splice_events e WHERE e.payment_row_id = payments.id AND e.txid IS NOT NULL AND NOT EXISTS (SELECT 1 FROM payments o WHERE o.txid = e.txid AND o.id != payments.id))",
-            arrayOf(noTxidCutoff),
+            "UPDATE payments SET status = 'failed' WHERE status = 'pending' AND payment_type IN ('splice_in','splice_out') AND txid IS NULL AND created_at < ? AND NOT EXISTS (SELECT 1 FROM splice_events e WHERE e.payment_row_id = payments.id AND e.txid IS NOT NULL AND NOT EXISTS (SELECT 1 FROM payments o WHERE o.txid = e.txid AND o.id != payments.id)) AND NOT ${heldByLspSpliceSql("payments.id")}",
+            arrayOf(noTxidCutoff, lspSpliceCutoff),
         )
         val cursor =
             readableDatabase.rawQuery(
@@ -2774,6 +2855,22 @@ class DatabaseService(context: Context) :
             )
         return cursor.use { it.moveToFirst() }
     }
+
+    /**
+     * Whether a Move still waiting for its transaction is held by an LSP splice that named it
+     * ([heldByLspSpliceSql]): a failed negotiation is then not taken as the Move's.
+     */
+    fun lspSpliceHoldsAMove(nowEpochSecs: Long = System.currentTimeMillis() / 1000L): Boolean =
+        readableDatabase
+            .rawQuery(
+                "SELECT 1 FROM payments WHERE payment_type IN ('splice_in','splice_out') " +
+                    "AND status = 'pending' AND txid IS NULL " +
+                    "AND ${heldByLspSpliceSql("payments.id")} LIMIT 1",
+                arrayOf(
+                    (nowEpochSecs - SpliceEventRecorder.LSP_SPLICE_PENDING_MAX_AGE_SECS).toString()
+                ),
+            )
+            .use { it.moveToFirst() }
 
     /**
      * Whether a move of ours that has not failed or expired spends [fundingTxid], the channel's
@@ -3015,3 +3112,5 @@ private fun Cursor.getStringOrNull(index: Int): String? =
 
 private fun Cursor.getDoubleOrNull(index: Int): Double? =
     if (isNull(index)) null else getDouble(index)
+
+private fun Cursor.getLongOrNull(index: Int): Long? = if (isNull(index)) null else getLong(index)

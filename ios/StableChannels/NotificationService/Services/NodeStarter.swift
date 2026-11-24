@@ -1,6 +1,5 @@
 import Foundation
 import LDKNode
-import SQLite3
 
 /// Protocol for starting an LDK node
 protocol NodeStarter {
@@ -13,16 +12,16 @@ extension NodeStarter {
         // Prefer the URL the main app last started a node against (written on every
         // successful start, including failover) so the NSE doesn't pay a degraded
         // primary's failure before falling over itself.
-        let stored = UserDefaults(suiteName: Constants.appGroup)?.string(forKey: "esplora_chain_url")
-        let primary = stored ?? Constants.primaryChainURL
-        let fallback = (primary == Constants.primaryChainURL)
-            ? Constants.fallbackChainURL
-            : Constants.primaryChainURL
+        let stored = UserDefaultsChainURLStore(defaults: UserDefaults(suiteName: Constants.appGroup)).load()
+        let providers = NodeStartupPolicy.extensionProviders(
+            preferred: stored ?? Constants.primaryChainURL,
+            providers: Constants.esploraChainURLs
+        )
         return try buildNode(
             dataDir: dataDir,
             logger: logger,
-            primaryURL: primary,
-            fallbackURL: fallback
+            primaryURL: providers[0],
+            fallbackURL: providers[1]
         )
     }
 }
@@ -52,7 +51,13 @@ final class DefaultNodeStarter: NodeStarter {
         // latest_lightning_wallet_sync_timestamp — so on strip runs the freshness gate must
         // wait for a new sync instead of inheriting the main app's recent one. Logged so the
         // pilot metrics can split immediate-send runs from forced-resync runs.
-        let nodeMetricsReset = Self.stripGossipFromDB(path: ldkDbPath.path)
+        let nodeMetricsReset: Bool
+        do {
+            nodeMetricsReset = try LdkDbMaintenance(dataDir: dataDir, log: logger.log).stripGossip()
+        } catch {
+            logger.log("Gossip strip failed: \(error)")
+            nodeMetricsReset = false
+        }
         logger
             .log("stability_gate {\"event\":\"node_metrics_reset\",\"platform\":\"ios\",\"reset\":\(nodeMetricsReset)}")
 
@@ -86,20 +91,7 @@ final class DefaultNodeStarter: NodeStarter {
         // latest_lightning_wallet_sync_timestamp, and the NSE gets essentially one sync
         // attempt per run (600s interval), which the chain-freshness gate depends on for
         // long-offline wallets.
-        let syncConfig = EsploraSyncConfig(
-            backgroundSyncConfig: BackgroundSyncConfig(
-                onchainWalletSyncIntervalSecs: 600,
-                lightningWalletSyncIntervalSecs: 600,
-                feeRateCacheUpdateIntervalSecs: 3600
-            ),
-            timeoutsConfig: SyncTimeoutsConfig(
-                onchainWalletSyncTimeoutSecs: 60,
-                lightningWalletSyncTimeoutSecs: 60,
-                feeRateCacheUpdateTimeoutSecs: 6,
-                txBroadcastTimeoutSecs: 30,
-                perRequestTimeoutSecs: 15
-            )
-        )
+        let syncConfig = Constants.esploraSyncConfig
 
         do {
             let builder = LDKNode.Builder.fromConfig(config: config)
@@ -155,52 +147,5 @@ final class DefaultNodeStarter: NodeStarter {
             address: Self.lspAddress,
             persist: true
         )
-    }
-
-    /// Returns true when the strip ran and deleted node_metrics (resetting LDK's persisted
-    /// Lightning-sync timestamp along with the graph and scorer).
-    private static func stripGossipFromDB(path: String) -> Bool {
-        var db: OpaquePointer?
-        guard sqlite3_open(path, &db) == SQLITE_OK else { return false }
-        defer { sqlite3_close(db) }
-
-        var stmt: OpaquePointer?
-        let sql = "SELECT LENGTH(value) FROM ldk_node_data WHERE key = 'network_graph'"
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return false }
-        let hasGraph: Bool
-        if sqlite3_step(stmt) == SQLITE_ROW {
-            let size = sqlite3_column_int64(stmt, 0)
-            hasGraph = size > 100_000
-        } else {
-            hasGraph = false
-        }
-        sqlite3_finalize(stmt)
-
-        if hasGraph {
-            sqlite3_exec(db, "DELETE FROM ldk_node_data WHERE key = 'network_graph'", nil, nil, nil)
-            sqlite3_exec(db, "DELETE FROM ldk_node_data WHERE key = 'scorer'", nil, nil, nil)
-            sqlite3_exec(db, "DELETE FROM ldk_node_data WHERE key = 'node_metrics'", nil, nil, nil)
-            sqlite3_exec(db, "VACUUM", nil, nil, nil)
-        }
-        return hasGraph
-    }
-}
-
-// Keep in sync with StableChannels/Services/NodeService.swift.
-extension Error {
-    /// Determines whether a startup error is an Esplora feerate estimation failure or timeout
-    /// eligible for provider failover. Non-Esplora errors (database, storage, lock, entropy)
-    /// return false and should not be retried.
-    var isRetryableEsploraStartupError: Bool {
-        // Typed match only: NodeError's description is a human sentence ("Failed to
-        // update fee rate estimates."), so string-matching case names never fires for
-        // real errors and could false-positive on a bridged error carrying the text.
-        guard let nodeError = self as? NodeError else { return false }
-        switch nodeError {
-        case .FeerateEstimationUpdateFailed, .FeerateEstimationUpdateTimeout:
-            return true
-        default:
-            return false
-        }
     }
 }

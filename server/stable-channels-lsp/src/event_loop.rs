@@ -1,6 +1,6 @@
 //! Long-running SubscribeEvents loop: connects to LDK Server's event stream, reconnects with exponential backoff, and dispatches each EventEnvelope to its handler.
 
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}};
 use std::time::Duration;
 
 use tracing::{info, warn};
@@ -25,18 +25,104 @@ impl EventSource for ldk_server_client::client::EventStream {
     }
 }
 
-/// Keep draining the subscription while accounting retries. A bounded queue here would push
-/// the wait back to LDK Server, whose broadcast stream silently drops events when it falls behind.
-/// The caller owns the JoinSet so reconnect/cancellation also stops the old reader.
+/// The reader with the production limit, for tests; dropping the JoinSet stops it.
 #[cfg(test)]
-pub(crate) fn buffer_events(
-    source: impl EventSource,
-) -> (
-    tokio::task::JoinSet<()>,
-    tokio::sync::mpsc::UnboundedReceiver<EventItem>,
-) {
-    let (reader, receiver, _) = buffer_events_with_health(source);
-    (reader, receiver)
+pub(crate) fn buffer_events(source: impl EventSource) -> (tokio::task::JoinSet<()>, EventBuffer) {
+    let (reader, events, _) = buffer_events_with_health(source, BUFFER_LIMIT);
+    (reader, events)
+}
+
+/// Most events, and encoded bytes, held while dispatch is delayed; the reader can't wait instead, since LDK Server drops events for a reader that falls behind.
+const BUFFER_LIMIT: BufferLimit = BufferLimit { events: 100_000, bytes: 64 * 1024 * 1024 };
+
+#[derive(Debug, Clone, Copy)]
+struct BufferLimit {
+    events: usize,
+    bytes: usize,
+}
+
+impl BufferLimit {
+    fn half(self) -> Self {
+        Self { events: self.events / 2, bytes: self.bytes / 2 }
+    }
+}
+
+/// What the buffered events hold against the limit; a hole being dropped holds one event slot for its marker.
+#[derive(Default)]
+struct Held {
+    events: AtomicUsize,
+    bytes: AtomicUsize,
+    /// Wakes a reader holding a hole when dispatch frees room, so the hole is queued even if no event follows it.
+    freed: tokio::sync::Notify,
+}
+
+impl Held {
+    /// An empty buffer takes any one event, so an oversized event can't stop the stream for good.
+    fn has_room(&self, events: usize, bytes: usize, limit: BufferLimit) -> bool {
+        events == 0
+            || (events < limit.events && self.bytes.load(Ordering::Acquire).saturating_add(bytes) <= limit.bytes)
+    }
+}
+
+/// What the reader queues for dispatch.
+#[derive(Debug)]
+pub(crate) enum Buffered {
+    Event(EventItem),
+    /// The buffer was full, so this many events were dropped here.
+    Dropped(u64),
+}
+
+#[cfg(test)]
+impl Buffered {
+    pub(crate) fn event(self) -> EventItem {
+        match self {
+            Buffered::Event(item) => item,
+            Buffered::Dropped(count) => panic!("expected an event, found {count} dropped"),
+        }
+    }
+}
+
+/// Events read off the subscription and not dispatched yet.
+pub(crate) struct EventBuffer {
+    receiver: tokio::sync::mpsc::UnboundedReceiver<(usize, Buffered)>,
+    held: Arc<Held>,
+}
+
+impl EventBuffer {
+    pub(crate) async fn recv(&mut self) -> Option<Buffered> {
+        let (bytes, item) = self.receiver.recv().await?;
+        self.held.events.fetch_sub(1, Ordering::SeqCst);
+        self.held.bytes.fetch_sub(bytes, Ordering::AcqRel);
+        self.held.freed.notify_one();
+        Some(item)
+    }
+
+    /// Counts a hole still being dropped, so no checkpoint passes it before its reconcile.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.held.events.load(Ordering::SeqCst) == 0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.receiver.len()
+    }
+}
+
+/// Drop events rather than hold more; the hole's reconcile settles payment outcomes and channels, but trades and forward deductions among them are not replayed.
+fn buffer_full(events: usize, bytes: usize, limit: BufferLimit) {
+    warn!("[event_loop] event buffer full ({} events, {} bytes); dropping events until fewer than half are held", events, bytes);
+    stable_channels::audit::audit_event(
+        "EVENT_BUFFER_FULL",
+        serde_json::json!({ "events": events, "bytes": bytes, "max_events": limit.events, "max_bytes": limit.bytes }),
+    );
+}
+
+/// Queue a hole's marker in the slot it has held since its first drop; false once dispatch is gone.
+fn queue_hole(sender: &tokio::sync::mpsc::UnboundedSender<(usize, Buffered)>, dropped: &mut u64) -> bool {
+    stable_channels::audit::audit_event("EVENT_BUFFER_RESUMED", serde_json::json!({ "dropped": *dropped }));
+    let queued = sender.send((0, Buffered::Dropped(*dropped))).is_ok();
+    *dropped = 0;
+    queued
 }
 
 struct ReaderActivity(Arc<AtomicBool>);
@@ -49,29 +135,76 @@ impl Drop for ReaderActivity {
 
 fn buffer_events_with_health(
     mut source: impl EventSource,
-) -> (
-    tokio::task::JoinSet<()>,
-    tokio::sync::mpsc::UnboundedReceiver<EventItem>,
-    Arc<AtomicBool>,
-) {
+    limit: BufferLimit,
+) -> (tokio::task::JoinSet<()>, EventBuffer, Arc<AtomicBool>) {
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let held = Arc::new(Held::default());
+    let counted = Arc::clone(&held);
     let active = Arc::new(AtomicBool::new(false));
     let activity = ReaderActivity(Arc::clone(&active));
     let mut reader = tokio::task::JoinSet::new();
     reader.spawn(async move {
         let activity = activity;
         activity.0.store(true, Ordering::Release);
-        while let Some(item) = source.next_event().await {
+        let mut dropped: u64 = 0;
+        loop {
+            // The same read stays pending across wake-ups, so nothing is cancelled.
+            let mut next = source.next_event();
+            let item = loop {
+                tokio::select! {
+                    // An event that ends a hole queues the hole ahead of itself, so an event comes first when both are ready.
+                    biased;
+                    item = &mut next => break item,
+                    _ = counted.freed.notified(), if dropped > 0 => {
+                        if counted.has_room(counted.events.load(Ordering::SeqCst) - 1, 0, limit.half()) && !queue_hole(&sender, &mut dropped) {
+                            return;
+                        }
+                    },
+                }
+            };
+            let Some(item) = item else { break };
+            let (bytes, item) = match item {
+                Ok(envelope) => {
+                    let bytes = prost::Message::encoded_len(&envelope);
+                    // Once full, take events again only when fewer than half are held, so each hole costs one reconcile per half a buffer handled.
+                    let room = if dropped == 0 { limit } else { limit.half() };
+                    let fits = loop {
+                        let seen = counted.events.load(Ordering::SeqCst);
+                        if counted.has_room(seen - usize::from(dropped > 0), bytes, room) {
+                            break true;
+                        }
+                        // Hold the marker's slot from the first drop, unless an event was handled since `seen`, so no checkpoint can pass the hole.
+                        if dropped > 0 || counted.events.compare_exchange(seen, seen + 1, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                            break false;
+                        }
+                    };
+                    if !fits {
+                        if dropped == 0 {
+                            buffer_full(counted.events.load(Ordering::SeqCst) - 1, counted.bytes.load(Ordering::Acquire), limit);
+                        }
+                        dropped += 1;
+                        continue;
+                    }
+                    (bytes, Ok(envelope))
+                },
+                Err(error) => (0, Err(error)),
+            };
+            // A stream error leaves the hole, still holding its slot, to the reconnect's gap reconcile.
+            if dropped > 0 && item.is_ok() && !queue_hole(&sender, &mut dropped) {
+                break;
+            }
             let failed = item.is_err();
             if failed {
                 activity.0.store(false, Ordering::Release);
             }
-            if sender.send(item).is_err() || failed {
+            counted.events.fetch_add(1, Ordering::SeqCst);
+            counted.bytes.fetch_add(bytes, Ordering::AcqRel);
+            if sender.send((bytes, Buffered::Event(item))).is_err() || failed {
                 break;
             }
         }
     });
-    (reader, receiver, active)
+    (reader, EventBuffer { receiver, held }, active)
 }
 
 fn now_millis() -> u128 {
@@ -166,7 +299,7 @@ fn checkpoint_if_ready(
     health: &mut StreamHealth,
     db: &stable_channels::db::Database,
     active: &AtomicBool,
-    events: &tokio::sync::mpsc::UnboundedReceiver<EventItem>,
+    events: &EventBuffer,
 ) {
     // Sample BEFORE checking liveness/drainage, so racing new arrivals are after this boundary.
     let now_ms = now_millis() as i64;
@@ -178,7 +311,12 @@ fn checkpoint_if_ready(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DispatchOutcome {
     Continue,
+    /// The stream failed: subscribe again.
     Reconnect,
+    /// A write for this event failed: reconcile from LDK Server's records before the next event, keeping the stream.
+    Reconcile,
+    /// LDK Server didn't answer a read this event needs: handle it again after a pause, keeping the stream.
+    Retry,
 }
 
 /// Build the audit `data` for a claimable (unclaimed inbound) payment; no user_channel_id exists yet.
@@ -261,7 +399,7 @@ async fn run(state: AppState) {
                 continue;
             },
         };
-        let (_reader, mut events, active) = buffer_events_with_health(stream);
+        let (_reader, mut events, active) = buffer_events_with_health(stream, BUFFER_LIMIT);
         info!("[event_loop] subscribed");
         let node_info = state
             .ldk_server
@@ -290,76 +428,7 @@ async fn run(state: AppState) {
             "EVENT_STREAM_CONNECTED",
             connected_audit_data(health.gap.as_ref().map(|gap| gap.1.as_str()), ldk_server_version.as_deref()),
         );
-        {
-            stable_channels::audit::audit_event(
-                "RECONCILIATION_STARTED",
-                serde_json::json!({
-                    "correlation_id": health.gap.as_ref().map(|gap| gap.1.as_str()),
-                    "scopes": ["channels", "payments", "forwards", "peers", "sweeps"],
-                }),
-            );
-            // Finish failed accounting writes before reconnect hydration or backfill can
-            // change the same books. The existing stream remains open while we retry.
-            let mut mgr = StableChannelManager::lock_for_event_with_top_ups_resolved(
-                &state.stable_manager,
-                state.ldk_server.as_ref(),
-            )
-            .await;
-            // The books need no price, so the list is reloaded whatever the price cache holds.
-            let btc_price = stable_channels::price_feeds::get_fresh_cached_price_no_fetch();
-            mgr.reconcile_from_grpc(state.ldk_server.as_ref(), btc_price)
-                .await;
-            drop(mgr);
-            let counts = crate::backfill::reconcile_event_history(
-                state.ldk_server.as_ref(),
-                state.db.as_ref(),
-                health.gap.as_ref().map(|gap| gap.0),
-            ).await;
-            let reconciliation_complete = reconciliation_allows_health(&counts);
-            let reconciliation = serde_json::json!({
-                "correlation_id": health.gap.as_ref().map(|gap| gap.1.as_str()),
-                "gap_started_ms": health.gap.as_ref().map(|gap| gap.0),
-                "counts": counts,
-                "status": if !reconciliation_complete { "partial" }
-                    else if counts.lost_scopes > 0 { "completed_with_loss" } else { "completed" },
-                "history_complete": reconciliation_complete && counts.lost_scopes == 0,
-                "coverage": "current_gap_only",
-            });
-            // Only a committed ledger row counts; a JSONL mirror would make the guard pass vacuously.
-            let result_recorded = match stable_channels::audit::record_event(
-                "RECONCILIATION_RESULT",
-                reconciliation.clone(),
-            ) {
-                Ok(outcome) => outcome.event_id > 0,
-                Err(error) => {
-                    checkpoint_failed("record_reconciliation_result", &error);
-                    false
-                },
-            };
-            health.reconciliation_finished(&counts, reconciliation, result_recorded);
-            if !counts.settlement_outcomes_safe {
-                warn!(
-                    "[event_loop] terminal settlement reconciliation incomplete; retrying before live dispatch"
-                );
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                continue;
-            }
-        }
-        checkpoint_if_ready(&mut health, state.db.as_ref(), &active, &events);
-        let mut heartbeat = health_interval(STREAM_HEALTH_INTERVAL);
-        loop {
-            tokio::select! {
-                item = events.recv() => {
-                    let Some(item) = item else { break };
-                    if dispatch(item, &state).await == DispatchOutcome::Reconnect {
-                        break;
-                    }
-                },
-                _ = heartbeat.tick() => {
-                    checkpoint_if_ready(&mut health, state.db.as_ref(), &active, &events);
-                },
-            }
-        }
+        serve(&mut events, &active, &state.stable_manager, state.db.as_ref(), state.ldk_server.as_ref(), &mut health).await;
         warn!("[event_loop] stream ended; reconnecting");
         // Persist before announcing the transition or attempting another subscription. If this
         // write fails, the prior durable health still bounds a crash/restart conservatively.
@@ -371,9 +440,168 @@ async fn run(state: AppState) {
     }
 }
 
+/// Longest wait between reconciliation passes while terminal settlement outcomes can't be applied, and between tries of an event LDK Server didn't answer for.
+const MAX_RETRY_WAIT: Duration = Duration::from_secs(60);
+
+/// Reconcile the gap, then dispatch buffered events until the subscription ends or fails.
+async fn serve(
+    events: &mut EventBuffer,
+    active: &AtomicBool,
+    manager: &tokio::sync::Mutex<StableChannelManager>,
+    db: &stable_channels::db::Database,
+    ldk: &dyn LdkServerCalls,
+    health: &mut StreamHealth,
+) {
+    reconcile_until_safe(manager, db, ldk, health, "stream_connected").await;
+    checkpoint_if_ready(health, db, active, events);
+    let mut heartbeat = health_interval(STREAM_HEALTH_INTERVAL);
+    loop {
+        tokio::select! {
+            item = events.recv() => {
+                match item {
+                    None => return,
+                    Some(Buffered::Dropped(_)) => reconcile_in_place(manager, db, ldk, health, "events_dropped").await,
+                    Some(Buffered::Event(item)) => {
+                        if !handle(item, manager, db, ldk, health).await {
+                            return;
+                        }
+                    },
+                }
+            },
+            _ = heartbeat.tick() => {
+                checkpoint_if_ready(health, db, active, events);
+            },
+        }
+    }
+}
+
+/// Longest an event waits for LDK Server: as long as a wallet waits for a trade's result.
+const MAX_EVENT_RETRY: Duration = Duration::from_secs(stable_channels::constants::TRADE_RESULT_TIMEOUT_SECS);
+
+/// Dispatch one event, trying again while LDK Server doesn't answer for it; false when the stream failed and must be subscribed again.
+async fn handle(
+    item: EventItem,
+    manager: &tokio::sync::Mutex<StableChannelManager>,
+    db: &stable_channels::db::Database,
+    ldk: &dyn LdkServerCalls,
+    health: &mut StreamHealth,
+) -> bool {
+    let started = tokio::time::Instant::now();
+    let mut retry = Duration::from_secs(1);
+    loop {
+        match dispatch(item.clone(), manager, db, ldk).await {
+            DispatchOutcome::Continue => return true,
+            DispatchOutcome::Reconnect => return false,
+            DispatchOutcome::Reconcile => {
+                reconcile_in_place(manager, db, ldk, health, "dispatch_write_failed").await;
+                return true;
+            },
+            DispatchOutcome::Retry if started.elapsed() < MAX_EVENT_RETRY => {
+                warn!("[event_loop] LDK Server didn't answer for an event; trying it again in {:?}", retry);
+                tokio::time::sleep(retry).await;
+                retry = std::cmp::min(retry * 2, MAX_RETRY_WAIT);
+            },
+            DispatchOutcome::Retry => {
+                warn!("[event_loop] LDK Server didn't answer for an event within {:?}; moving on", MAX_EVENT_RETRY);
+                stable_channels::audit::audit_event(
+                    "EVENT_RETRY_ABANDONED",
+                    serde_json::json!({ "payment_id": payment_of(&item), "waited_secs": started.elapsed().as_secs() }),
+                );
+                return true;
+            },
+        }
+    }
+}
+
+/// The received payment an event reports, the only kind that is tried again.
+fn payment_of(item: &EventItem) -> Option<&str> {
+    match item.as_ref().ok()?.event.as_ref()? {
+        EventVariant::PaymentReceived(event) => event.payment.as_ref().map(|payment| payment.payment_id.as_str()),
+        _ => None,
+    }
+}
+
+/// Reopen the gap from the last checkpoint and reconcile it, keeping the stream; persisted first, so a crash during recovery still bounds the gap.
+async fn reconcile_in_place(
+    manager: &tokio::sync::Mutex<StableChannelManager>,
+    db: &stable_channels::db::Database,
+    ldk: &dyn LdkServerCalls,
+    health: &mut StreamHealth,
+    trigger: &str,
+) {
+    *health = StreamHealth::new(begin_gap_with_retry(db).await);
+    reconcile_until_safe(manager, db, ldk, health, trigger).await;
+}
+
+/// Reconcile until every terminal settlement outcome is applied, waiting up to a minute between passes; the subscription keeps reading meanwhile.
+async fn reconcile_until_safe(
+    manager: &tokio::sync::Mutex<StableChannelManager>,
+    db: &stable_channels::db::Database,
+    ldk: &dyn LdkServerCalls,
+    health: &mut StreamHealth,
+    trigger: &str,
+) {
+    let mut retry = Duration::from_secs(1);
+    while !reconcile(manager, db, ldk, health, trigger).await {
+        warn!(
+            "[event_loop] terminal settlement reconciliation incomplete; retrying in {:?} before live dispatch",
+            retry
+        );
+        tokio::time::sleep(retry).await;
+        retry = std::cmp::min(retry * 2, MAX_RETRY_WAIT);
+    }
+}
+
+/// One pass over LDK Server's records for the current gap; true when every terminal settlement outcome was applied.
+async fn reconcile(
+    manager: &tokio::sync::Mutex<StableChannelManager>,
+    db: &stable_channels::db::Database,
+    ldk: &dyn LdkServerCalls,
+    health: &mut StreamHealth,
+    trigger: &str,
+) -> bool {
+    stable_channels::audit::audit_event(
+        "RECONCILIATION_STARTED",
+        serde_json::json!({
+            "correlation_id": health.gap.as_ref().map(|gap| gap.1.as_str()),
+            "scopes": ["channels", "payments", "forwards", "peers", "sweeps"],
+            "trigger": trigger,
+        }),
+    );
+    // Finish failed accounting writes before hydration or backfill can change the same books; the stream keeps reading meanwhile.
+    let mut mgr = StableChannelManager::lock_for_event_with_top_ups_resolved(manager, ldk).await;
+    // The books need no price, so the list is reloaded whatever the price cache holds.
+    let btc_price = stable_channels::price_feeds::get_fresh_cached_price_no_fetch();
+    mgr.reconcile_from_grpc(ldk, btc_price).await;
+    drop(mgr);
+    let counts = crate::backfill::reconcile_event_history(ldk, db, health.gap.as_ref().map(|gap| gap.0)).await;
+    let reconciliation_complete = reconciliation_allows_health(&counts);
+    let reconciliation = serde_json::json!({
+        "correlation_id": health.gap.as_ref().map(|gap| gap.1.as_str()),
+        "gap_started_ms": health.gap.as_ref().map(|gap| gap.0),
+        "counts": counts,
+        "status": if !reconciliation_complete { "partial" }
+            else if counts.lost_scopes > 0 { "completed_with_loss" } else { "completed" },
+        "history_complete": reconciliation_complete && counts.lost_scopes == 0,
+        "coverage": "current_gap_only",
+    });
+    // Only a committed ledger row counts; a JSONL mirror would make the guard pass vacuously.
+    let result_recorded = match stable_channels::audit::record_event("RECONCILIATION_RESULT", reconciliation.clone()) {
+        Ok(outcome) => outcome.event_id > 0,
+        Err(error) => {
+            checkpoint_failed("record_reconciliation_result", &error);
+            false
+        },
+    };
+    health.reconciliation_finished(&counts, reconciliation, result_recorded);
+    counts.settlement_outcomes_safe
+}
+
 async fn dispatch(
     item: Result<EventEnvelope, ldk_server_client::error::LdkServerError>,
-    state: &AppState,
+    manager: &tokio::sync::Mutex<StableChannelManager>,
+    db: &stable_channels::db::Database,
+    ldk: &dyn LdkServerCalls,
 ) -> DispatchOutcome {
     let envelope = match item {
         Ok(e) => e,
@@ -382,17 +610,16 @@ async fn dispatch(
             return DispatchOutcome::Reconnect;
         },
     };
-    let ldk = state.ldk_server.as_ref() as &dyn LdkServerCalls;
     // Keep this envelope on the stack while an earlier correction is unsaved. Returning or
     // reconnecting here would lose the event because LDK Server does not replay its stream.
-    let mut mgr = StableChannelManager::lock_for_event_with_top_ups_resolved(&state.stable_manager, ldk).await;
+    let mut mgr = StableChannelManager::lock_for_event_with_top_ups_resolved(manager, ldk).await;
     let btc_price = stable_channels::price_feeds::get_fresh_cached_price_no_fetch();
-    let outcome = dispatch_event(envelope.event, &mut mgr, &state.db, ldk, btc_price).await;
+    let outcome = dispatch_event(envelope.event, &mut mgr, db, ldk, btc_price).await;
     drop(mgr);
     if outcome == DispatchOutcome::Continue {
         // The last event may itself have queued a failed accounting correction. Finish that
         // existing retry barrier before idle health can pass it, even if no next event arrives.
-        drop(StableChannelManager::lock_for_event(&state.stable_manager, ldk).await);
+        drop(StableChannelManager::lock_for_event(manager, ldk).await);
     }
     outcome
 }
@@ -473,8 +700,10 @@ pub(crate) async fn dispatch_event(
         Some(EventVariant::PaymentReceived(e)) => {
             let payment_id = e.payment.as_ref().map(|p| p.payment_id.clone());
             let amount_msat = e.payment.as_ref().and_then(|p| p.amount_msat);
-            mgr.handle_payment_received(e.custom_records, payment_id, amount_msat, ldk, btc_price)
-                .await;
+            let handled = mgr.handle_payment_received(e.custom_records, payment_id, amount_msat, ldk, btc_price).await;
+            if handled == crate::stable_manager::Handled::Retry {
+                return DispatchOutcome::Retry;
+            }
         },
         Some(EventVariant::PaymentForwarded(e)) => {
             // The event carries per-HTLC locators; take the first of each list as the representative channel/node.
@@ -519,7 +748,7 @@ pub(crate) async fn dispatch_event(
                                 "error": error.to_string(),
                             }),
                         );
-                        return DispatchOutcome::Reconnect;
+                        return DispatchOutcome::Reconcile;
                     }
                 }
                 // Safe to book directly: dispatch runs under lock_for_event, which has already saved any correction that would replace these books.
@@ -535,7 +764,7 @@ pub(crate) async fn dispatch_event(
                                 "error": error.to_string(),
                             }),
                         );
-                        return DispatchOutcome::Reconnect;
+                        return DispatchOutcome::Reconcile;
                     }
                 }
                 let known_settlement = db
@@ -560,7 +789,7 @@ pub(crate) async fn dispatch_event(
                                 "error": error.to_string(),
                             }),
                         );
-                        return DispatchOutcome::Reconnect;
+                        return DispatchOutcome::Reconcile;
                     },
                 }
             }
@@ -593,7 +822,7 @@ pub(crate) async fn dispatch_event(
                             "error": error.to_string(),
                         }),
                     );
-                    return DispatchOutcome::Reconnect;
+                    return DispatchOutcome::Reconcile;
                 }
                 if let Err(error) = db.mark_trade_response_failed(
                     payment_id,
@@ -607,7 +836,7 @@ pub(crate) async fn dispatch_event(
                             "error": error.to_string(),
                         }),
                     );
-                    return DispatchOutcome::Reconnect;
+                    return DispatchOutcome::Reconcile;
                 }
             }
             let top_up_channel = match payment_id.as_deref().map(|payment_id| mgr.fail_stability_top_up(payment_id)) {
@@ -621,7 +850,7 @@ pub(crate) async fn dispatch_event(
                             "error": error.to_string(),
                         }),
                     );
-                    return DispatchOutcome::Reconnect;
+                    return DispatchOutcome::Reconcile;
                 }
                 None => None,
             };
@@ -767,7 +996,7 @@ mod tests {
         let mut health = StreamHealth::new(db.begin_event_stream_gap(1_000).unwrap());
         health.reconciliation_finished(&complete_counts(), completed_result(), true);
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-        let (mut reader, events, active) = buffer_events_with_health(TestSource(receiver));
+        let (mut reader, events, active) = buffer_events_with_health(TestSource(receiver), BUFFER_LIMIT);
         tokio::time::timeout(Duration::from_secs(1), async {
             while !active.load(Ordering::Acquire) { tokio::task::yield_now().await; }
         }).await.unwrap();
@@ -784,6 +1013,489 @@ mod tests {
         assert!(!active.load(Ordering::Acquire));
         assert!(!health.checkpoint(&db, 90_006_000, active.load(Ordering::Acquire), events.is_empty()).unwrap());
         assert_eq!(db.begin_event_stream_gap(90_007_000).unwrap(), gap);
+    }
+
+    fn claimable(payment_id: &str) -> EventEnvelope {
+        use ldk_server_client::ldk_server_grpc::events::PaymentClaimable;
+        use ldk_server_client::ldk_server_grpc::types::Payment;
+        EventEnvelope {
+            event: Some(EventVariant::PaymentClaimable(PaymentClaimable {
+                payment: Some(Payment { payment_id: payment_id.to_owned(), ..Default::default() }),
+                ..Default::default()
+            })),
+        }
+    }
+
+    fn payment_id_of(item: EventItem) -> String {
+        match item.unwrap().event {
+            Some(EventVariant::PaymentClaimable(event)) => event.payment.unwrap().payment_id,
+            other => panic!("unexpected event {other:?}"),
+        }
+    }
+
+    async fn reader_ended(reader: &mut tokio::task::JoinSet<()>) {
+        tokio::time::timeout(Duration::from_secs(5), reader.join_next())
+            .await
+            .expect("the reader stops by itself")
+            .unwrap()
+            .unwrap();
+    }
+
+    /// A subscription that counts how often the reader asked it for an event.
+    struct CountingSource(tokio::sync::mpsc::UnboundedReceiver<EventItem>, Arc<AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl EventSource for CountingSource {
+        async fn next_event(&mut self) -> Option<EventItem> {
+            self.1.fetch_add(1, Ordering::SeqCst);
+            self.0.recv().await
+        }
+    }
+
+    /// Wait until the reader has dealt with `count` events and asks for the next.
+    async fn dealt_with(asks: &AtomicUsize, count: usize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while asks.load(Ordering::SeqCst) <= count {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the reader deals with what it was sent");
+    }
+
+    async fn holds(events: &EventBuffer, count: usize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while events.len() != count {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the reader buffers what it was sent");
+    }
+
+    #[tokio::test]
+    async fn a_full_buffer_drops_events_only_until_half_of_it_is_handled() {
+        let _guard = crate::stable_manager::tests::AUDIT_TEST_GUARD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let asks = Arc::new(AtomicUsize::new(0));
+        stable_channels::audit::enable_test_capture();
+        let (_reader, mut events, active) = buffer_events_with_health(
+            CountingSource(receiver, Arc::clone(&asks)),
+            BufferLimit { events: 4, bytes: usize::MAX },
+        );
+        for n in 0..6 {
+            sender.send(Ok(claimable(&format!("pay-{n}")))).unwrap();
+        }
+        dealt_with(&asks, 6).await;
+        assert_eq!(events.len(), 4);
+        for n in 0..2 {
+            assert_eq!(payment_id_of(events.recv().await.unwrap().event()), format!("pay-{n}"));
+        }
+        // Two of four held is not fewer than half yet.
+        sender.send(Ok(claimable("pay-6"))).unwrap();
+        dealt_with(&asks, 7).await;
+        for n in 2..4 {
+            assert_eq!(payment_id_of(events.recv().await.unwrap().event()), format!("pay-{n}"));
+        }
+        let hole = tokio::time::timeout(Duration::from_secs(5), events.recv()).await;
+        assert!(
+            matches!(hole, Ok(Some(Buffered::Dropped(3)))),
+            "pay-4, pay-5 and pay-6 were dropped, and the hole is queued once half is free with no event after it: {hole:?}"
+        );
+        assert!(events.is_empty());
+        sender.send(Ok(claimable("pay-7"))).unwrap();
+        dealt_with(&asks, 8).await;
+        let rows = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        assert_eq!(payment_id_of(events.recv().await.unwrap().event()), "pay-7");
+        assert!(active.load(Ordering::Acquire) && !sender.is_closed(), "the subscription stays open");
+        let full: Vec<_> = rows.iter().filter(|(name, _)| name == "EVENT_BUFFER_FULL").collect();
+        assert_eq!(full.len(), 1);
+        assert_eq!(full[0].1["events"], 4);
+        let resumed: Vec<_> = rows.iter().filter(|(name, _)| name == "EVENT_BUFFER_RESUMED").collect();
+        assert_eq!(resumed.len(), 1);
+        assert_eq!(resumed[0].1["dropped"], 3);
+    }
+
+    #[tokio::test]
+    async fn the_byte_limit_counts_encoded_size_and_an_empty_buffer_takes_any_one_event() {
+        let _guard = crate::stable_manager::tests::AUDIT_TEST_GUARD.lock().unwrap();
+        let size = prost::Message::encoded_len(&claimable("pay-0"));
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let asks = Arc::new(AtomicUsize::new(0));
+        let (mut reader, mut events, _active) = buffer_events_with_health(
+            CountingSource(receiver, Arc::clone(&asks)),
+            BufferLimit { events: 100, bytes: 2 * size },
+        );
+        for n in 0..3 {
+            sender.send(Ok(claimable(&format!("pay-{n}")))).unwrap();
+        }
+        dealt_with(&asks, 3).await;
+        assert_eq!(events.len(), 2, "a third event is over the byte limit");
+        sender.send(Err(ldk_server_client::error::LdkServerError::new(
+            ldk_server_client::error::LdkServerErrorCode::InternalError, "stream failed",
+        ))).unwrap();
+        reader_ended(&mut reader).await;
+        assert_eq!(payment_id_of(events.recv().await.unwrap().event()), "pay-0");
+        assert_eq!(payment_id_of(events.recv().await.unwrap().event()), "pay-1");
+        assert!(events.recv().await.unwrap().event().is_err(), "a stream that fails while dropping leaves the hole to the reconnect");
+        assert!(!events.is_empty(), "the hole still holds its slot, so no checkpoint passes it");
+        assert!(events.recv().await.is_none());
+        // One event larger than the whole limit still goes through when nothing else waits.
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        sender.send(Ok(claimable("pay-big"))).unwrap();
+        let (mut reader, mut events, active) =
+            buffer_events_with_health(TestSource(receiver), BufferLimit { events: 100, bytes: 1 });
+        assert_eq!(payment_id_of(events.recv().await.unwrap().event()), "pay-big");
+        assert!(active.load(Ordering::Acquire));
+        drop(sender);
+        reader_ended(&mut reader).await;
+        assert!(events.recv().await.is_none(), "nothing was dropped");
+    }
+
+    #[tokio::test]
+    async fn the_production_buffer_holds_a_hundred_thousand_events_or_64_mib() {
+        let _guard = crate::stable_manager::tests::AUDIT_TEST_GUARD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let asks = Arc::new(AtomicUsize::new(0));
+        let (reader, events, _active) = buffer_events_with_health(CountingSource(receiver, Arc::clone(&asks)), BUFFER_LIMIT);
+        for _ in 0..100_001 {
+            sender.send(Ok(EventEnvelope::default())).unwrap();
+        }
+        dealt_with(&asks, 100_001).await;
+        assert_eq!(events.len(), 100_000, "the next event is over the event limit");
+        drop((reader, events, sender));
+        // Events of exactly 1 MiB encoded: 64 fit and the next is over the byte limit.
+        let overhead = prost::Message::encoded_len(&claimable(&"x".repeat(1 << 20))) - (1 << 20);
+        let id = "x".repeat((1 << 20) - overhead);
+        assert_eq!(prost::Message::encoded_len(&claimable(&id)), 1 << 20);
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let asks = Arc::new(AtomicUsize::new(0));
+        let (_reader, events, _active) = buffer_events_with_health(CountingSource(receiver, Arc::clone(&asks)), BUFFER_LIMIT);
+        for _ in 0..65 {
+            sender.send(Ok(claimable(&id))).unwrap();
+        }
+        dealt_with(&asks, 65).await;
+        assert_eq!(events.len(), 64);
+    }
+
+    #[tokio::test]
+    async fn a_hole_is_queued_ahead_of_the_event_that_ends_it() {
+        let _guard = crate::stable_manager::tests::AUDIT_TEST_GUARD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let asks = Arc::new(AtomicUsize::new(0));
+        let (_reader, mut events, _active) = buffer_events_with_health(
+            CountingSource(receiver, Arc::clone(&asks)),
+            BufferLimit { events: 2, bytes: usize::MAX },
+        );
+        for n in 0..3 {
+            sender.send(Ok(claimable(&format!("pay-{n}")))).unwrap();
+        }
+        dealt_with(&asks, 3).await;
+        assert_eq!(payment_id_of(events.recv().await.unwrap().event()), "pay-0");
+        // Free the last held event and send the next before the reader runs, so it finds both at once.
+        assert_eq!(payment_id_of(events.recv().await.unwrap().event()), "pay-1");
+        sender.send(Ok(claimable("pay-3"))).unwrap();
+        assert!(matches!(events.recv().await.unwrap(), Buffered::Dropped(1)), "pay-2 was dropped");
+        assert_eq!(payment_id_of(events.recv().await.unwrap().event()), "pay-3");
+    }
+
+    #[tokio::test]
+    async fn a_handled_event_frees_its_room() {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (mut reader, mut events, active) =
+            buffer_events_with_health(TestSource(receiver), BufferLimit { events: 2, bytes: usize::MAX });
+        sender.send(Ok(claimable("pay-0"))).unwrap();
+        sender.send(Ok(claimable("pay-1"))).unwrap();
+        holds(&events, 2).await;
+        assert_eq!(payment_id_of(events.recv().await.unwrap().event()), "pay-0");
+        sender.send(Ok(claimable("pay-2"))).unwrap();
+        holds(&events, 2).await;
+        assert!(active.load(Ordering::Acquire), "the room pay-0 freed took pay-2");
+        drop(sender);
+        reader_ended(&mut reader).await;
+        assert_eq!(payment_id_of(events.recv().await.unwrap().event()), "pay-1");
+        assert_eq!(payment_id_of(events.recv().await.unwrap().event()), "pay-2");
+        assert!(events.recv().await.is_none());
+    }
+
+    /// A manager and a second handle on its database, which audit rows go to as well.
+    fn serving_fixture() -> (tokio::sync::Mutex<StableChannelManager>, stable_channels::db::Database) {
+        let mgr = crate::stable_manager::tests::make_manager();
+        let db = stable_channels::db::Database::open(mgr.data_dir()).unwrap();
+        stable_channels::audit::set_audit_ledger(db.clone());
+        (tokio::sync::Mutex::new(mgr), db)
+    }
+
+    /// Every settlement outcome write fails, so a failed payment's event can't be booked.
+    async fn fail_settlement_outcomes(manager: &tokio::sync::Mutex<StableChannelManager>) {
+        let path = manager.lock().await.data_dir().join(stable_channels::db::DB_FILENAME);
+        rusqlite::Connection::open(path).unwrap().execute_batch(
+            "CREATE TRIGGER fail_sync_outcome BEFORE UPDATE OF outcome ON settlement_payments
+             BEGIN SELECT RAISE(FAIL, 'injected outcome failure'); END;",
+        ).unwrap();
+    }
+
+    fn failed_payment(payment_id: &str) -> EventEnvelope {
+        use ldk_server_client::ldk_server_grpc::events::PaymentFailed;
+        use ldk_server_client::ldk_server_grpc::types::Payment;
+        EventEnvelope {
+            event: Some(EventVariant::PaymentFailed(PaymentFailed {
+                payment: Some(Payment { payment_id: payment_id.to_owned(), ..Default::default() }),
+                ..Default::default()
+            })),
+        }
+    }
+
+    /// LDK Server keeps every forward, so a recent gap can reconcile completely.
+    fn complete_history() -> crate::stable_manager::tests::FakeLdkServer {
+        use ldk_server_client::ldk_server_grpc::types::ForwardedPaymentTrackingMode;
+        crate::stable_manager::tests::FakeLdkServer::new(vec![]).with_tracking_mode(ForwardedPaymentTrackingMode::Detailed)
+    }
+
+    #[tokio::test]
+    async fn a_failed_write_reconciles_in_place_and_keeps_the_events_behind_it() {
+        let _guard = crate::stable_manager::tests::AUDIT_TEST_GUARD.lock().unwrap();
+        let (manager, db) = serving_fixture();
+        db.record_settlement("sync-1", "sync").unwrap();
+        fail_settlement_outcomes(&manager).await;
+        let ldk = crate::stable_manager::tests::FakeLdkServer::new(vec![]);
+        let mut health = StreamHealth::new(db.begin_event_stream_gap(1_000).unwrap());
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        sender.send(Ok(failed_payment("sync-1"))).unwrap();
+        sender.send(Ok(claimable("after-1"))).unwrap();
+        sender.send(Ok(claimable("after-2"))).unwrap();
+        drop(sender);
+        let (_reader, mut events, active) = buffer_events_with_health(TestSource(receiver), BUFFER_LIMIT);
+        stable_channels::audit::enable_test_capture();
+        tokio::time::timeout(Duration::from_secs(30), serve(&mut events, &active, &manager, &db, &ldk, &mut health))
+            .await
+            .expect("serve returns once the subscription ends");
+        let rows = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        let names: Vec<&str> = rows.iter().map(|(name, _)| name.as_str()).collect();
+        let failed_write = rows
+            .iter()
+            .position(|(name, data)| name == "DB_WRITE_FAILED" && data["op"] == "mark_sync_payment_failed")
+            .expect("the write failed");
+        let in_place = rows
+            .iter()
+            .position(|(name, data)| name == "RECONCILIATION_STARTED" && data["trigger"] == "dispatch_write_failed")
+            .expect("reconciled in place");
+        let handled: Vec<usize> = rows.iter().enumerate().filter(|(_, (name, _))| name == "PAYMENT_CLAIMABLE").map(|(at, _)| at).collect();
+        assert_eq!(handled.len(), 2, "the events behind the failed write are still handled: {names:?}");
+        assert!(failed_write < in_place && in_place < handled[0], "{names:?}");
+        assert_eq!(names.iter().filter(|name| **name == "RECONCILIATION_STARTED").count(), 2, "{names:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_write_on_a_healthy_stream_reopens_the_gap_from_its_last_checkpoint() {
+        let _guard = crate::stable_manager::tests::AUDIT_TEST_GUARD.lock().unwrap();
+        let (manager, db) = serving_fixture();
+        db.record_settlement("sync-3", "sync").unwrap();
+        fail_settlement_outcomes(&manager).await;
+        let ldk = complete_history();
+        // The stream was healthy: its last gap was reconciled and closed at the last checkpoint.
+        let healthy_at = now_millis() as i64 - 1_000;
+        let mut health = StreamHealth::new(db.begin_event_stream_gap(healthy_at - 1_000).unwrap());
+        health.reconciliation_finished(&complete_counts(), completed_result(), true);
+        assert!(health.checkpoint(&db, healthy_at, true, true).unwrap());
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        sender.send(Ok(failed_payment("sync-3"))).unwrap();
+        sender.send(Ok(claimable("after"))).unwrap();
+        let (_reader, mut events, active) = buffer_events_with_health(TestSource(receiver), BUFFER_LIMIT);
+        stable_channels::audit::enable_test_capture();
+        // The subscription stays open past a heartbeat, then ends.
+        let end = async move {
+            tokio::time::sleep(STREAM_HEALTH_INTERVAL + Duration::from_secs(5)).await;
+            drop(sender);
+        };
+        let (served, ()) = tokio::join!(
+            tokio::time::timeout(Duration::from_secs(3_600), serve(&mut events, &active, &manager, &db, &ldk, &mut health)),
+            end,
+        );
+        served.expect("serve returns once the subscription ends");
+        let rows = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        let names: Vec<&str> = rows.iter().map(|(name, _)| name.as_str()).collect();
+        let in_place = rows
+            .iter()
+            .position(|(name, data)| name == "RECONCILIATION_STARTED" && data["trigger"] == "dispatch_write_failed")
+            .expect("reconciled in place");
+        let result = rows[in_place..]
+            .iter()
+            .find(|(name, _)| name == "RECONCILIATION_RESULT")
+            .expect("the in-place pass recorded its result");
+        assert_eq!(result.1["gap_started_ms"], healthy_at, "the gap is persisted from the last checkpoint before reconciling: {names:?}");
+        assert_eq!(result.1["status"], "completed", "{names:?}");
+        assert!(rows.iter().any(|(name, data)| name == "PAYMENT_CLAIMABLE" && data["payment_id"] == "after"));
+        let next = db.begin_event_stream_gap(now_millis() as i64).unwrap();
+        assert!(next.0 > healthy_at, "the heartbeat closed the reopened gap once the events behind it were handled");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_overflow_reconciles_in_place_from_the_last_checkpoint_and_keeps_the_stream() {
+        let _guard = crate::stable_manager::tests::AUDIT_TEST_GUARD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (manager, db) = serving_fixture();
+        let ldk = complete_history();
+        let healthy_at = now_millis() as i64 - 1_000;
+        let mut health = StreamHealth::new(db.begin_event_stream_gap(healthy_at - 1_000).unwrap());
+        health.reconciliation_finished(&complete_counts(), completed_result(), true);
+        assert!(health.checkpoint(&db, healthy_at, true, true).unwrap());
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        for n in 0..5 {
+            sender.send(Ok(claimable(&format!("pay-{n}")))).unwrap();
+        }
+        let (_reader, mut events, active) =
+            buffer_events_with_health(TestSource(receiver), BufferLimit { events: 3, bytes: usize::MAX });
+        stable_channels::audit::enable_test_capture();
+        // One more event once the held ones are handled; the subscription then stays open past a heartbeat and ends.
+        let feed = async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            sender.send(Ok(claimable("pay-5"))).unwrap();
+            tokio::time::sleep(STREAM_HEALTH_INTERVAL + Duration::from_secs(5)).await;
+            drop(sender);
+        };
+        let (served, ()) = tokio::join!(
+            tokio::time::timeout(Duration::from_secs(3_600), serve(&mut events, &active, &manager, &db, &ldk, &mut health)),
+            feed,
+        );
+        served.expect("serve returns once the subscription ends");
+        let rows = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        let names: Vec<&str> = rows.iter().map(|(name, _)| name.as_str()).collect();
+        let handled: Vec<&str> = rows
+            .iter()
+            .filter(|(name, _)| name == "PAYMENT_CLAIMABLE")
+            .filter_map(|(_, data)| data["payment_id"].as_str())
+            .collect();
+        assert_eq!(handled, ["pay-0", "pay-1", "pay-2", "pay-5"], "{names:?}");
+        let resumed = rows.iter().find(|(name, _)| name == "EVENT_BUFFER_RESUMED").expect("reading resumed");
+        assert_eq!(resumed.1["dropped"], 2);
+        let in_place = rows
+            .iter()
+            .position(|(name, data)| name == "RECONCILIATION_STARTED" && data["trigger"] == "events_dropped")
+            .expect("reconciled in place");
+        let result = rows[in_place..].iter().find(|(name, _)| name == "RECONCILIATION_RESULT").expect("the pass recorded its result");
+        assert_eq!(result.1["gap_started_ms"], healthy_at, "the gap runs from the last checkpoint, before the dropped events: {names:?}");
+        let after = rows.iter().position(|(name, data)| name == "PAYMENT_CLAIMABLE" && data["payment_id"] == "pay-5").unwrap();
+        assert!(in_place < after, "{names:?}");
+        let next = db.begin_event_stream_gap(now_millis() as i64).unwrap();
+        assert!(next.0 > healthy_at, "the heartbeat closed the gap once the hole was reconciled");
+    }
+
+    /// A paid request as LDK Server reports it, carrying a wallet's signed message.
+    fn paid_request(payment_id: &str, request: &str, amount_msat: u64) -> EventEnvelope {
+        use ldk_server_client::ldk_server_grpc::events::PaymentReceived;
+        use ldk_server_client::ldk_server_grpc::types::{CustomTlvRecord, Payment};
+        EventEnvelope {
+            event: Some(EventVariant::PaymentReceived(PaymentReceived {
+                payment: Some(Payment { payment_id: payment_id.to_owned(), amount_msat: Some(amount_msat), ..Default::default() }),
+                custom_records: vec![CustomTlvRecord {
+                    type_num: stable_channels::constants::STABLE_CHANNEL_TLV_TYPE,
+                    value: request.as_bytes().to_vec().into(),
+                }],
+                ..Default::default()
+            })),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_event_ldk_server_does_not_answer_for_is_handled_again_backing_off() {
+        let _guard = crate::stable_manager::tests::AUDIT_TEST_GUARD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (manager, db) = serving_fixture();
+        let (ldk, request, fee) = crate::stable_manager::tests::trade_request(&mut *manager.lock().await);
+        ldk.list_channels_fails.store(true, Ordering::SeqCst);
+        let payment_id = "c".repeat(64);
+        let mut health = StreamHealth::new(db.begin_event_stream_gap(1_000).unwrap());
+        stable_channels::audit::enable_test_capture();
+        let started = tokio::time::Instant::now();
+        // LDK Server answers again after 10 s; attempts run at 0, 1, 3, 7 and 15 s.
+        let recover = async {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            assert!(manager.try_lock().is_ok(), "the lock is free between tries, so the stability tick still runs");
+            ldk.list_channels_fails.store(false, Ordering::SeqCst);
+        };
+        let (kept, ()) = tokio::join!(handle(Ok(paid_request(&payment_id, &request, fee)), &manager, &db, &ldk, &mut health), recover);
+        let waited = tokio::time::Instant::now() - started;
+        let rows = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        assert!(kept, "the subscription is kept");
+        assert_eq!(waited, Duration::from_secs(15));
+        let unanswered = rows.iter().filter(|(name, data)| name == "LDK_CALL_FAILED" && data["op"] == "list_channels").count();
+        assert_eq!(unanswered, 4);
+        assert!(db.trade_decision_by_payment(&payment_id).unwrap().is_some(), "decided once LDK Server answered");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_event_ldk_server_never_answers_for_is_given_up_after_fifteen_minutes() {
+        let _guard = crate::stable_manager::tests::AUDIT_TEST_GUARD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(MAX_EVENT_RETRY, Duration::from_secs(stable_channels::constants::TRADE_RESULT_TIMEOUT_SECS));
+        let (manager, db) = serving_fixture();
+        let (ldk, request, fee) = crate::stable_manager::tests::trade_request(&mut *manager.lock().await);
+        ldk.list_channels_fails.store(true, Ordering::SeqCst);
+        let payment_id = "c".repeat(64);
+        let mut health = StreamHealth::new(db.begin_event_stream_gap(1_000).unwrap());
+        stable_channels::audit::enable_test_capture();
+        let started = tokio::time::Instant::now();
+        let kept = tokio::time::timeout(
+            Duration::from_secs(3_600),
+            handle(Ok(paid_request(&payment_id, &request, fee)), &manager, &db, &ldk, &mut health),
+        )
+        .await
+        .expect("handling gives up");
+        let waited = tokio::time::Instant::now() - started;
+        let rows = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        assert!(kept);
+        assert!(waited >= MAX_EVENT_RETRY && waited < MAX_EVENT_RETRY + MAX_RETRY_WAIT, "{waited:?}");
+        let abandoned: Vec<_> = rows.iter().filter(|(name, _)| name == "EVENT_RETRY_ABANDONED").collect();
+        assert_eq!(abandoned.len(), 1);
+        assert_eq!(abandoned[0].1["payment_id"], payment_id.as_str());
+        assert!(db.trade_decision_by_payment(&payment_id).unwrap().is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unsafe_settlement_outcomes_are_retried_in_place_backing_off_to_a_minute() {
+        let _guard = crate::stable_manager::tests::AUDIT_TEST_GUARD.lock().unwrap();
+        let (manager, db) = serving_fixture();
+        db.record_settlement("sync-2", "sync").unwrap();
+        let ldk = crate::stable_manager::tests::FakeLdkServer::new(vec![]);
+        ldk.payment_lookup_failures.store(usize::MAX, Ordering::SeqCst);
+        let mut health = StreamHealth::new(db.begin_event_stream_gap(1_000).unwrap());
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        sender.send(Ok(claimable("buffered"))).unwrap();
+        drop(sender);
+        let (_reader, mut events, active) = buffer_events_with_health(TestSource(receiver), BUFFER_LIMIT);
+        stable_channels::audit::enable_test_capture();
+        let started = tokio::time::Instant::now();
+        // Lookups work again after 150 s; passes run at 0, 1, 3, 7, 15, 31, 63, 123 and 183 s.
+        let recover = async {
+            tokio::time::sleep(Duration::from_secs(150)).await;
+            ldk.payment_lookup_failures.store(0, Ordering::SeqCst);
+        };
+        let (served, ()) = tokio::join!(
+            tokio::time::timeout(Duration::from_secs(3_600), serve(&mut events, &active, &manager, &db, &ldk, &mut health)),
+            recover,
+        );
+        served.expect("serve returns once the subscription ends");
+        let waited = tokio::time::Instant::now() - started;
+        let rows = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        let names: Vec<&str> = rows.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(waited, Duration::from_secs(1 + 2 + 4 + 8 + 16 + 32 + 60 + 60), "{names:?}");
+        assert_eq!(names.iter().filter(|name| **name == "RECONCILIATION_RESULT").count(), 9);
+        let named = rows
+            .iter()
+            .filter(|(name, data)| name == "RECONCILIATION_SCOPE_FAILED" && data["error"].as_str().is_some_and(|error| error.contains("sync-2")))
+            .count();
+        assert_eq!(named, 8, "each failed pass names the payment it could not settle");
+        let last_pass = rows.iter().rposition(|(name, _)| name == "RECONCILIATION_RESULT").unwrap();
+        let handled = rows
+            .iter()
+            .position(|(name, data)| name == "PAYMENT_CLAIMABLE" && data["payment_id"] == "buffered")
+            .expect("the event buffered meanwhile is still handled");
+        assert!(last_pass < handled);
     }
 
     #[tokio::test]
@@ -818,7 +1530,7 @@ mod tests {
     #[tokio::test]
     async fn aborted_reader_is_not_reported_healthy() {
         let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-        let (mut reader, _events, active) = buffer_events_with_health(TestSource(receiver));
+        let (mut reader, _events, active) = buffer_events_with_health(TestSource(receiver), BUFFER_LIMIT);
         tokio::time::timeout(Duration::from_secs(1), async {
             while !active.load(Ordering::Acquire) { tokio::task::yield_now().await; }
         }).await.unwrap();
@@ -831,16 +1543,16 @@ mod tests {
     async fn buffered_error_marks_reader_unhealthy_before_dispatch_reaches_it() {
         use ldk_server_client::error::{LdkServerError, LdkServerErrorCode};
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-        let (mut reader, mut events, active) = buffer_events_with_health(TestSource(receiver));
+        let (mut reader, mut events, active) = buffer_events_with_health(TestSource(receiver), BUFFER_LIMIT);
         sender.send(Ok(EventEnvelope::default())).unwrap();
         sender.send(Err(LdkServerError::new(
             LdkServerErrorCode::InternalServerError, "stream failed during backfill",
         ))).unwrap();
         reader.join_next().await.unwrap().unwrap();
         assert!(!active.load(Ordering::Acquire));
-        assert!(events.recv().await.unwrap().is_ok());
+        assert!(events.recv().await.unwrap().event().is_ok());
         assert!(!active.load(Ordering::Acquire), "an earlier buffered success cannot restore health");
-        assert!(events.recv().await.unwrap().is_err());
+        assert!(events.recv().await.unwrap().event().is_err());
     }
 
     #[tokio::test]

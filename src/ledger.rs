@@ -1026,6 +1026,8 @@ pub const CHANNEL_STATE_EVENTS: &[&str] = &[
     "RECONCILIATION_GAP_DETECTED",
     "RECONCILIATION_RESULT",
     "RECONCILIATION_SCOPE_FAILED",
+    // How many events a full buffer dropped, durable since trades and forward deductions among them are not replayed.
+    "EVENT_BUFFER_RESUMED",
     // Operator refunds of rejected trade fees: money left the node, so the record must survive.
     "TRADE_FEE_REFUND_SENT",
     "TRADE_FEE_REFUND_OUTCOME_UNKNOWN",
@@ -1055,6 +1057,7 @@ pub const CHANNEL_STATE_EVENTS: &[&str] = &[
     "ONCHAIN_DEPOSIT_COMPLETION_FAILED",
     "OUTGOING_PAYMENT_CLASSIFICATION_FAILED",
     "TRADE_PAYMENT_CLASSIFICATION_FAILED",
+    "EVENT_RETRY_ABANDONED",
     "CHANNEL_READY_UID_UNPARSEABLE",
     "TRADE_PARSE_PAYLOAD_FAILED",
     "TRADE_PARSE_SIGNED_FAILED",
@@ -1124,6 +1127,7 @@ pub const OPERATIONAL_EVENTS: &[&str] = &[
     "QUEUED_SPLICE_NEGOTIATED",
     // Event-stream transport; EVENT_STREAM_GAP_STARTED, EVENT_STREAM_GAP_CLOSED and RECONCILIATION_RESULT are the durable records.
     "EVENT_STREAM_CONNECTED", "EVENT_STREAM_CONNECT_FAILED", "EVENT_STREAM_DISCONNECTED", "RECONCILIATION_STARTED",
+    "EVENT_BUFFER_FULL",
     // Price-feed transport.
     "WEBSOCKET_DISCONNECTED",
     // Per-tick and per-attempt traces whose outcome is recorded elsewhere, transport, and UI.
@@ -1131,6 +1135,8 @@ pub const OPERATIONAL_EVENTS: &[&str] = &[
     "TRADE_PROTOCOL_PATH", "CHANNEL_EXISTS_CHECK", "REGISTER_PUSH_OK", "REGISTER_PUSH_LEGACY_OK",
     // Push registrations reach an unauthenticated route, so nothing about one may grow the durable ledger.
     "REGISTER_PUSH_LEGACY_INVALID", "REGISTER_PUSH_INVALID", "REGISTER_PUSH_HELD",
+    // The same holds for email registrations.
+    "REGISTER_EMAIL_OK", "REGISTER_EMAIL_INVALID", "REGISTER_EMAIL_SIGNATURE_INVALID", "REGISTER_EMAIL_LIMITED",
     "EVENT_IGNORED", "INVOICE_GENERATED", "JIT_INVOICE_ATTEMPT", "JIT_INVOICE_GENERATED", "LIGHTNING_RECEIVE_INVOICE",
     "QR_GENERATION_FAILED", "SPLICE_PENDING_LOOKUP",
     "WEBSOCKET_CONNECTED", "WEBSOCKET_CONNECT_FAILED", "WEBSOCKET_TRACKING_FAILED",
@@ -1785,7 +1791,8 @@ mod tests {
                 }
                 let text = std::fs::read_to_string(&path).unwrap();
                 let production = production_source(&text);
-                for call in ["audit_event(", "record_event("] {
+                // `audit: Some((` is the register-email Reply, whose event reaches audit_event as a variable.
+                for call in ["audit_event(", "record_event(", "audit: Some(("] {
                     for (idx, _) in production.match_indices(call) {
                         let rest = production[idx + call.len()..].trim_start();
                         let Some(literal) = rest.strip_prefix('"') else { continue };

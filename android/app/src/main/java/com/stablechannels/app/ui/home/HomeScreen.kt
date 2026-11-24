@@ -22,20 +22,22 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.content.PermissionChecker
-import androidx.core.view.WindowCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.stablechannels.app.AppState
+import com.stablechannels.app.domain.EmailPromptPolicy
+import com.stablechannels.app.domain.EmailPromptStoring
 import com.stablechannels.app.models.PaymentRecord
 import com.stablechannels.app.models.TradeRecord
+import com.stablechannels.app.services.EmailPromptStore
 import com.stablechannels.app.ui.components.StatusCapsule
+import com.stablechannels.app.ui.email.rememberEmailSettingsModel
 import com.stablechannels.app.ui.history.OrderDetailBottomSheet
 import com.stablechannels.app.ui.history.PaymentDetailBottomSheet
 import com.stablechannels.app.ui.home.balancebar.BalanceBar
@@ -54,7 +56,11 @@ import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
+fun HomeScreen(
+    appState: AppState,
+    modifier: Modifier = Modifier,
+    emailPromptStore: EmailPromptStoring = EmailPromptStore.get(LocalContext.current),
+) {
     val totalSats by appState.totalBalanceSats.collectAsState()
     val lightningSats by appState.lightningBalanceSats.collectAsState()
     val btcPrice by appState.priceService.currentPrice.collectAsState()
@@ -65,6 +71,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     val statusMessage by appState.statusMessage.collectAsState()
     val onchainSats by appState.onchainBalanceSats.collectAsState()
     val hasReadyChannel by appState.hasReadyChannel.collectAsState()
+    val canMoveToChannel by appState.canMoveToChannel.collectAsState()
     val spendableOnchainSats by appState.spendableOnchainSats.collectAsState()
     val isSyncing by appState.isSyncing.collectAsState()
     val isFlashing by appState.paymentFlash.collectAsState()
@@ -81,11 +88,30 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     var showReceive by remember { mutableStateOf(false) }
     var showBuy by remember { mutableStateOf(false) }
     var showSell by remember { mutableStateOf(false) }
+    var showEmailPrompt by remember { mutableStateOf(false) }
     var prefillTradeAmount by remember { mutableDoubleStateOf(0.0) }
     var showBTC by remember { mutableStateOf(false) }
     var pendingOnchainReceives by remember { mutableStateOf<List<PaymentRecord>>(emptyList()) }
     var pendingOnchainSends by remember { mutableStateOf<List<PaymentRecord>>(emptyList()) }
     val isSweeping by appState.isSpliceInFlightFlow.collectAsState()
+
+    LaunchedEffect(Unit) {
+        emailPromptStore.recordLaunchOnce()
+        // Wait so the prompt never covers the first look at the balance.
+        kotlinx.coroutines.delay(Constants.EMAIL_PROMPT_SHOW_DELAY_MS)
+        // Read after the wait, right before opening, so a sheet opened meanwhile holds it back.
+        val otherSheetShowing =
+            showSend ||
+                showReceive ||
+                showBuy ||
+                showSell ||
+                selectedTrade != null ||
+                selectedPayment != null
+        if (EmailPromptPolicy.shouldShowOnHome(emailPromptStore, otherSheetShowing)) {
+            emailPromptStore.recordShown()
+            showEmailPrompt = true
+        }
+    }
 
     LaunchedEffect(isFlashing, confirmationUpdateEpoch, onchainSats, spendableOnchainSats) {
         withContext(Dispatchers.IO) {
@@ -294,7 +320,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 // Only the "Move" + incoming-deposit combo is busy enough (3 rows) to warrant
                 // collapsing; every other state is already a single compact row like iOS.
                 val isBusyOnchainState =
-                    (hasReadyChannel && spendableOnchainSats > 0 && hasPendingOnchainReceive) ||
+                    (canMoveToChannel && spendableOnchainSats > 0 && hasPendingOnchainReceive) ||
                         (isSweeping && hasPendingOnchainReceive)
                 var onchainExpanded by remember { mutableStateOf(false) }
                 val chevronRotation by
@@ -416,7 +442,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                             Spacer(Modifier.height(10.dp))
                             PendingRow("Channel closing\u2026", lastCloseTxid, context)
                             PendingReceiveRows(pendingReceives, context, btcPrice)
-                        } else if (hasReadyChannel && spendableOnchainSats > 0) {
+                        } else if (canMoveToChannel && spendableOnchainSats > 0) {
                             // Has channel + confirmed funds — offer to sweep
                             if (hasPendingOnchainReceive) {
                                 // Busy state — both "Move" and an incoming deposit at once.
@@ -600,15 +626,18 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                 )
                             }
                         } else {
-                            // 4. No channel, confirmed deposit — just needs Lightning.
-                            // A newer deposit can still be confirming alongside it.
+                            // 4. Confirmed deposit and no channel to move it into yet: none, or
+                            // one whose funding is still confirming (#467). A newer deposit can
+                            // still be confirming alongside it.
                             PendingReceiveRows(pendingReceives, context, btcPrice)
-                            Spacer(Modifier.height(8.dp))
-                            Text(
-                                "Receive a payment over Lightning to activate your account.",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
+                            if (!hasReadyChannel) {
+                                Spacer(Modifier.height(8.dp))
+                                Text(
+                                    "Receive a payment over Lightning to activate your account.",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                         }
                         pendingSends.forEach { send ->
                             Spacer(Modifier.height(10.dp))
@@ -709,7 +738,6 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             containerColor = if (isDark) Color.Black else Color.White,
             contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) },
         ) {
-            SheetEdgeToEdgeEffect()
             Box(modifier = Modifier.fillMaxHeight(0.9f)) {
                 SendScreen(appState) { showSend = false }
             }
@@ -722,7 +750,6 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             containerColor = if (isDark) Color.Black else Color.White,
             contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) },
         ) {
-            SheetEdgeToEdgeEffect()
             Box(modifier = Modifier.fillMaxHeight(0.9f)) {
                 ReceiveScreen(appState) { showReceive = false }
             }
@@ -735,7 +762,6 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             containerColor = if (isDark) Color.Black else Color.White,
             contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) },
         ) {
-            SheetEdgeToEdgeEffect()
             Box(modifier = Modifier.fillMaxHeight(0.9f)) {
                 BuyScreen(appState, prefillAmountUSD = prefillTradeAmount) {
                     showBuy = false
@@ -751,7 +777,6 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             containerColor = if (isDark) Color.Black else Color.White,
             contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) },
         ) {
-            SheetEdgeToEdgeEffect()
             Box(modifier = Modifier.fillMaxHeight(0.9f)) {
                 SellScreen(appState, prefillAmountUSD = prefillTradeAmount) {
                     showSell = false
@@ -759,6 +784,13 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 }
             }
         }
+    }
+
+    if (showEmailPrompt) {
+        EmailPromptSheet(
+            model = rememberEmailSettingsModel(appState.nodeService),
+            onClose = { showEmailPrompt = false },
+        )
     }
 
     selectedTrade?.let { trade ->
@@ -878,46 +910,5 @@ private fun PendingRow(
                 )
             }
         }
-    }
-}
-
-// Edge-to-edge for a ModalBottomSheet's dialog window. Android 15+ enforces
-// transparent system bars, so the (deprecated) color setters only run on older
-// versions, where they are still the only way to clear the bars.
-@Composable
-private fun SheetEdgeToEdgeEffect() {
-    val view = LocalView.current
-    val isDark = LocalDarkTheme.current
-    DisposableEffect(view, isDark) {
-        var context = view.context
-        var dialog: android.app.Dialog? = null
-        while (context is android.content.ContextWrapper) {
-            if (context is android.app.Dialog) {
-                dialog = context
-                break
-            }
-            context = context.baseContext
-        }
-        val window = dialog?.window
-        if (window != null) {
-            WindowCompat.setDecorFitsSystemWindows(window, false)
-            val insetsController = WindowCompat.getInsetsController(window, view)
-            insetsController.isAppearanceLightStatusBars = !isDark
-            insetsController.isAppearanceLightNavigationBars = !isDark
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.VANILLA_ICE_CREAM) {
-                @Suppress("DEPRECATION")
-                window.navigationBarColor = android.graphics.Color.TRANSPARENT
-                @Suppress("DEPRECATION")
-                window.statusBarColor = android.graphics.Color.TRANSPARENT
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                window.isNavigationBarContrastEnforced = false
-            }
-            window.setLayout(
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-            )
-        }
-        onDispose {}
     }
 }

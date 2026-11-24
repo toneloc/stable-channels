@@ -8,11 +8,16 @@ import com.stablechannels.app.push.StabilityProcessingService
 import com.stablechannels.app.services.DatabaseService
 import com.stablechannels.app.services.MissingChannelRowException
 import com.stablechannels.app.services.StabilityService
+import com.stablechannels.app.services.TradeControlApplyStatus
+import com.stablechannels.app.services.TradeControlMessage
+import com.stablechannels.app.services.TradeCorrelation
+import com.stablechannels.app.services.TradeProtocol
 import com.stablechannels.app.util.Constants
 import java.io.File
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -72,6 +77,7 @@ class IncomingStabilityPaymentTest {
         paymentId: String = "payment",
         settlementId: String = "settlement",
         userChannelId: String = "7",
+        liveReceiver: Long? = null,
     ): String {
         if (!inBackground) {
             return try {
@@ -113,6 +119,7 @@ class IncomingStabilityPaymentTest {
                 amount,
                 userChannelId,
                 settlementId,
+                liveReceiver,
             )!!
             .toString()
     }
@@ -392,4 +399,85 @@ class IncomingStabilityPaymentTest {
     @Test
     fun backgroundReceiptCanPrecedeBackingDeduction() =
         assertReceiptBeforeOutgoingAccounting(true, true)
+
+    @Test
+    fun backgroundCreditStoresTheLiveReceiver() {
+        // The app already saved a live balance of 14,000 that includes this 5,000-sat credit,
+        // but did not record the payment, so the background service records it now.
+        db.saveChannel(
+            "ab".repeat(32),
+            "7",
+            10.0,
+            9_000,
+            null,
+            receiverSats = 14_000,
+            latestPrice = 200_000.0,
+        )
+        assertEquals("INSERTED", persistReceipt(true, liveReceiver = 14_000))
+        assertEquals(10_000L, db.loadChannel("7")!!.backingSats)
+        assertEquals(14_000L, db.loadChannel("7")!!.receiverSats)
+    }
+
+    @Test
+    fun backgroundCreditKeepsTheStoredReceiverWhenTheLiveBalanceIsUnknown() {
+        seed()
+        assertEquals("INSERTED", persistReceipt(true, liveReceiver = null))
+        assertEquals(10_000L, db.loadChannel("7")!!.backingSats)
+        assertEquals(9_000L, db.loadChannel("7")!!.receiverSats)
+    }
+
+    @Test
+    fun tradeResultAppliesAfterABackgroundCreditInFlight() {
+        val channelId = "ab".repeat(32)
+        val paymentId = "cd".repeat(32)
+        val tradeId = "ef".repeat(32)
+        db.saveChannel(channelId, "7", 100.0, 100_000, null, 150_000, 100_000.0)
+        // Sell $40 of BTC: $100 -> $140, backing 100,000 -> 140,000 sats.
+        val prepared =
+            TradeProtocol.prepare(
+                spendableSats = 150_000,
+                sc =
+                    StableChannel(
+                        channelId = channelId,
+                        userChannelId = "7",
+                        expectedUSD = USD(100.0),
+                        stableReceiverBTC = Bitcoin(150_000),
+                        backingSats = 100_000,
+                    ),
+                action = "sell",
+                amountUsd = 40.0,
+                amountBtc = 0.0004,
+                feeUsd = 0.4,
+                newExpectedUsd = 140.0,
+                quotePrice = 100_000.0,
+                tradeId = tradeId,
+            )!!
+        assertEquals(140_000L, prepared.newBackingSats)
+        db.recordPreparedTrade(prepared)
+        assertNotNull(db.adoptUnattachedPreparedTrade(paymentId, prepared.feeMsat))
+
+        // Before the result, BTC falls to $80k and the background service books a 25,000-sat
+        // credit: backing 125,000, live receiver 175,000.
+        assertEquals(
+            "INSERTED",
+            persistReceipt(true, amount = 25_000, price = 80_000.0, liveReceiver = 175_000),
+        )
+        assertEquals(125_000L, db.loadChannel("7")!!.backingSats)
+        assertEquals(175_000L, db.loadChannel("7")!!.receiverSats)
+
+        val sync =
+            TradeControlMessage.Sync(
+                channelId = channelId,
+                userChannelId = "7",
+                expectedUsd = 140.0,
+                backingSats = 165_000,
+                syncVersion = 1,
+                correlation = TradeCorrelation(tradeId, paymentId, prepared.requestHash),
+            )
+        assertEquals(
+            TradeControlApplyStatus.APPLIED,
+            db.applyCorrelatedTradeAcceptance(sync).status,
+        )
+        assertEquals(165_000L, db.loadChannel("7")!!.backingSats)
+    }
 }
