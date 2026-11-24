@@ -37,6 +37,11 @@
 //! the wallet is funded. Once the node has refused the call and the row has failed five tries, the
 //! phone is no longer pushed for it; a call still goes out on the schedule whenever the phone is
 //! online, and a try that fails any other way is pushed for again.
+//!
+//! The node's wallet sees the funds a splice spent only at its next on-chain sync, so a second
+//! splice-in before then can pick the same funds and never confirm. After any splice-in the LSP's
+//! wallet funds, queued or made by hand, on any channel, no push or call goes out for the next one
+//! until the node reports a wallet sync that ended at least 90 seconds after it.
 
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
@@ -44,8 +49,8 @@ use std::time::Duration;
 
 use ldk_server_client::error::{LdkServerError, LdkServerErrorCode};
 use ldk_server_client::ldk_server_grpc::api::{
-    splice_in_request, GetBalancesRequest, GetPaymentDetailsRequest, ListChannelsRequest,
-    SpliceInRequest,
+    splice_in_request, GetBalancesRequest, GetNodeInfoRequest, GetPaymentDetailsRequest,
+    ListChannelsRequest, SpliceInRequest,
 };
 use ldk_server_client::ldk_server_grpc::types::{Channel, PaymentDirection};
 use serde_json::{json, Value};
@@ -70,7 +75,7 @@ pub(crate) const WAKE_TIMEOUT_SECS: i64 = 60;
 pub(crate) const WAKE_GRACE_SECS: i64 = 3;
 /// While the node cannot say whether the row's earlier call locked, no new call goes out; once that has lasted this long the row stalls so the operator hears of it.
 pub(crate) const LOOKUP_ALERT_SECS: i64 = 600;
-/// A row that has had no call for this long, since it was queued or since its last try, stalls once, so the operator hears of a phone that never comes online or has no push token. The schedule goes on.
+/// A row that has had no try for this long, since it was queued or since its last try, stalls once, so the operator hears of a request that cannot even be tried, such as one for a phone with no push token. Each failed try starts this over. The schedule goes on.
 pub(crate) const QUEUED_ALERT_SECS: i64 = 24 * 3_600;
 /// A call the node has not reported as negotiated within this time stalls the row once, which alerts the operator. The call stays pending and the phone is still pushed for it: the node may still run it, or may never have received it.
 pub(crate) const PENDING_ALERT_SECS: i64 = 600;
@@ -94,6 +99,10 @@ const REFUSAL_PREFIX: &str = "splice_in: ";
 const REFUSED_NOTE: &str = "the node refused the last call, so the phone is no longer pushed for this request; a call still goes out on the schedule whenever the phone is online. Cancel and queue again to push it again";
 /// On-chain sats kept above the amount for the splice transaction's fee.
 pub(crate) const FEE_HEADROOM_SATS: u64 = 5_000;
+/// How long after the LSP's wallet funded a splice-in its next on-chain sync must have finished before another splice-in goes out. ldk-node gives up on a wallet sync after 60 s, so a sync that ended this late began after the splice was broadcast.
+pub(crate) const WALLET_SYNC_MARGIN_SECS: i64 = 90;
+/// Why a splice-in waits for [`wallet_not_synced`].
+const WALLET_NOT_SYNCED: &str = "waiting for the on-chain wallet to sync after its last splice-in, so this one cannot spend the same funds";
 /// Bound on one node call, so a stalled call costs one pass and not the whole job.
 const RPC_TIMEOUT_SECS: u64 = 5;
 
@@ -700,6 +709,17 @@ async fn wake_or_splice(
             return;
         }
     }
+    match wallet_not_synced(db, ldk).await {
+        Ok(false) => {}
+        Ok(true) => {
+            note_no_push(db, row, &format!("{WALLET_NOT_SYNCED}; no push or call until then"), now);
+            return;
+        }
+        Err(()) => {
+            note_no_push(db, row, "the node could not report when its on-chain wallet last synced; no push or call until it does", now);
+            return;
+        }
+    }
     if refused_by_node(row) {
         note_no_push(db, row, REFUSED_NOTE, now);
         if channel.is_usable {
@@ -806,6 +826,41 @@ async fn wallet_shortfall(ldk: &dyn LdkServerCalls, amount_sats: u64) -> Result<
     }))
 }
 
+/// Whether the LSP's wallet must not fund another splice-in yet: false once it has synced at least [`WALLET_SYNC_MARGIN_SECS`] after the last splice-in it funded, or if it never funded one. Err when the node or the database could not say, which is not a try: the next pass asks again.
+pub(crate) async fn wallet_not_synced(db: &Database, ldk: &dyn LdkServerCalls) -> Result<bool, ()> {
+    let last = match db.last_lsp_wallet_splice_at() {
+        Ok(Some(last)) => last,
+        Ok(None) => return Ok(false),
+        Err(error) => {
+            warn!("[queued_splice] could not read when the wallet last funded a splice-in: {}", error);
+            return Err(());
+        }
+    };
+    let synced = match timeout(rpc_timeout(), ldk.get_node_info(GetNodeInfoRequest {})).await {
+        Ok(Ok(info)) => info.latest_onchain_wallet_sync_timestamp.and_then(|at| i64::try_from(at).ok()),
+        Ok(Err(error)) => {
+            warn!("[queued_splice] get_node_info failed: {}", error);
+            return Err(());
+        }
+        Err(_) => {
+            warn!("[queued_splice] get_node_info timed out");
+            return Err(());
+        }
+    };
+    Ok(!synced.is_some_and(|synced| synced >= last + WALLET_SYNC_MARGIN_SECS))
+}
+
+/// Notes that the LSP's wallet is about to fund a splice-in; false when that could not be written, and then no call may go out.
+fn note_wallet_splice(db: &Database, user_channel_id: &str, now: i64) -> bool {
+    match db.note_lsp_wallet_splice(now) {
+        Ok(()) => true,
+        Err(error) => {
+            db_failed("note_lsp_wallet_splice", user_channel_id, error);
+            false
+        }
+    }
+}
+
 /// Make the splice-in call for a row with no call pending, on a channel that is usable.
 async fn start_splice(
     db: &Database,
@@ -861,6 +916,14 @@ async fn start_splice(
         }
         // Not an attempt: the next pass asks again.
         Err(()) => return,
+    }
+    // Checked again here, as another row's call may have spent the wallet's funds since this row was pushed. A pushed row held back here past the wake timeout fails that try and is pushed again on the schedule.
+    match wallet_not_synced(db, ldk).await {
+        Ok(false) => {}
+        Ok(true) | Err(()) => return,
+    }
+    if !note_wallet_splice(db, &row.user_channel_id, now) {
+        return;
     }
     let current_txo = channel_funding_txo(channel);
     let lsp_before = lsp_side_sats(channel);
@@ -1103,6 +1166,14 @@ pub(crate) async fn before_manual_splice(db: &Database, ldk: &dyn LdkServerCalls
     let Some(channel) = channels.iter().find(|c| row_key(&c.user_channel_id).as_deref() == Some(key.as_str())) else {
         return Err("no open channel has that id".into());
     };
+    match wallet_not_synced(db, ldk).await {
+        Ok(false) => {}
+        Ok(true) => return Err(format!("{WALLET_NOT_SYNCED}; try again in a few minutes")),
+        Err(()) => return Err("the node could not report when its on-chain wallet last synced".into()),
+    }
+    if !note_wallet_splice(db, &key, now) {
+        return Err("could not note the splice-in for the wallet".into());
+    }
     let funding = channel_funding_txo(channel).unwrap_or_default();
     match db.note_manual_splice_unless(&key, &funding, now, holds_channel) {
         Ok(ManualNoteOutcome::Noted { existed }) => {
@@ -2096,6 +2167,102 @@ mod tests {
         pass(&db, &ldk, &push, now).await;
         assert_eq!(sender.sent(), vec![(COUNTERPARTY_HEX.to_string(), LSP_SPLICE_IN_DIRECTION.to_string())]);
         assert_eq!(row(&db).status, "waking");
+    }
+
+    /// The first splice-in made at 100 and locked at 101, with the wallet last synced before it.
+    async fn locked_once(db: &Database, ldk: &FakeLdkServer, push: &Arc<Mutex<PushService>>) {
+        *ldk.onchain_synced_at.lock().unwrap() = Some(90);
+        // The first goes out at once: the wallet has funded no splice-in before.
+        called(db, ldk, push, 100).await;
+        assert_eq!(db.last_lsp_wallet_splice_at().unwrap(), Some(100));
+        *ldk.channels.lock().unwrap() = vec![channel_with(true, TX_B, 1, LSP_SATS + AMOUNT_SATS)];
+        wallet_funded_tx(ldk, TX_B);
+        pass(db, ldk, push, 101).await;
+        assert_eq!(row(db).status, "locked");
+    }
+
+    #[tokio::test]
+    async fn a_new_request_right_after_a_lock_waits_until_the_wallet_has_synced_since_the_splice() {
+        let _guard = guard();
+        let db = database();
+        let ldk = node(true);
+        let dir = tempfile::tempdir().unwrap();
+        let push = service(FakeSender::new(true), dir.path(), &[]);
+        locked_once(&db, &ldk, &push).await;
+
+        // The operator queues the next one at once. Until the wallet has synced well after the first, nothing goes out and the row says why.
+        queued(&db, 102);
+        for (synced, now) in [(90, 102), ((100 + WALLET_SYNC_MARGIN_SECS - 1) as u64, 100 + WALLET_SYNC_MARGIN_SECS)] {
+            *ldk.onchain_synced_at.lock().unwrap() = Some(synced);
+            pass(&db, &ldk, &push, now).await;
+            assert_eq!(ldk.splice_ins.lock().unwrap().len(), 1, "no second call at {now}");
+            let waiting = row(&db);
+            assert_eq!((waiting.status.as_str(), waiting.attempts), ("queued", 0), "not a try");
+            assert_eq!(waiting.wake_note, Some(format!("{WALLET_NOT_SYNCED}; no push or call until then")));
+        }
+        // A node that cannot say when it synced gets no call either.
+        ldk.node_info_fails.store(true, Ordering::SeqCst);
+        pass(&db, &ldk, &push, 100 + WALLET_SYNC_MARGIN_SECS).await;
+        assert_eq!(ldk.splice_ins.lock().unwrap().len(), 1);
+        assert!(row(&db).wake_note.unwrap().contains("could not report when its on-chain wallet last synced"));
+        ldk.node_info_fails.store(false, Ordering::SeqCst);
+
+        // The wallet syncs late enough after the splice: the call goes out.
+        let at = 100 + WALLET_SYNC_MARGIN_SECS + 1;
+        *ldk.onchain_synced_at.lock().unwrap() = Some((100 + WALLET_SYNC_MARGIN_SECS) as u64);
+        pass(&db, &ldk, &push, at).await;
+        assert_eq!(ldk.splice_ins.lock().unwrap().len(), 2);
+        assert_eq!((row(&db).status.as_str(), row(&db).pending_on_node), ("splicing", true));
+        assert_eq!(db.last_lsp_wallet_splice_at().unwrap(), Some(at));
+    }
+
+    #[tokio::test]
+    async fn a_splice_in_on_another_channel_waits_for_the_wallet_to_sync_after_one_made_in_the_same_pass() {
+        let _guard = guard();
+        let db = database();
+        const OTHER_CHANNEL: &str = "4242";
+        let mut other = make_channel(&"dd".repeat(32), OTHER_CHANNEL, COUNTERPARTY_HEX, LSP_SATS + USER_SATS, LSP_SATS * 1_000, true);
+        other.funding_txo = Some(OutPoint { txid: TX_C.into(), vout: 0 });
+        let ldk = node(true);
+        ldk.channels.lock().unwrap().push(other);
+        *ldk.onchain_synced_at.lock().unwrap() = Some(90);
+        let dir = tempfile::tempdir().unwrap();
+        let push = service(FakeSender::new(true), dir.path(), &[]);
+        queued(&db, 100);
+        let outcome = db.queue_splice_in(OTHER_CHANNEL, COUNTERPARTY_HEX, AMOUNT_SATS, 100, REVIVE_WINDOW_SECS, NEGOTIATION_FAILED_ERROR, None).unwrap();
+        assert!(matches!(outcome, QueueSpliceOutcome::Queued(_)), "{outcome:?}");
+
+        pass(&db, &ldk, &push, 100).await;
+        let calls = ldk.splice_ins.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1, "one splice-in per wallet sync, across channels");
+        assert_eq!(calls[0].user_channel_id, USER_CHANNEL_ID_DECIMAL);
+        let waiting = db.load_queued_splice(OTHER_CHANNEL).unwrap().unwrap();
+        assert_eq!((waiting.status.as_str(), waiting.attempts), ("queued", 0));
+
+        *ldk.onchain_synced_at.lock().unwrap() = Some((100 + WALLET_SYNC_MARGIN_SECS) as u64);
+        pass(&db, &ldk, &push, 100 + WALLET_SYNC_MARGIN_SECS + 1).await;
+        let calls = ldk.splice_ins.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].user_channel_id, OTHER_CHANNEL);
+    }
+
+    #[tokio::test]
+    async fn a_splice_in_by_hand_waits_for_the_wallet_to_sync_after_the_last_one_and_holds_back_the_next() {
+        let _guard = guard();
+        let db = database();
+        let ldk = node(true);
+        let dir = tempfile::tempdir().unwrap();
+        let push = service(FakeSender::new(true), dir.path(), &[]);
+        locked_once(&db, &ldk, &push).await;
+
+        let refused = before_manual_splice(&db, &ldk, USER_CHANNEL_ID_DECIMAL, 102).await.unwrap_err();
+        assert!(refused.starts_with(WALLET_NOT_SYNCED), "{refused}");
+        assert!(db.load_manual_splice(USER_CHANNEL_ID_DECIMAL).unwrap().is_none(), "nothing noted for a call that is not made");
+
+        *ldk.onchain_synced_at.lock().unwrap() = Some((100 + WALLET_SYNC_MARGIN_SECS) as u64);
+        let at = 100 + WALLET_SYNC_MARGIN_SECS + 1;
+        assert!(before_manual_splice(&db, &ldk, USER_CHANNEL_ID_DECIMAL, at).await.is_ok());
+        assert_eq!(db.last_lsp_wallet_splice_at().unwrap(), Some(at), "the splice by hand holds back the next one");
     }
 
     #[tokio::test]

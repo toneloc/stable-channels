@@ -20,7 +20,7 @@ const STATUS_GUIDE: [(&str, &str); 8] = [
 	("negotiated", "Signed; locks once confirmed and the phone is online."),
 	("locked", "Done: the funds are in the channel."),
 	("failed", "Last try failed; the next ones follow gaps of about 3, 10, 20 and 40 min, then hourly."),
-	("stalled", "Needs a look (the Note says why): not signed 10 min after the call, not locked 3 h after signing, no call for a day, or the node could not say whether an earlier call landed. No new call while a call is pending."),
+	("stalled", "Needs a look (the Note says why): not signed 10 min after the call, not locked 3 h after signing, no try possible for a day (such as no push token), or the node could not say whether an earlier call landed. No new call while a call is pending."),
 	("cancelled", "No more tries. While pending on node, the call already made can still lock."),
 ];
 const PENDING_GUIDE: &str = "A call is out and has not locked, been refused or been dropped; it may never have reached the node. No new call or request until then, or until you release it after checking the node.";

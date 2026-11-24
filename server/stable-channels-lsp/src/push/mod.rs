@@ -56,7 +56,7 @@ impl PushSender for ProviderSender {
     }
 }
 
-/// A notification reserved by `begin_notify`; the provider call runs without the service lock.
+/// A notification reserved by `begin_notify_within`; the provider call runs without the service lock.
 pub(crate) struct PendingPush {
     node_id: String,
     direction: String,
@@ -116,14 +116,9 @@ impl PushService {
         self.last_push_failed.clear();
     }
 
-    /// Whether a push to this node may be sent now: no accepted push inside the cooldown, and no
-    /// failed or still-outstanding one inside the backoff.
-    pub fn should_notify(&self, node_id: &str) -> bool {
-        self.should_notify_within(node_id, PUSH_COOLDOWN_SECS)
-    }
-
-    /// [`Self::should_notify`] with the caller's own spacing after an accepted push in place of the
-    /// cooldown, for pushes that follow a schedule of their own. The backoff applies to every caller.
+    /// Whether a push to this node may be sent now: no accepted push inside `spacing_secs` (the
+    /// cooldown, unless the caller follows a schedule of its own), and no failed or still-outstanding
+    /// one inside the backoff, which applies to every caller.
     pub fn should_notify_within(&self, node_id: &str, spacing_secs: u64) -> bool {
         let within = |map: &HashMap<String, Instant>, secs: u64| {
             map.get(node_id).is_some_and(|at| at.elapsed().as_secs() < secs)
@@ -140,13 +135,8 @@ impl PushService {
         }
     }
 
-    /// Reserve a notification for this node, or None when it is cooling down, already being
-    /// sent, or has no registered token.
-    pub(crate) fn begin_notify(&mut self, node_id: &str, direction: &str) -> Option<PendingPush> {
-        self.begin_notify_within(node_id, direction, PUSH_COOLDOWN_SECS)
-    }
-
-    /// [`Self::begin_notify`] with the caller's own spacing after an accepted push in place of the cooldown.
+    /// Reserve a notification for this node, or None when it is inside `spacing_secs` or the
+    /// backoff (see [`Self::should_notify_within`]), already being sent, or has no registered token.
     pub(crate) fn begin_notify_within(&mut self, node_id: &str, direction: &str, spacing_secs: u64) -> Option<PendingPush> {
         if !self.should_notify_within(node_id, spacing_secs) {
             info!("[push] Skipping notification for {} (cooldown)", node_id);
@@ -302,10 +292,10 @@ mod tests {
         let push = service(FakeSender::new(true), dir.path(), &["node"]);
 
         let mut service = push.lock().await;
-        assert!(service.begin_notify("node", "lsp_to_user").is_some());
-        assert!(service.begin_notify("node", "lsp_to_user").is_none());
+        assert!(service.begin_notify_within("node", "lsp_to_user", PUSH_COOLDOWN_SECS).is_some());
+        assert!(service.begin_notify_within("node", "lsp_to_user", PUSH_COOLDOWN_SECS).is_none());
         service.finish_notify("node", true);
-        assert!(service.begin_notify("node", "lsp_to_user").is_none(), "cooldown now applies");
+        assert!(service.begin_notify_within("node", "lsp_to_user", PUSH_COOLDOWN_SECS).is_none(), "cooldown now applies");
     }
 
     #[tokio::test]
@@ -316,7 +306,7 @@ mod tests {
         assert!(notify_within(&push, "node", "lsp_splice_in", 120).await);
         assert!(!notify_within(&push, "node", "lsp_splice_in", 120).await, "inside its own spacing");
         push.lock().await.age_last_push("node", 130);
-        assert!(!push.lock().await.should_notify("node"), "other pushes still wait out the cooldown");
+        assert!(!push.lock().await.should_notify_within("node", PUSH_COOLDOWN_SECS), "other pushes still wait out the cooldown");
         assert!(notify_within(&push, "node", "lsp_splice_in", 120).await);
         assert_eq!(sender.sent().len(), 2);
 
@@ -335,7 +325,7 @@ mod tests {
         let push = service(sender.clone(), dir.path(), &["node"]);
 
         // The task holding this reservation is dropped before it can call finish_notify.
-        drop(push.lock().await.begin_notify("node", "lsp_to_user"));
+        drop(push.lock().await.begin_notify_within("node", "lsp_to_user", PUSH_COOLDOWN_SECS));
 
         assert!(!notify(&push, "node", "lsp_to_user").await);
         assert!(sender.sent().is_empty());

@@ -1066,6 +1066,15 @@ impl Database {
             );",
         )?;
 
+        // When the LSP's wallet last funded a splice-in. Its wallet takes a while to see the funds that splice
+        // spent, so the next splice-in waits until the wallet has synced since. One row.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS lsp_wallet_splices (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                made_at INTEGER NOT NULL
+            );",
+        )?;
+
         // Append-only operator history. There is intentionally no pruning path.
         ledger::init_schema(&conn)?;
 
@@ -1455,6 +1464,23 @@ impl Database {
     pub fn clear_manual_splice(&self, user_channel_id: &str) -> SqliteResult<bool> {
         let conn = self.conn.lock().unwrap();
         Ok(conn.execute("DELETE FROM manual_splices WHERE user_channel_id = ?1", params![user_channel_id])? > 0)
+    }
+
+    /// Notes that the LSP's wallet is funding a splice-in made at `at`, on any channel. A later time never goes back.
+    pub fn note_lsp_wallet_splice(&self, at: i64) -> SqliteResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO lsp_wallet_splices (id, made_at) VALUES (1, ?1)
+             ON CONFLICT(id) DO UPDATE SET made_at = MAX(made_at, excluded.made_at)",
+            params![at],
+        )?;
+        Ok(())
+    }
+
+    /// When the LSP's wallet last funded a splice-in, if it ever did.
+    pub fn last_lsp_wallet_splice_at(&self) -> SqliteResult<Option<i64>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT made_at FROM lsp_wallet_splices WHERE id = 1", [], |row| row.get(0)).optional()
     }
 
     /// Apply one update and return the row when it changed; None when the row is missing or not in a state the update applies to.
