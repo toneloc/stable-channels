@@ -1422,7 +1422,7 @@ impl Database {
 
     /// Notes a splice-in the operator made by hand on the channel, with the funding it was on, unless the channel's
     /// queued row `holds_channel`; the check and the note are one transaction, so a request saved meanwhile is seen.
-    /// A later note replaces an earlier one, and says so.
+    /// A later note replaces an earlier one, and says so. The note also marks the LSP's wallet as funding a splice-in now.
     pub fn note_manual_splice_unless(
         &self,
         user_channel_id: &str,
@@ -1441,6 +1441,7 @@ impl Database {
             "INSERT OR REPLACE INTO manual_splices (user_channel_id, channel_funding_txo, made_at) VALUES (?1, ?2, ?3)",
             params![user_channel_id, channel_funding_txo, now],
         )?;
+        Self::note_lsp_wallet_splice_on(&tx, now)?;
         tx.commit()?;
         Ok(ManualNoteOutcome::Noted { existed })
     }
@@ -1466,9 +1467,8 @@ impl Database {
         Ok(conn.execute("DELETE FROM manual_splices WHERE user_channel_id = ?1", params![user_channel_id])? > 0)
     }
 
-    /// Notes that the LSP's wallet is funding a splice-in made at `at`, on any channel. A later time never goes back.
-    pub fn note_lsp_wallet_splice(&self, at: i64) -> SqliteResult<()> {
-        let conn = self.conn.lock().unwrap();
+    /// Notes that the LSP's wallet is funding a splice-in made at `at`, on any channel, inside the write that lets the call go out. A later time never goes back, and a call the node then refuses keeps it: moving it back could hide a splice made meanwhile.
+    fn note_lsp_wallet_splice_on(conn: &Connection, at: i64) -> SqliteResult<()> {
         conn.execute(
             "INSERT INTO lsp_wallet_splices (id, made_at) VALUES (1, ?1)
              ON CONFLICT(id) DO UPDATE SET made_at = MAX(made_at, excluded.made_at)",
@@ -1513,7 +1513,7 @@ impl Database {
         )
     }
 
-    /// A splice-in call is being made for the request `request_id`, on a channel whose funding outpoint, value and LSP-side balance are given; those are what a later lock is judged against. A request replaced since it was read is left alone.
+    /// A splice-in call is being made for the request `request_id`, on a channel whose funding outpoint, value and LSP-side balance are given; those are what a later lock is judged against. The same write marks the LSP's wallet as funding a splice-in now. A request replaced since it was read is left alone.
     pub fn mark_queued_splice_splicing(
         &self,
         user_channel_id: &str,
@@ -1523,15 +1523,24 @@ impl Database {
         lsp_sats_before: u64,
         now: i64,
     ) -> SqliteResult<Option<QueuedSplice>> {
-        self.update_queued_splice(
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
             "UPDATE queued_splices
              SET status = 'splicing', last_attempt_at = ?6, last_error = NULL, wake_note = NULL, funding_txo = NULL, negotiated_at = NULL,
                  channel_funding_txo = ?3, channel_value_before = ?4, lsp_sats_before = ?5, pending_on_node = 1, updated_at = ?6
              WHERE user_channel_id = ?1 AND rowid = ?2 AND pending_on_node = 0
                AND status IN ('queued', 'waking', 'failed', 'stalled')",
             params![user_channel_id, request_id, channel_funding_txo, channel_value_before as i64, lsp_sats_before as i64, now],
-            user_channel_id,
-        )
+        )?;
+        let row = if changed == 1 {
+            Self::note_lsp_wallet_splice_on(&tx, now)?;
+            Self::queued_splice_on(&tx, user_channel_id)?
+        } else {
+            None
+        };
+        tx.commit()?;
+        Ok(row)
     }
 
     /// The node negotiated a splice while the call of request `request_id` was out. Every row whose call is pending records it, whatever its status, since a signed splice keeps the call through a later negotiation failure; a row still `splicing` moves to `negotiated`, and so does one stalled because the node had not reported the call, dropping that stall's note. A cancelled row keeps its status. A request replaced since it was read is left alone.
@@ -9017,7 +9026,9 @@ mod tests {
         // A later splice by hand replaces the note and says so, unless the channel's row holds the channel.
         assert_eq!(db.note_manual_splice_unless("7", "bb:1", 103, |held| held.request_id == row.request_id).unwrap(), ManualNoteOutcome::Blocked(row.clone()));
         assert_eq!(db.load_manual_splice("7").unwrap().map(|note| note.made_at), Some(100), "unchanged");
+        assert_eq!(db.last_lsp_wallet_splice_at().unwrap(), Some(100), "a held press makes no splice-in, so the wallet is not marked");
         assert_eq!(db.note_manual_splice_unless("7", "bb:1", 104, |_| false).unwrap(), ManualNoteOutcome::Noted { existed: true });
+        assert_eq!(db.last_lsp_wallet_splice_at().unwrap(), Some(104));
         assert_eq!(db.note_manual_splice_unless("8", "cc:0", 105, |_| false).unwrap(), ManualNoteOutcome::Noted { existed: false });
         assert_eq!(db.load_manual_splice("7").unwrap().map(|note| (note.channel_funding_txo, note.made_at)), Some(("bb:1".into(), 104)));
         assert!(db.clear_manual_splice("7").unwrap());
@@ -9030,12 +9041,15 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         db.queue_splice_in("7", "peer", 50_000, 100, 0, "", None).unwrap();
         let request_id = db.load_queued_splice("7").unwrap().unwrap().request_id;
+        assert!(db.last_lsp_wallet_splice_at().unwrap().is_none());
         let splicing = db.mark_queued_splice_splicing("7", request_id, Some("aa:0"), 500_000, 400_000, 101).unwrap().unwrap();
         assert_eq!(
             (splicing.status.as_str(), splicing.channel_funding_txo.as_deref(), splicing.channel_value_before, splicing.lsp_sats_before, splicing.pending_on_node),
             ("splicing", Some("aa:0"), Some(500_000), Some(400_000), true)
         );
+        assert_eq!(db.last_lsp_wallet_splice_at().unwrap(), Some(101));
         assert!(db.mark_queued_splice_splicing("7", request_id, Some("aa:0"), 500_000, 400_000, 102).unwrap().is_none(), "no second call while pending");
+        assert_eq!(db.last_lsp_wallet_splice_at().unwrap(), Some(101), "no call, so the wallet is not marked");
         // A timeout is not an answer from the node: the call stays pending through the stall and a cancel.
         let stalled = db.stall_queued_splice_pending("7", request_id, "no negotiation", 102).unwrap().unwrap();
         assert!((stalled.status.as_str(), stalled.pending_on_node) == ("stalled", true));

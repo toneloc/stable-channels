@@ -850,17 +850,6 @@ pub(crate) async fn wallet_not_synced(db: &Database, ldk: &dyn LdkServerCalls) -
     Ok(!synced.is_some_and(|synced| synced >= last + WALLET_SYNC_MARGIN_SECS))
 }
 
-/// Notes that the LSP's wallet is about to fund a splice-in; false when that could not be written, and then no call may go out.
-fn note_wallet_splice(db: &Database, user_channel_id: &str, now: i64) -> bool {
-    match db.note_lsp_wallet_splice(now) {
-        Ok(()) => true,
-        Err(error) => {
-            db_failed("note_lsp_wallet_splice", user_channel_id, error);
-            false
-        }
-    }
-}
-
 /// Make the splice-in call for a row with no call pending, on a channel that is usable.
 async fn start_splice(
     db: &Database,
@@ -921,9 +910,6 @@ async fn start_splice(
     match wallet_not_synced(db, ldk).await {
         Ok(false) => {}
         Ok(true) | Err(()) => return,
-    }
-    if !note_wallet_splice(db, &row.user_channel_id, now) {
-        return;
     }
     let current_txo = channel_funding_txo(channel);
     let lsp_before = lsp_side_sats(channel);
@@ -1170,9 +1156,6 @@ pub(crate) async fn before_manual_splice(db: &Database, ldk: &dyn LdkServerCalls
         Ok(false) => {}
         Ok(true) => return Err(format!("{WALLET_NOT_SYNCED}; try again in a few minutes")),
         Err(()) => return Err("the node could not report when its on-chain wallet last synced".into()),
-    }
-    if !note_wallet_splice(db, &key, now) {
-        return Err("could not note the splice-in for the wallet".into());
     }
     let funding = channel_funding_txo(channel).unwrap_or_default();
     match db.note_manual_splice_unless(&key, &funding, now, holds_channel) {
@@ -2258,6 +2241,7 @@ mod tests {
         let refused = before_manual_splice(&db, &ldk, USER_CHANNEL_ID_DECIMAL, 102).await.unwrap_err();
         assert!(refused.starts_with(WALLET_NOT_SYNCED), "{refused}");
         assert!(db.load_manual_splice(USER_CHANNEL_ID_DECIMAL).unwrap().is_none(), "nothing noted for a call that is not made");
+        assert_eq!(db.last_lsp_wallet_splice_at().unwrap(), Some(100), "and the wallet's last splice-in is still the first");
 
         *ldk.onchain_synced_at.lock().unwrap() = Some((100 + WALLET_SYNC_MARGIN_SECS) as u64);
         let at = 100 + WALLET_SYNC_MARGIN_SECS + 1;
