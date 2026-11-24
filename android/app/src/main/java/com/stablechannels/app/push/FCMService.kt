@@ -2,6 +2,8 @@ package com.stablechannels.app.push
 
 import android.content.Context
 import android.content.Intent
+import android.os.Process
+import android.os.SystemClock
 import android.util.Log
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
@@ -97,6 +99,12 @@ class FCMService : FirebaseMessagingService() {
         }
     }
 
+    /** The wall-clock second this process started, to tell its own heartbeat from a dead one's. */
+    private fun processStartSecs(): Long {
+        val uptimeMs = SystemClock.elapsedRealtime() - Process.getStartElapsedRealtime()
+        return (System.currentTimeMillis() - uptimeMs) / 1000
+    }
+
     override fun onMessageReceived(message: RemoteMessage) {
         Log.d(TAG, "Push received: ${message.data}")
 
@@ -118,7 +126,13 @@ class FCMService : FirebaseMessagingService() {
         val route =
             routePush(
                 direction,
-                mainAppActive = now - lastActive < HEARTBEAT_THRESHOLD_SECS,
+                mainAppActive =
+                    heartbeatIsLive(
+                        lastActiveSecs = lastActive,
+                        nowSecs = now,
+                        processStartSecs = processStartSecs(),
+                        thresholdSecs = HEARTBEAT_THRESHOLD_SECS.toLong(),
+                    ),
                 nodeOwnedInProcess = LdkNodeOwner.isOwnedBy(LdkNodeOwner.MAIN_APP),
                 serviceRunning = StabilityProcessingService.isRunning,
                 appCanHold = LspSpliceHoldBridge.canHold,
