@@ -19,8 +19,11 @@
 //! row that may have locked gets no new call and no replacement, and stalls with an alert if that
 //! lasts.
 //!
-//! The phone has one push slot per cooldown. A stability wake the tick decided on owns it: the
-//! splice job yields its push while one is due, and splices as soon as the channel is usable.
+//! The splice job keeps its own spacing between two pushes to a phone, 2 minutes, shorter than the
+//! shortest retry gap, so the retry schedule times its pushes; other pushes keep the 10-minute
+//! cooldown. A stability wake the tick decided on owns the phone's push: the splice job yields its
+//! push while one is due, and splices as soon as the channel is usable. A try that failed only
+//! because the phone was away goes out as soon as the phone is online, not at its next slot.
 //!
 //! A request is never given up on. A failed try is tried again 3, 10, 20 and 40 minutes later, then
 //! every hour, each gap moved by 10 to 20 percent either way; a call the node has not answered gets
@@ -125,6 +128,19 @@ pub(crate) fn next_pending_push_at(request_id: i64, called_at: i64, pushed_at: O
 /// The try number the log names for a row: its failed tries plus the one under way.
 fn try_number(row: &QueuedSplice) -> u32 {
     row.attempts + 1
+}
+
+/// The splice job's own spacing between two pushes to a phone, in place of the 10-minute cooldown of other pushes: shorter than the shortest retry gap, so the schedule times the pushes.
+pub(crate) const SPLICE_PUSH_SPACING_SECS: u64 = 120;
+
+/// What a push records on the row when the phone did not come online in time for it.
+fn phone_away_error() -> String {
+    format!("the phone did not come online within {WAKE_TIMEOUT_SECS}s of the push")
+}
+
+/// Whether the row's last try failed only because the phone was away: no call was made, so one may go out as soon as the phone is online.
+fn phone_was_away(row: &QueuedSplice) -> bool {
+    row.last_error.as_deref() == Some(phone_away_error().as_str())
 }
 /// Bound on the splice-in call itself; the node selects coins and builds the funding template before it answers.
 const SPLICE_IN_TIMEOUT_SECS: u64 = 30;
@@ -513,8 +529,9 @@ pub(crate) async fn run_once(
         }
         match row.status.as_str() {
             "queued" | "failed" | "stalled" => {
-                // A row that failed a try waits for its next one on the schedule; one never tried goes now.
-                if row.attempts > 0 && now < row.last_attempt_at.unwrap_or(0) + retry_gap_secs(row.request_id, row.attempts) {
+                // A row that failed a try waits for its next one on the schedule; one never tried goes now. So does one whose last try failed only because the phone was away, once the phone is online: the schedule times the pushes, and a phone that comes back by itself is not kept waiting for the next one.
+                let due = row.attempts == 0 || now >= row.last_attempt_at.unwrap_or(0) + retry_gap_secs(row.request_id, row.attempts);
+                if !due && !(usable && phone_was_away(&row)) {
                     continue;
                 }
                 wake_or_splice(db, ldk, push, &row, channel, now, clock).await;
@@ -529,7 +546,7 @@ pub(crate) async fn run_once(
                     let error = if usable {
                         format!("no splice-in call could be made within {WAKE_TIMEOUT_SECS}s of the push")
                     } else {
-                        format!("the phone did not come online within {WAKE_TIMEOUT_SECS}s of the push")
+                        phone_away_error()
                     };
                     fail(db, &row, &error, now);
                 }
@@ -739,15 +756,15 @@ async fn send_push(db: &Database, push: &Arc<Mutex<PushService>>, row: &QueuedSp
     let node_id = row.counterparty.as_str();
     let (stability_due, has_token, may_push) = {
         let service = push.lock().await;
-        (service.stability_wake_due(node_id), service.has_token(node_id), service.should_notify(node_id))
+        (service.stability_wake_due(node_id), service.has_token(node_id), service.should_notify_within(node_id, SPLICE_PUSH_SPACING_SECS))
     };
     let note = if stability_due {
         "a stability wake is due for this phone and takes its push; the splice runs once the channel is usable"
     } else if !has_token {
         "no usable push token for this phone (none registered, or older than 30 days)"
     } else if !may_push {
-        "waiting for the phone's push cooldown or backoff"
-    } else if crate::push::notify(push, node_id, LSP_SPLICE_IN_DIRECTION).await {
+        "waiting for the phone's push spacing or backoff"
+    } else if crate::push::notify_within(push, node_id, LSP_SPLICE_IN_DIRECTION, SPLICE_PUSH_SPACING_SECS).await {
         return true;
     } else {
         "the push provider did not accept the push"
@@ -1317,7 +1334,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_offline_phone_times_the_wake_out_and_is_pushed_again_after_its_retry_gap_and_the_cooldown() {
+    async fn an_offline_phone_times_the_wake_out_and_is_pushed_again_at_its_retry_gap_not_after_the_cooldown() {
         let _guard = guard();
         let db = database();
         let ldk = node(false);
@@ -1335,17 +1352,18 @@ mod tests {
         let failed = row(&db);
         assert_eq!((failed.status.as_str(), failed.attempts, failed.pending_on_node), ("failed", 1, false));
         assert!(failed.last_error.unwrap().contains("did not come online"));
-        // The retry waits for its gap on the schedule, then for the push cooldown, which it notes without touching the error.
+        // The retry waits for its gap on the schedule. The splice job keeps its own spacing between pushes, which it notes without touching the error while the last push is that recent.
         let retry_at = next_try_at(&row(&db));
         pass(&db, &ldk, &push, retry_at - 1).await;
         assert_eq!(row(&db).wake_note, None);
         pass(&db, &ldk, &push, retry_at).await;
         let waiting = row(&db);
-        assert_eq!((waiting.status.as_str(), waiting.wake_note.as_deref()), ("failed", Some("waiting for the phone's push cooldown or backoff")));
+        assert_eq!((waiting.status.as_str(), waiting.wake_note.as_deref()), ("failed", Some("waiting for the phone's push spacing or backoff")));
         assert!(waiting.last_error.unwrap().contains("did not come online"));
         assert_eq!(sender.sent().len(), 1);
-        // Once the cooldown has run out the phone is pushed again.
-        push.lock().await.forget_cooldowns();
+        // At the gap the last push is longer ago than that spacing, though inside the 10-minute cooldown of other pushes: the phone is pushed again.
+        push.lock().await.age_last_push(COUNTERPARTY_HEX, (retry_at - 100) as u64);
+        assert!(retry_at - 100 < 600, "inside the other pushes' cooldown");
         pass(&db, &ldk, &push, retry_at + 1).await;
         let woken = row(&db);
         assert_eq!((woken.status.as_str(), woken.wake_sent_at, woken.wake_note), ("waking", Some(retry_at + 1), None));
@@ -1353,6 +1371,59 @@ mod tests {
         assert!(ldk.splice_ins.lock().unwrap().is_empty());
         let events = capture();
         assert_eq!(names(&events), ["QUEUED_SPLICE_WAKE_SENT", "QUEUED_SPLICE_FAILED", "QUEUED_SPLICE_WAKE_SENT"]);
+    }
+
+    #[tokio::test]
+    async fn a_try_that_failed_because_the_phone_was_away_goes_out_as_soon_as_the_phone_is_online() {
+        let _guard = guard();
+        let db = database();
+        let ldk = node(false);
+        let dir = tempfile::tempdir().unwrap();
+        let sender = FakeSender::new(true);
+        let push = service(sender.clone(), dir.path(), &[COUNTERPARTY_HEX]);
+        queued(&db, 100);
+        pass(&db, &ldk, &push, 100).await;
+        pass(&db, &ldk, &push, 100 + WAKE_TIMEOUT_SECS).await;
+        let away = row(&db);
+        assert!(phone_was_away(&away), "{:?}", away.last_error);
+        // The user opens the app between two pushes, long before the next try on the schedule.
+        let online_at = 100 + WAKE_TIMEOUT_SECS + 30;
+        assert!(online_at < next_try_at(&away));
+        pass(&db, &ldk, &push, online_at - 1).await;
+        assert!(ldk.splice_ins.lock().unwrap().is_empty(), "nothing while it is away");
+        *ldk.channels.lock().unwrap() = vec![channel(true, TX_A, 0)];
+        pass(&db, &ldk, &push, online_at).await;
+        // The last push is too recent to push again, so the call goes out while the phone is here.
+        assert_eq!(ldk.splice_ins.lock().unwrap().len(), 1);
+        assert_eq!((row(&db).status.as_str(), row(&db).pending_on_node), ("splicing", true));
+        assert_eq!(sender.sent().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_try_that_failed_with_the_phone_online_still_waits_for_its_gap() {
+        let _guard = guard();
+        let db = database();
+        let ldk = node(true);
+        let dir = tempfile::tempdir().unwrap();
+        let push = service(FakeSender::new(true), dir.path(), &[]);
+        called(&db, &ldk, &push, 100).await;
+        on_splice_negotiation_failed(&db, USER_CHANNEL_ID_DECIMAL, 101);
+        let failed = row(&db);
+        assert!(!phone_was_away(&failed));
+        pass(&db, &ldk, &push, next_try_at(&failed) - 1).await;
+        assert_eq!(ldk.splice_ins.lock().unwrap().len(), 1, "an online phone that failed a negotiation is not called again at once");
+        pass(&db, &ldk, &push, next_try_at(&failed)).await;
+        assert_eq!(ldk.splice_ins.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn every_retry_gap_is_longer_than_the_splice_push_spacing() {
+        // So the retry schedule, not the spacing, decides when the phone is pushed again.
+        for request_id in 1..500 {
+            for retry in 1..=6 {
+                assert!(retry_gap_secs(request_id, retry) > SPLICE_PUSH_SPACING_SECS as i64, "request {request_id}, retry {retry}");
+            }
+        }
     }
 
     #[tokio::test]
@@ -2381,12 +2452,12 @@ mod tests {
         assert_eq!((row(&db).status.as_str(), row(&db).attempts), ("failed", 1));
         stable_channels::audit::enable_test_capture();
 
-        // No push can go out after that (here the cooldown; a token that expires does the same), so the row waits with the reason noted.
+        // No push can go out after that (here the push spacing, since no real time passes in the test; a token that expires does the same), so the row waits with the reason noted.
         pass(&db, &ldk, &push, next_try_at(&row(&db))).await;
         pass(&db, &ldk, &push, failed_at + QUEUED_ALERT_SECS - 1).await;
         let waiting = row(&db);
         assert_eq!((waiting.status.as_str(), waiting.attempts), ("failed", 1));
-        assert!(waiting.wake_note.as_deref().unwrap().contains("cooldown"));
+        assert!(waiting.wake_note.as_deref().unwrap().contains("spacing"));
         assert!(names(&capture()).is_empty());
         stable_channels::audit::enable_test_capture();
         // A day after its last try it stalls once, with that reason, and still waits.
@@ -2394,7 +2465,7 @@ mod tests {
         pass(&db, &ldk, &push, failed_at + 3 * 24 * 3_600).await;
         let stalled = row(&db);
         assert_eq!((stalled.status.as_str(), stalled.attempts), ("stalled", 1));
-        assert!(stalled.last_error.as_deref().unwrap().contains("of the last try: waiting for the phone's push cooldown"));
+        assert!(stalled.last_error.as_deref().unwrap().contains("of the last try: waiting for the phone's push spacing"));
         assert_eq!(names(&capture()), ["QUEUED_SPLICE_STALLED"]);
     }
     #[tokio::test]
