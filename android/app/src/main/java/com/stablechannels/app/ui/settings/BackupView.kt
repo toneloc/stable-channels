@@ -16,6 +16,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.SecureFlagPolicy
 import androidx.fragment.app.FragmentActivity
 import com.stablechannels.app.AppState
 import com.stablechannels.app.services.AppAccessPreferencesManager
@@ -180,6 +182,8 @@ fun BackupView(appState: AppState) {
                     restoreError = null
                 }
             },
+            // The typed seed stays out of screenshots and the recents thumbnail.
+            properties = DialogProperties(securePolicy = SecureFlagPolicy.SecureOn),
             containerColor = MaterialTheme.colorScheme.surface,
             tonalElevation = 3.dp,
             title = {
