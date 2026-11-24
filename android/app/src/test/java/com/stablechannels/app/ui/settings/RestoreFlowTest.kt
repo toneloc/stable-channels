@@ -146,4 +146,28 @@ class RestoreFlowTest {
         assertNull(flow.warning)
         assertFalse(flow.isBusy)
     }
+
+    @Test
+    fun `only a check that opens a warning reports it`() {
+        val (flow, checkA, checkB) = restartedWithSamePhrase()
+        val warned = mutableListOf<RestoreWarning>()
+
+        assertNull(flow.onChecked(checkA, channelExists = true) { warned += it })
+        assertEquals(emptyList<RestoreWarning>(), warned)
+
+        assertNull(flow.onChecked(checkB, channelExists = true) { warned += it })
+        assertEquals(listOf(RestoreWarning.OPEN_CHANNEL), warned)
+    }
+
+    @Test
+    fun `a restore or an unverified check reports only the warning it opens`() {
+        val warned = mutableListOf<RestoreWarning>()
+        val (restoring, check) = checking()
+        assertEquals(PHRASE, restoring.onChecked(check, channelExists = false) { warned += it })
+        assertEquals(emptyList<RestoreWarning>(), warned)
+
+        val (unverified, other) = checking()
+        assertNull(unverified.onChecked(other, channelExists = null) { warned += it })
+        assertEquals(listOf(RestoreWarning.UNVERIFIED), warned)
+    }
 }

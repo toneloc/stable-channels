@@ -74,23 +74,33 @@ internal class RestoreFlow {
     /**
      * Ends the channel check: the phrase to restore now, or null when a warning opened or the check
      * is stale (the app was left, or a newer check started). A stale check leaves a newer one alone
-     * without modifying active state or warnings.
+     * without modifying active state or warnings. [onWarning] runs only when this check opens a
+     * warning.
      */
-    fun onChecked(check: RestoreCheck, channelExists: Boolean?): String? {
+    fun onChecked(
+        check: RestoreCheck,
+        channelExists: Boolean?,
+        onWarning: (RestoreWarning) -> Unit = {},
+    ): String? {
         if (check !== activeCheck) return null
         activeCheck = null
         // The phrase was edited during the check: the answer is for other words, so nothing opens.
         if (phrase.trim() != check.phrase) return null
         return when (channelExists) {
             false -> check.phrase
-            true -> null.also { warn(RestoreWarning.OPEN_CHANNEL, check) }
-            null -> null.also { warn(RestoreWarning.UNVERIFIED, check) }
+            true -> null.also { warn(RestoreWarning.OPEN_CHANNEL, check, onWarning) }
+            null -> null.also { warn(RestoreWarning.UNVERIFIED, check, onWarning) }
         }
     }
 
-    private fun warn(kind: RestoreWarning, check: RestoreCheck) {
+    private fun warn(
+        kind: RestoreWarning,
+        check: RestoreCheck,
+        onWarning: (RestoreWarning) -> Unit,
+    ) {
         warning = kind
         warnedCheck = check
+        onWarning(kind)
     }
 
     fun dismissWarning() {

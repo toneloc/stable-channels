@@ -26,7 +26,7 @@ class SeedAccessGateTest {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
 
     private val prompts = mutableListOf<String>()
-    private var unavailable = 0
+    private val feedback = mutableListOf<String>()
 
     private fun gate(
         scope: CoroutineScope,
@@ -41,7 +41,7 @@ class SeedAccessGateTest {
                 reply()
             },
             phase = { AppLifecyclePhase.ACTIVE },
-            onAuthUnavailable = { unavailable++ },
+            onAuthFeedback = { feedback += it },
         )
 
     @Test
@@ -86,7 +86,9 @@ class SeedAccessGateTest {
     }
 
     @Test
-    fun `with App Lock off a second quick tap opens nothing`() = runTest {
+    fun `with App Lock off a second tap before the first one runs opens nothing`() = runTest {
+        // The gate only blocks taps queued behind a pending request; it does not debounce taps
+        // that arrive after the first one has finished.
         val gate = gate(this, requiresAuth = false) { AuthResult.SUCCESS }
         var opened = 0
         gate.request("reveal") { opened++ }
@@ -109,7 +111,7 @@ class SeedAccessGateTest {
         result = AuthResult.CANCELLED
         gate.request("c") { opened++ }
         runCurrent()
-        assertEquals(2, unavailable)
+        assertEquals(listOf(AUTH_UNAVAILABLE_MESSAGE, AUTH_UNAVAILABLE_MESSAGE), feedback)
         assertEquals(0, opened)
     }
 
@@ -117,5 +119,36 @@ class SeedAccessGateTest {
     fun `the unavailable message does not claim the screen lock is missing`() {
         // It also shows when hardware is busy or needs a security update, where a lock exists.
         assertFalse(AUTH_UNAVAILABLE_MESSAGE.contains("screen lock", ignoreCase = true))
+    }
+
+    @Test
+    fun `a failed or locked-out authentication says so and opens nothing`() = runTest {
+        var result = AuthResult.BIOMETRY_FAILED
+        val gate = gate(this, requiresAuth = true) { result }
+        var opened = 0
+        gate.request("a") { opened++ }
+        runCurrent()
+        result = AuthResult.DEVICE_CREDENTIAL_FAILED
+        gate.request("b") { opened++ }
+        runCurrent()
+        assertEquals(listOf(AUTH_FAILED_MESSAGE, AUTH_FAILED_MESSAGE), feedback)
+        assertEquals(0, opened)
+    }
+
+    @Test
+    fun `every auth result maps to its feedback, and success or cancel says nothing`() {
+        val expected =
+            mapOf(
+                AuthResult.SUCCESS to null,
+                AuthResult.CANCELLED to null,
+                AuthResult.NOT_AVAILABLE to AUTH_UNAVAILABLE_MESSAGE,
+                AuthResult.NOT_ENROLLED to AUTH_UNAVAILABLE_MESSAGE,
+                AuthResult.BIOMETRY_FAILED to AUTH_FAILED_MESSAGE,
+                AuthResult.DEVICE_CREDENTIAL_FAILED to AUTH_FAILED_MESSAGE,
+            )
+        assertEquals(AuthResult.entries.toSet(), expected.keys)
+        expected.forEach { (result, message) ->
+            assertEquals(result.name, message, authFeedback(result))
+        }
     }
 }

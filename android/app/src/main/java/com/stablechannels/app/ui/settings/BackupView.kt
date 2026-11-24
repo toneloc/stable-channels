@@ -78,8 +78,8 @@ fun BackupView(appState: AppState) {
                     ?: BiometricService.AuthResult.CANCELLED
             },
             phase = { lifecyclePhase },
-            onAuthUnavailable = {
-                Toast.makeText(context, AUTH_UNAVAILABLE_MESSAGE, Toast.LENGTH_SHORT).show()
+            onAuthFeedback = { message ->
+                Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
             },
         )
     }
@@ -200,16 +200,22 @@ fun BackupView(appState: AppState) {
                                     "RESTORE_GUARD_UNAVAILABLE",
                                     mapOf("node_id" to (nodeId ?: "derive_failed")),
                                 )
-                            } else if (exists) {
-                                AuditService.log(
-                                    "RESTORE_ACTIVE_CHANNEL_DETECTED",
-                                    mapOf("node_id" to nodeId),
-                                )
                             }
                             withContext(Dispatchers.Main) {
-                                restore.onChecked(check, exists)?.let {
-                                    performRestore(it, channelMayExist = false)
-                                }
+                                restore
+                                    .onChecked(check, exists) { warning ->
+                                        // Logged only when the warning really opens, never for a
+                                        // stale check; the write stays off the main thread.
+                                        if (warning == RestoreWarning.OPEN_CHANNEL) {
+                                            scope.launch(Dispatchers.IO) {
+                                                AuditService.log(
+                                                    "RESTORE_ACTIVE_CHANNEL_DETECTED",
+                                                    mapOf("node_id" to nodeId),
+                                                )
+                                            }
+                                        }
+                                    }
+                                    ?.let { performRestore(it, channelMayExist = false) }
                             }
                         }
                     },

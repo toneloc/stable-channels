@@ -12,9 +12,18 @@ internal const val RESTORE_AUTH_REASON = "Authenticate to restore from a recover
 internal const val AUTH_UNAVAILABLE_MESSAGE =
     "Authentication isn't available on this device right now"
 
-/** App Lock is on but the device has no lock to check; a cancel or failure stays silent. */
-internal fun isAuthUnavailable(result: AuthResult): Boolean =
-    result == AuthResult.NOT_AVAILABLE || result == AuthResult.NOT_ENROLLED
+internal const val AUTH_FAILED_MESSAGE = "Authentication failed. Try again."
+
+/** What to tell the user after an auth attempt: nothing on success or a cancel. */
+internal fun authFeedback(result: AuthResult): String? =
+    when (result) {
+        AuthResult.SUCCESS,
+        AuthResult.CANCELLED -> null
+        AuthResult.NOT_AVAILABLE,
+        AuthResult.NOT_ENROLLED -> AUTH_UNAVAILABLE_MESSAGE
+        AuthResult.BIOMETRY_FAILED,
+        AuthResult.DEVICE_CREDENTIAL_FAILED -> AUTH_FAILED_MESSAGE
+    }
 
 /**
  * Runs one [SeedAccessPolicy.authorize] at a time: taps while one is pending are ignored, so a
@@ -25,7 +34,7 @@ internal class SeedAccessGate(
     private val requiresAuth: () -> Boolean,
     private val authenticate: suspend (reason: String) -> AuthResult,
     private val phase: () -> AppLifecyclePhase,
-    private val onAuthUnavailable: () -> Unit,
+    private val onAuthFeedback: (String) -> Unit,
 ) {
     private var inFlight = false
 
@@ -39,7 +48,7 @@ internal class SeedAccessGate(
                         requiresAuth = requiresAuth(),
                         authenticate = {
                             val result = authenticate(reason)
-                            if (isAuthUnavailable(result)) onAuthUnavailable()
+                            authFeedback(result)?.let(onAuthFeedback)
                             result == AuthResult.SUCCESS
                         },
                         phaseAfter = phase,
