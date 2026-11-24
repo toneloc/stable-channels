@@ -9,10 +9,14 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.stablechannels.app.domain.seed.AppLifecyclePhase
 
-/** ON_PAUSE is inactive (the biometric prompt raises it too); only ON_STOP means the app left. */
+/**
+ * ON_PAUSE is inactive (the biometric prompt raises it too); only ON_STOP means the app left.
+ * ON_START is inactive too: a PIN screen that stopped the app returns its reply before ON_RESUME.
+ */
 internal fun seedLifecyclePhase(event: Lifecycle.Event): AppLifecyclePhase? =
     when (event) {
         Lifecycle.Event.ON_RESUME -> AppLifecyclePhase.ACTIVE
+        Lifecycle.Event.ON_START,
         Lifecycle.Event.ON_PAUSE -> AppLifecyclePhase.INACTIVE
         Lifecycle.Event.ON_STOP -> AppLifecyclePhase.BACKGROUND
         else -> null

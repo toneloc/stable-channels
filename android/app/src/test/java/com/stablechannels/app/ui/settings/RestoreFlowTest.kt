@@ -64,6 +64,16 @@ class RestoreFlowTest {
     }
 
     @Test
+    fun `a restore that finishes after the app was left closes its dialog`() {
+        val (flow, check) = checking()
+        assertTrue(flow.startApply(check.phrase))
+        flow.onBackground()
+        flow.onApplied()
+        assertFalse(flow.isOpen)
+        assertFalse(flow.isBusy)
+    }
+
+    @Test
     fun `a blank phrase never starts a restore`() {
         val flow = RestoreFlow()
         assertFalse(flow.startApply(""))
