@@ -99,6 +99,8 @@ pub fn Overview() -> Element {
 		actions::fetch_balances(ctx);
 		actions::fetch_channels(ctx);
 		actions::fetch_stable_channels(ctx);
+		// The sidebar lists Queued splice-ins only while one is live, so a manual refresh checks the queue too.
+		actions::fetch_queued_splices(ctx);
 		actions::fetch_peers(ctx);
 		actions::refresh_first_payments_page(ctx);
 		actions::fetch_revenue_week(ctx);

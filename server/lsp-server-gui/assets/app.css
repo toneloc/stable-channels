@@ -428,6 +428,14 @@ html, body {
 	background: var(--red);
 }
 
+/* Leads the Peer cell of a channel with an LSP splice-in in progress. */
+.dot.splice {
+	display: inline-block;
+	margin-right: 8px;
+	vertical-align: middle;
+	background: var(--orange);
+}
+
 .content {
 	flex: 1;
 	min-height: 0;
@@ -1272,6 +1280,24 @@ details.disclosure[open] > summary .icon {
 
 details.disclosure > .body {
 	padding-top: 12px;
+}
+
+/* The status legend at the bottom of the Queued splice-ins card: a collapsed footnote, small when open. */
+details.status-guide {
+	padding: 12px 20px 14px;
+	border-top: 1px solid var(--border);
+}
+
+.status-guide-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+	gap: 8px 24px;
+}
+
+.status-guide-item {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
 }
 
 /* ---------- Tables ---------- */

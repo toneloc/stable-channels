@@ -38,6 +38,7 @@ pub enum ActiveTab {
 	ForwardedPayments,
 	Lightning,
 	Onchain,
+	QueuedSplices,
 	StableChannels,
 	Tools,
 	NetworkGraph,
@@ -60,7 +61,7 @@ impl ActiveTab {
 				ActiveTab::ForwardedPayments,
 			],
 		),
-		("On-chain", &[ActiveTab::Onchain]),
+		("On-chain", &[ActiveTab::Onchain, ActiveTab::QueuedSplices]),
 		("Network", &[ActiveTab::NetworkGraph]),
 		("System", &[ActiveTab::Tools, ActiveTab::Logs, ActiveTab::Settings]),
 	];
@@ -77,6 +78,7 @@ impl ActiveTab {
 			ActiveTab::ForwardedPayments => "Forwarded",
 			ActiveTab::Lightning => "Lightning",
 			ActiveTab::Onchain => "On-chain",
+			ActiveTab::QueuedSplices => "Queued splice-ins",
 			ActiveTab::StableChannels => "Stable",
 			ActiveTab::Tools => "Tools",
 			ActiveTab::NetworkGraph => "Graph",
@@ -109,6 +111,7 @@ impl ActiveTab {
 			ActiveTab::ForwardedPayments => "Payments routed through this node and the fees earned",
 			ActiveTab::Lightning => "Send and receive over Lightning",
 			ActiveTab::Onchain => "Send, receive and review on-chain funds",
+			ActiveTab::QueuedSplices => "LSP splice-ins queued for the phone and where each got to",
 			ActiveTab::StableChannels => "USD-stabilized channels and their targets",
 			ActiveTab::Tools => "Message signing and router utilities",
 			ActiveTab::NetworkGraph => "Public channels and nodes known from gossip",
@@ -129,12 +132,18 @@ impl ActiveTab {
 			ActiveTab::ForwardedPayments => "forward",
 			ActiveTab::Lightning => "zap",
 			ActiveTab::Onchain => "cube",
+			ActiveTab::QueuedSplices => "merge",
 			ActiveTab::StableChannels => "shield",
 			ActiveTab::Tools => "wrench",
 			ActiveTab::NetworkGraph => "graph",
 			ActiveTab::Logs => "file",
 			ActiveTab::Settings => "sliders",
 		}
+	}
+
+	/// Whether the sidebar lists this tab: Queued splice-ins only while a splice-in is live, or while it is open so it never vanishes under the operator.
+	pub fn in_sidebar(self, active: ActiveTab, splice_in_live: bool) -> bool {
+		self != ActiveTab::QueuedSplices || splice_in_live || active == self
 	}
 }
 

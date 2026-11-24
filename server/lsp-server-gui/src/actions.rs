@@ -1597,6 +1597,8 @@ pub fn resolve_aliases(ctx: AppCtx, node_ids: impl IntoIterator<Item = String>) 
 
 /// Background refresh of whatever the visible page shows.
 pub fn refresh_visible(ctx: AppCtx) {
+	// On every page: the sidebar lists Queued splice-ins only while one is live, and the Channels list dots its channel.
+	fetch_queued_splices(ctx);
 	let nav = *ctx.nav.peek();
 	match nav.active_tab {
 		ActiveTab::Overview => {
@@ -1617,7 +1619,6 @@ pub fn refresh_visible(ctx: AppCtx) {
 		ActiveTab::Channels => {
 			fetch_channels(ctx);
 			fetch_stable_channels(ctx);
-			fetch_queued_splices(ctx);
 			// The "Splicing" pill reads the feed.
 			if ctx.data.peek().activity_pages <= 1 {
 				fetch_activity_feed(ctx, false);
