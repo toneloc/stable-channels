@@ -44,10 +44,10 @@ internal fun routePush(
     }
 
 /**
- * Whether the app's heartbeat still means the app owns the node. The app runs in one process, so
- * a heartbeat written before this process started was left by a process that died without
- * clearing it, and no longer means the app owns the node. A heartbeat from the second the process
- * started still counts, as before.
+ * Whether the app's heartbeat still means the app owns the node. The app runs in one process, so a
+ * heartbeat written before this process started was left by a process that died without clearing
+ * it, and no longer means the app owns the node. A heartbeat from the second the process started
+ * still counts, as before.
  */
 internal fun heartbeatIsLive(
     lastActiveSecs: Long,
