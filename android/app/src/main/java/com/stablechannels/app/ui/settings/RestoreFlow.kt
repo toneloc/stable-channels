@@ -30,6 +30,8 @@ internal class RestoreFlow {
         private set
 
     private var activeCheck by mutableStateOf<RestoreCheck?>(null)
+    // The check behind the open warning, so "Restore Anyway" restores what was checked.
+    private var warnedCheck: RestoreCheck? = null
     private var isApplying by mutableStateOf(false)
 
     val isBusy: Boolean
@@ -44,18 +46,21 @@ internal class RestoreFlow {
         isOpen = false
         phrase = ""
         error = null
+        warnedCheck = null
     }
 
     fun onBackground() {
         phrase = ""
         error = null
-        warning = null
+        dismissWarning()
         activeCheck = null
         if (!isApplying) isOpen = false
     }
 
     /** The check to run for an open channel, or null after setting the word-count error. */
     fun startCheck(): RestoreCheck? {
+        // A second tap while a check runs would ask the LSP twice.
+        if (isBusy) return null
         val input = phrase.trim()
         val words = input.split("\\s+".toRegex()).size
         if (words != 12 && words != 24) {
@@ -72,24 +77,29 @@ internal class RestoreFlow {
      * without modifying active state or warnings.
      */
     fun onChecked(check: RestoreCheck, channelExists: Boolean?): String? {
-        if (check !== activeCheck || phrase.trim() != check.phrase) return null
+        if (check !== activeCheck) return null
         activeCheck = null
+        // The phrase was edited during the check: the answer is for other words, so nothing opens.
+        if (phrase.trim() != check.phrase) return null
         return when (channelExists) {
             false -> check.phrase
-            true -> null.also { warning = RestoreWarning.OPEN_CHANNEL }
-            null -> null.also { warning = RestoreWarning.UNVERIFIED }
+            true -> null.also { warn(RestoreWarning.OPEN_CHANNEL, check) }
+            null -> null.also { warn(RestoreWarning.UNVERIFIED, check) }
         }
+    }
+
+    private fun warn(kind: RestoreWarning, check: RestoreCheck) {
+        warning = kind
+        warnedCheck = check
     }
 
     fun dismissWarning() {
         warning = null
+        warnedCheck = null
     }
 
-    /** "Restore Anyway": the phrase to apply, or null if leaving the app cleared it. */
-    fun confirmWarning(): String? {
-        warning = null
-        return phrase.trim().ifBlank { null }
-    }
+    /** "Restore Anyway": the checked phrase to apply, or null if leaving the app cleared it. */
+    fun confirmWarning(): String? = warnedCheck?.phrase.also { dismissWarning() }
 
     /** A blank phrase never starts a restore: the node would wipe the wallet with no seed. */
     fun startApply(input: String): Boolean {

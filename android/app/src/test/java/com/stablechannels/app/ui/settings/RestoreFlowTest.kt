@@ -114,4 +114,36 @@ class RestoreFlowTest {
         assertNull(flow.warning)
         assertFalse(flow.isBusy)
     }
+
+    private val OTHER_PHRASE = "zoo ".repeat(11) + "wrong"
+
+    @Test
+    fun `restore anyway restores the phrase that was checked, not one edited after`() {
+        val (flow, check) = checking()
+        assertNull(flow.onChecked(check, channelExists = true))
+
+        flow.phrase = OTHER_PHRASE
+
+        assertEquals(PHRASE, flow.confirmWarning())
+    }
+
+    @Test
+    fun `a second tap while a check runs starts nothing and keeps the first check`() {
+        val (flow, check) = checking()
+
+        assertNull(flow.startCheck())
+        assertNull(flow.error)
+
+        assertEquals(PHRASE, flow.onChecked(check, channelExists = false))
+    }
+
+    @Test
+    fun `a check whose phrase was edited ends without restoring or warning`() {
+        val (flow, check) = checking()
+        flow.phrase = OTHER_PHRASE
+
+        assertNull(flow.onChecked(check, channelExists = false))
+        assertNull(flow.warning)
+        assertFalse(flow.isBusy)
+    }
 }

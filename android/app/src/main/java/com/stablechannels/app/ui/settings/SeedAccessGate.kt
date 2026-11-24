@@ -9,7 +9,8 @@ import kotlinx.coroutines.launch
 
 internal const val REVEAL_AUTH_REASON = "Authenticate to reveal your Secret Recovery Phrase"
 internal const val RESTORE_AUTH_REASON = "Authenticate to restore from a recovery phrase"
-internal const val AUTH_UNAVAILABLE_MESSAGE = "Set up a screen lock to open your recovery phrase"
+internal const val AUTH_UNAVAILABLE_MESSAGE =
+    "Authentication isn't available on this device right now"
 
 /** App Lock is on but the device has no lock to check; a cancel or failure stays silent. */
 internal fun isAuthUnavailable(result: AuthResult): Boolean =

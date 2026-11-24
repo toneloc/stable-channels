@@ -12,6 +12,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -110,5 +111,11 @@ class SeedAccessGateTest {
         runCurrent()
         assertEquals(2, unavailable)
         assertEquals(0, opened)
+    }
+
+    @Test
+    fun `the unavailable message does not claim the screen lock is missing`() {
+        // It also shows when hardware is busy or needs a security update, where a lock exists.
+        assertFalse(AUTH_UNAVAILABLE_MESSAGE.contains("screen lock", ignoreCase = true))
     }
 }
