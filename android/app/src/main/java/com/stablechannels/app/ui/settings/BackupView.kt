@@ -14,6 +14,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.SecureFlagPolicy
 import androidx.fragment.app.FragmentActivity
 import com.stablechannels.app.AppState
 import com.stablechannels.app.domain.seed.AppLifecyclePhase
@@ -107,6 +109,7 @@ fun BackupView(appState: AppState) {
     if (restore.isOpen) {
         AlertDialog(
             onDismissRequest = { restore.close() },
+            properties = DialogProperties(securePolicy = SecureFlagPolicy.SecureOn),
             containerColor = MaterialTheme.colorScheme.surface,
             tonalElevation = 3.dp,
             title = {
@@ -183,14 +186,14 @@ fun BackupView(appState: AppState) {
             confirmButton = {
                 NeutralTextButton(
                     onClick = {
-                        val input = restore.startCheck() ?: return@NeutralTextButton
+                        val check = restore.startCheck() ?: return@NeutralTextButton
                         // Restore guard: a seed-only restore wipes LDK state;
                         // if this seed's node still has an LSP channel it will
                         // be force-closed at the next reestablish. Detect that
                         // and require explicit opt-in; fail-warn if the LSP is
                         // unreachable or derivation fails.
                         scope.launch(Dispatchers.IO) {
-                            val nodeId = NodeService.deriveNodeId(context, input)
+                            val nodeId = NodeService.deriveNodeId(context, check.phrase)
                             val exists = nodeId?.let { appState.lspChannelExists(it) }
                             if (exists == null) {
                                 AuditService.log(
@@ -204,7 +207,7 @@ fun BackupView(appState: AppState) {
                                 )
                             }
                             withContext(Dispatchers.Main) {
-                                restore.onChecked(input, exists)?.let {
+                                restore.onChecked(check, exists)?.let {
                                     performRestore(it, channelMayExist = false)
                                 }
                             }

@@ -10,6 +10,9 @@ internal enum class RestoreWarning {
     UNVERIFIED,
 }
 
+/** One channel check of [phrase]. Compared by identity, so two checks of the same phrase differ. */
+internal class RestoreCheck(val phrase: String)
+
 /**
  * The restore dialogs' state, kept out of the view so the background races test without UI. Leaving
  * the app always drops the typed phrase and closes the dialogs, as iOS does; only a restore already
@@ -26,11 +29,11 @@ internal class RestoreFlow {
     var warning by mutableStateOf<RestoreWarning?>(null)
         private set
 
-    private var isChecking by mutableStateOf(false)
+    private var activeCheck by mutableStateOf<RestoreCheck?>(null)
     private var isApplying by mutableStateOf(false)
 
     val isBusy: Boolean
-        get() = isChecking || isApplying
+        get() = activeCheck != null || isApplying
 
     fun open() {
         isOpen = true
@@ -47,32 +50,32 @@ internal class RestoreFlow {
         phrase = ""
         error = null
         warning = null
-        isChecking = false
+        activeCheck = null
         if (!isApplying) isOpen = false
     }
 
-    /** The phrase to check for an open channel, or null after setting the word-count error. */
-    fun startCheck(): String? {
+    /** The check to run for an open channel, or null after setting the word-count error. */
+    fun startCheck(): RestoreCheck? {
         val input = phrase.trim()
         val words = input.split("\\s+".toRegex()).size
         if (words != 12 && words != 24) {
             error = "Seed phrase must be 12 or 24 words"
             return null
         }
-        isChecking = true
         error = null
-        return input
+        return RestoreCheck(input).also { activeCheck = it }
     }
 
     /**
      * Ends the channel check: the phrase to restore now, or null when a warning opened or the check
-     * is stale (the app was left, so the phrase is gone). A stale check leaves a newer one alone.
+     * is stale (the app was left, or a newer check started). A stale check leaves a newer one alone
+     * without modifying active state or warnings.
      */
-    fun onChecked(input: String, channelExists: Boolean?): String? {
-        if (!isChecking || phrase.trim() != input) return null
-        isChecking = false
+    fun onChecked(check: RestoreCheck, channelExists: Boolean?): String? {
+        if (check !== activeCheck || phrase.trim() != check.phrase) return null
+        activeCheck = null
         return when (channelExists) {
-            false -> input
+            false -> check.phrase
             true -> null.also { warning = RestoreWarning.OPEN_CHANNEL }
             null -> null.also { warning = RestoreWarning.UNVERIFIED }
         }
