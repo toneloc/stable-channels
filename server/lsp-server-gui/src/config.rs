@@ -3,7 +3,6 @@
 
 use std::path::{Path, PathBuf};
 
-use hex::DisplayHex;
 use serde::{Deserialize, Serialize};
 
 /// GUI-specific config extracted from the SC daemon config file.
@@ -11,7 +10,8 @@ use serde::{Deserialize, Serialize};
 #[allow(dead_code)]
 pub struct GuiConfig {
 	pub server_url: String,
-	pub api_key: String,
+	/// The GUI admin token the daemon keeps at <storage_dir>/<network>/gui.macaroon (hex), when readable.
+	pub token: String,
 	pub tls_cert_path: String,
 	pub network: String,
 	pub chain_source: ChainSourceConfig,
@@ -29,12 +29,12 @@ fn network_to_dir_name(network: &str) -> &str {
 	}
 }
 
-/// Load the API key from the generated file at {storage_dir}/{network}/api_key.
-/// The server stores raw bytes; we return them hex-encoded.
-fn load_api_key_from_file(storage_dir: &Path, network: &str) -> Option<String> {
+/// Read the GUI admin token the daemon writes as hex text to {storage_dir}/{network}/gui.macaroon.
+fn load_token_from_file(storage_dir: &Path, network: &str) -> Option<String> {
 	let network_dir = network_to_dir_name(network);
-	let api_key_path = storage_dir.join(network_dir).join("api_key");
-	std::fs::read(&api_key_path).ok().map(|bytes| bytes.to_lower_hex_string())
+	let token_path = storage_dir.join(network_dir).join("gui.macaroon");
+	let token = std::fs::read_to_string(&token_path).ok()?.trim().to_string();
+	(!token.is_empty()).then_some(token)
 }
 
 /// Chain source type for UI selection
@@ -106,8 +106,7 @@ struct TomlConfig {
 struct NodeConfig {
 	network: String,
 	rest_service_address: String,
-	// Note: api_key in config is ignored by the SC daemon.
-	// The server generates its own key at {storage_dir}/{network}/api_key
+	// The daemon keeps the GUI admin token at {storage_dir}/{network}/gui.macaroon.
 }
 
 #[derive(Deserialize)]
@@ -144,8 +143,8 @@ impl TryFrom<TomlConfig> for GuiConfig {
 		let storage_dir = PathBuf::from(&toml.storage.disk.dir_path);
 		let tls_cert_path = storage_dir.join("tls.crt");
 
-		// Load API key from the generated file (not from config - server ignores that field)
-		let api_key = load_api_key_from_file(&storage_dir, &toml.node.network).unwrap_or_default();
+		// The daemon makes the GUI admin token; its config holds no token.
+		let token = load_token_from_file(&storage_dir, &toml.node.network).unwrap_or_default();
 
 		let chain_source = if let Some(btc) = toml.bitcoind {
 			ChainSourceConfig::Bitcoind {
@@ -163,7 +162,7 @@ impl TryFrom<TomlConfig> for GuiConfig {
 
 		Ok(GuiConfig {
 			server_url: toml.node.rest_service_address,
-			api_key,
+			token,
 			tls_cert_path: tls_cert_path.to_string_lossy().to_string(),
 			network: toml.node.network.clone(),
 			chain_source,
@@ -174,7 +173,7 @@ impl TryFrom<TomlConfig> for GuiConfig {
 /// Parse config from TOML string content.
 pub fn parse_config_from_str(contents: &str) -> Result<GuiConfig, String> {
 	let toml_config: TomlConfig =
-		toml::from_str(contents).map_err(|e| format!("Failed to parse config: {}", e))?;
+		toml::from_str(contents).map_err(|e| format!("Not a valid sc-config.toml: {}", e))?;
 
 	GuiConfig::try_from(toml_config)
 }
@@ -182,7 +181,7 @@ pub fn parse_config_from_str(contents: &str) -> Result<GuiConfig, String> {
 /// Try to load config from a file path.
 pub fn load_config<P: AsRef<Path>>(path: P) -> Result<GuiConfig, String> {
 	let contents = std::fs::read_to_string(path.as_ref())
-		.map_err(|e| format!("Failed to read config file: {}", e))?;
+		.map_err(|e| format!("Can't read the file: {}", e))?;
 
 	parse_config_from_str(&contents)
 }
@@ -246,13 +245,13 @@ pub fn save_chain_source<P: AsRef<Path>>(
 ) -> Result<(), String> {
 	// Read existing file
 	let contents = std::fs::read_to_string(path.as_ref())
-		.map_err(|e| format!("Failed to read config file: {}", e))?;
+		.map_err(|e| format!("Can't read the file: {}", e))?;
 
 	// Parse as generic TOML value to preserve structure
 	let mut doc: toml::Value =
-		toml::from_str(&contents).map_err(|e| format!("Failed to parse config file: {}", e))?;
+		toml::from_str(&contents).map_err(|e| format!("Not a valid TOML file: {}", e))?;
 
-	let table = doc.as_table_mut().ok_or_else(|| "Config file root is not a table".to_string())?;
+	let table = doc.as_table_mut().ok_or_else(|| "Not a valid config file".to_string())?;
 
 	// Remove existing chain source sections
 	table.remove("bitcoind");
@@ -271,29 +270,62 @@ pub fn save_chain_source<P: AsRef<Path>>(
 				rpc_password: rpc_password.clone(),
 			};
 			let value = toml::Value::try_from(btc_config)
-				.map_err(|e| format!("Failed to serialize bitcoind config: {}", e))?;
+				.map_err(|e| format!("Can't write the Bitcoin Core settings: {}", e))?;
 			table.insert("bitcoind".to_string(), value);
 		},
 		ChainSourceConfig::Electrum { server_url } => {
 			let electrum_config = ElectrumConfigSave { server_url: server_url.clone() };
 			let value = toml::Value::try_from(electrum_config)
-				.map_err(|e| format!("Failed to serialize electrum config: {}", e))?;
+				.map_err(|e| format!("Can't write the Electrum settings: {}", e))?;
 			table.insert("electrum".to_string(), value);
 		},
 		ChainSourceConfig::Esplora { server_url } => {
 			let esplora_config = EsploraConfigSave { server_url: server_url.clone() };
 			let value = toml::Value::try_from(esplora_config)
-				.map_err(|e| format!("Failed to serialize esplora config: {}", e))?;
+				.map_err(|e| format!("Can't write the Esplora settings: {}", e))?;
 			table.insert("esplora".to_string(), value);
 		},
 	}
 
 	// Write back to file
 	let output =
-		toml::to_string_pretty(&doc).map_err(|e| format!("Failed to serialize config: {}", e))?;
+		toml::to_string_pretty(&doc).map_err(|e| format!("Can't write the config: {}", e))?;
 
 	std::fs::write(path.as_ref(), output)
-		.map_err(|e| format!("Failed to write config file: {}", e))?;
+		.map_err(|e| format!("Can't write the file: {}", e))?;
 
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn config_in(dir: &Path) -> String {
+		format!(
+			"[node]\nnetwork = \"signet\"\nrest_service_address = \"127.0.0.1:3002\"\n[storage.disk]\ndir_path = \"{}\"\n",
+			dir.display()
+		)
+	}
+
+	#[test]
+	fn the_gui_token_is_read_from_gui_macaroon_as_text() {
+		let dir = std::env::temp_dir().join(format!("sc-gui-token-{}", std::process::id()));
+		std::fs::create_dir_all(dir.join("signet")).unwrap();
+		std::fs::write(dir.join("signet").join("gui.macaroon"), "0201abcdef\n").unwrap();
+		std::fs::write(dir.join("signet").join("api_key"), [7u8; 32]).unwrap();
+		let config = parse_config_from_str(&config_in(&dir)).unwrap();
+		std::fs::remove_dir_all(&dir).unwrap();
+		assert_eq!(config.token, "0201abcdef", "the hex text, trimmed; the old api_key is not used");
+	}
+
+	#[test]
+	fn without_gui_macaroon_the_token_is_left_empty() {
+		let dir = std::env::temp_dir().join(format!("sc-gui-no-token-{}", std::process::id()));
+		std::fs::create_dir_all(dir.join("signet")).unwrap();
+		std::fs::write(dir.join("signet").join("api_key"), [7u8; 32]).unwrap();
+		let config = parse_config_from_str(&config_in(&dir)).unwrap();
+		std::fs::remove_dir_all(&dir).unwrap();
+		assert!(config.token.is_empty());
+	}
 }

@@ -37,6 +37,11 @@ require_umbrel_dev() {
         die "Umbrel Dev's local registry is not available"
 }
 
+check_setup_token() {
+    require_docker
+    sh "$TEST_DIR/test-setup-token.sh"
+}
+
 build_images() {
     require_docker
     docker build -f "$REPO_ROOT/umbrel/docker/Dockerfile.ldk-server" \
@@ -79,6 +84,7 @@ serve_store() {
 case "${1:-help}" in
     prepare)
         require_umbrel_dev
+        check_setup_token
         # Always build this source tree's complete image set (using Docker's
         # layer cache). Reusing named images can pair a stale LDK binary with
         # the new SC client or omit the image-owned config migration entirely.
@@ -87,19 +93,24 @@ case "${1:-help}" in
         build_store
         ;;
     rebuild)
+        check_setup_token
         build_images
         publish_images
         build_store
+        ;;
+    check-setup-token)
+        check_setup_token
         ;;
     serve-store)
         serve_store
         ;;
     *)
         printf '%s\n' \
-            'usage: ./run-community.sh {prepare|rebuild|serve-store}' \
+            'usage: ./run-community.sh {prepare|rebuild|check-setup-token|serve-store}' \
             '' \
             'prepare      build current images, publish them to Umbrel Dev, and generate the store' \
             'rebuild      rebuild all images before preparing the store' \
+            'check-setup-token  check the GUI nginx serves the live GUI token (stock nginx, quick)' \
             'serve-store  serve the local Git store in the foreground (keep this terminal open)'
         ;;
 esac

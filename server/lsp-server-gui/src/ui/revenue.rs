@@ -1,18 +1,18 @@
 //! Revenue tab: what the LSP earned, spent and settled for the peg, and every movement behind it.
 
 use dioxus::prelude::*;
-use sc_rest_client::sc_protos::revenue::{RevenueItem, RevenueLine};
+use sc_rest_client::sc_protos::revenue::{RevenueItem, RevenueLine, GET_REVENUE_PATH, REFUND_TRADE_FEE_PATH};
 
 use crate::actions;
 use crate::format::csv_row;
-use crate::state::{AppCtx, Dialog, Op, RefundTradeFeeForm, RevenueWindow};
+use crate::state::{permission_for, AppCtx, Dialog, Op, RefundTradeFeeForm, RevenueWindow};
 use crate::ui::{close_dialog, open_dialog};
-use crate::ui::widgets::{Bubble, Card, Empty, Gate, Icon, IdCopy, InfoTip, Kv, Modal, Peer, Pill, RefreshBtn, SegBtn, Spinner, Stat, Th};
+use crate::ui::widgets::{Bubble, Card, Empty, Gate, Icon, IdCopy, InfoTip, Kv, Modal, NoAccess, Peer, Pill, RefreshBtn, SegBtn, Spinner, Stat, Th};
 
-const HELP_NET: &str = "Earned minus spent. Stability settlements are not included, nor routing fees paid on stability, protocol and refund payments.";
+const HELP_NET: &str = "Earned minus spent. Stability payments are not counted, nor routing fees paid on stability, protocol and refund payments.";
 const HELP_STABILITY: &str = "Sats paid to users when BTC fell and received when it rose. This is the peg working, not income.";
-const HELP_CLOSE_FEES: &str = "On-chain fees LDK reports for close transactions the wallet paid for. What a close itself costs the channel balance is not counted here; that needs the ledger.";
-const HELP_UNTRACKED: &str = "This node's LDK Server does not list or classify these transactions, so the total would read as zero when it is not.";
+const HELP_CLOSE_FEES: &str = "On-chain fees for close transactions the wallet paid. Fees paid from the channel balance at close are not counted here.";
+const HELP_UNTRACKED: &str = "This node's LDK Server does not report these transactions, so a total here would wrongly read as zero.";
 const HELP_JIT_OPENS: &str = "On-chain fees the LSP paid to open private channels for users. Opening is free for them, so this is what the free service costs.";
 const HELP_JIT: &str = "Opening fee skimmed from a JIT channel's first payment. Zero while the LSP opens channels for free.";
 
@@ -183,6 +183,9 @@ pub fn Revenue() -> Element {
 	if !ctx.is_connected() {
 		return rsx! { Gate {} };
 	}
+	if !ctx.can(GET_REVENUE_PATH) {
+		return rsx! { Card { NoAccess { permission: permission_for(GET_REVENUE_PATH) } } };
+	}
 	let loading = ctx.busy(Op::GetRevenue);
 	let (window, filter) = {
 		let view = ctx.view.read();
@@ -196,7 +199,7 @@ pub fn Revenue() -> Element {
 		return rsx! {
 			Card {
 				if loading {
-					Empty { icon: "coins", title: "Loading...", Spinner { large: true } }
+					Empty { icon: "coins", title: "Loading…", Spinner { large: true } }
 				} else {
 					Empty { icon: "coins", title: "No revenue loaded", hint: "Click Refresh to load", RefreshBtn { busy: loading, onclick: refresh } }
 				}
@@ -277,7 +280,7 @@ pub fn Revenue() -> Element {
 			}
 		}
 		if resp.partial {
-			div { class: "card inner small", style: "margin-bottom: 12px;", "Totals for this window miss older movements: the daemon keeps a year of routing fees, the newest 50,000 movements and a capped payment scan." }
+			div { class: "card inner small", style: "margin-bottom: 12px;", "Totals for this window miss older movements. The LSP keeps a year of routing fees, the newest 50,000 movements and a capped payment scan." }
 		}
 		div { class: "grid-4",
 			Stat { title: "Earned", value: ctx.fmt_msat(earned), sub: if jit_msat > 0 { "Trade, routing and JIT fees" } else { "Trade and routing fees" } }
@@ -285,9 +288,9 @@ pub fn Revenue() -> Element {
 			div { class: "card stat",
 				div { class: "stat-title", "Net" InfoTip { text: HELP_NET } }
 				div { class: "stat-value", style: if net > 0 && !spent_unknown && !reads_as_zero(&signed(ctx, net)) { "color: var(--green-text);" } else { "" }, "{bounded(ctx, net, spent_unknown)}" }
-				div { class: "stat-sub", if spent_unknown { "At most: some fees are not tracked" } else { "Earned minus spent" } }
+				div { class: "stat-sub", if spent_unknown { "At most, as some fees are not tracked" } else { "Earned minus spent" } }
 			}
-			Stat { title: "Stability net", help: HELP_STABILITY, value: signed(ctx, stability), sub: "Peg settlements, not revenue" }
+			Stat { title: "Stability net", help: HELP_STABILITY, value: signed(ctx, stability), sub: "Stability payments, not revenue" }
 		}
 		div { class: "grid-3", style: "margin-top: 14px;",
 			Card { title: "Earned",
@@ -315,7 +318,7 @@ pub fn Revenue() -> Element {
 					Breakdown { label: "Trade fee refunds", count: line(&lines, "trade_fee_refund").0, msat: line(&lines, "trade_fee_refund").1 }
 				}
 			}
-			Card { title: "Stability settlements", help: HELP_STABILITY,
+			Card { title: "Stability payments", help: HELP_STABILITY,
 				div { class: "kv",
 					Breakdown { label: "Paid to users", count: paid_n, msat: paid_msat }
 					Breakdown { label: "Received from users", count: got_n, msat: got_msat }
@@ -398,7 +401,7 @@ fn ActivityRow(item: RevenueItem) -> Element {
 				if id.is_empty() { span { class: "faint", "—" } } else { IdCopy { value: id } }
 			}
 			td { class: "right",
-				if can_refund(&item) {
+				if can_refund(&item) && ctx.can(REFUND_TRADE_FEE_PATH) {
 					button {
 						class: "btn sm",
 						onclick: {
@@ -444,7 +447,7 @@ pub fn RefundTradeFeeDialog() -> Element {
 				}
 			},
 			p { "Send {amount} back to {who}?" }
-			span { class: "small muted", "It arrives as an ordinary payment in the user's wallet. The daemon sends it once; a failed refund can be retried." }
+			span { class: "small muted", "It arrives as an ordinary payment in the user's wallet. The LSP sends it once. A failed refund can be retried." }
 		}
 	}
 }

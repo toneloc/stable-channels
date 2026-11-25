@@ -3,8 +3,9 @@ use std::collections::HashMap;
 use dioxus::prelude::*;
 use crate::actions;
 use crate::format::{csv_row, truncate_id};
-use crate::state::{AppCtx, Op};
-use crate::ui::widgets::{Amount, Card, Empty, Gate, Icon, IdCopy, Pill, RefreshBtn, Spinner, Stat, Th};
+use crate::state::{permission_for, AppCtx, Op};
+use crate::ui::widgets::{Amount, Card, Empty, Gate, Icon, IdCopy, NoAccess, Pill, RefreshBtn, Spinner, Stat, Th};
+use sc_rest_client::ldk_server_grpc::endpoints::LIST_FORWARDED_PAYMENTS_PATH;
 
 const HELP_TOTAL_FEE: &str = "Fees earned by this node for forwarding payments.";
 const HELP_AMOUNT_FORWARDED: &str = "Total value forwarded through this node.";
@@ -12,7 +13,7 @@ const HELP_INCOMING: &str = "The channel (and its peer) the payment arrived on."
 const HELP_OUTGOING: &str = "The channel (and its peer) the payment was forwarded to.";
 const HELP_BY_CHANNEL: &str = "Routing fees grouped by the outgoing channel, highest first.";
 // Totals and rows cover only what LDK Server still holds individually.
-const RECENT_WINDOW_NOTE: &str = "LDK Server keeps individual forwards for about two hours, and only in detailed mode; older ones survive only as hourly totals.";
+const RECENT_WINDOW_NOTE: &str = "LDK Server keeps single forwards for about two hours, and only in detailed mode. Older ones remain only as hourly totals.";
 
 /// One side of a forward: the channel and, when known, the peer behind it.
 #[derive(Clone, PartialEq)]
@@ -89,6 +90,9 @@ pub fn ForwardedPayments() -> Element {
 	if !ctx.is_connected() {
 		return rsx! { Gate {} };
 	}
+	if !ctx.can(LIST_FORWARDED_PAYMENTS_PATH) {
+		return rsx! { Card { NoAccess { permission: permission_for(LIST_FORWARDED_PAYMENTS_PATH) } } };
+	}
 	let loading = ctx.busy(Op::ForwardedPayments);
 	let data = ctx.data.read();
 	let peers: HashMap<String, String> = data
@@ -118,7 +122,7 @@ pub fn ForwardedPayments() -> Element {
 		return rsx! {
 			Card {
 				if loading {
-					Empty { icon: "forward", title: "Loading...", Spinner { large: true } }
+					Empty { icon: "forward", title: "Loading…", Spinner { large: true } }
 				} else {
 					Empty { icon: "forward", title: "No recent forwarded payments", hint: RECENT_WINDOW_NOTE,
 						RefreshBtn { busy: loading, onclick: refresh }

@@ -73,7 +73,7 @@ pub fn ConfirmSendDialog(kind: SendKind) -> Element {
 				(
 					"Amount",
 					if f.send_all {
-						"Entire spendable on-chain balance (the fee is deducted from it)".to_string()
+						"Entire spendable on-chain balance, minus the fee".to_string()
 					} else {
 						ctx.parse_amount_sats(&f.amount_sats).map(|s| describe_msat(ctx, s * 1000)).unwrap_or_default()
 					},
@@ -100,7 +100,7 @@ pub fn ConfirmSendDialog(kind: SendKind) -> Element {
 			footer: rsx! {
 				button { class: "btn ghost", onclick: move |_| close_dialog(ctx), "Back" }
 				button { class: "btn primary", disabled: pending, onclick: move |_| actions::confirm_send(ctx, kind),
-					if pending { Spinner {} "Sending..." } else { Icon { name: "check", size: 16 } "Confirm & send" }
+					if pending { Spinner {} "Sending…" } else { Icon { name: "check", size: 16 } "Confirm & send" }
 				}
 			},
 			div { class: "kv",

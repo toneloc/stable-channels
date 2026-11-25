@@ -8,19 +8,19 @@ Cargo workspace for the **Stable Channels LSP** bidaemon architecture, under act
 flowchart TD
     Client["Client (operator GUI / wallet)"]
 
-    Client -->|"POST /Endpoint over TLS :3002<br/>protobuf body<br/>X-Auth = HMAC(SC api_key, body)"| SCVerify
+    Client -->|"POST /Endpoint over TLS :3002<br/>protobuf body<br/>X-Auth = session-signed request"| SCVerify
 
     subgraph SC ["stable-channels-lsp daemon"]
-        SCVerify{"HMAC verify<br/>SC api_key"} --> Route{"Route by path"}
+        SCVerify{"Verify token login<br/>or session signature"} --> Route{"Route by path"}
         Route -- "SC-owned<br/>/GetPrice, /ListStableChannels,<br/>/AuditLog" --> Local["Local handler"]
         Route -- "Proxy<br/>/GetNodeInfo, /OpenChannel,<br/>/Bolt11Receive, ..." --> Grpc["ldk-server-client<br/>(gRPC wrapper)"]
         Local --> SCData[("sqlite + price feed<br/>+ audit log")]
     end
 
-    Grpc -->|"gRPC over TLS :3536<br/>protobuf body<br/>X-Auth = HMAC(LDK Server api_key, body)"| LDKVerify
+    Grpc -->|"gRPC over TLS :3536<br/>protobuf body<br/>macaroon header (bound to method + body)"| LDKVerify
 
     subgraph LDK ["LDK Server (vanilla, no SC code)"]
-        LDKVerify{"HMAC verify<br/>LDK Server api_key"} --> LDKDispatch["gRPC service<br/>dispatch"]
+        LDKVerify{"Macaroon verify<br/>LDK Server root keys"} --> LDKDispatch["gRPC service<br/>dispatch"]
         LDKDispatch --> Node["LDK Node<br/>(channels, payments,<br/>graph, peer manager)"]
         LDKDispatch --> Bdk["BDK on-chain wallet"]
         LDKDispatch --> Lsps2["LSPS2 service<br/>(JIT channels)"]
@@ -50,25 +50,29 @@ Each connection (client → SC daemon, *and* SC daemon → LDK Server) is secure
 | Item | Role |
 |---|---|
 | **API URL** | Where the listener is (`https://127.0.0.1:3002` for the SC daemon, `127.0.0.1:3536` for LDK Server gRPC). |
-| **api_key** | 32-byte shared secret. Used as the key in `HMAC-SHA256(api_key, request_body)`. The resulting HMAC goes in the `X-Auth` header on every request. **The key itself never travels on the wire after provisioning.** This is what authenticates the **client to the server**. |
+| **Client credential** | Hop 1 (SC daemon): an LDK Server token (macaroon) at login, then a per-session signed request: the login returns a session secret, and each later request is signed with it in the `X-Auth` header. Hop 2 (LDK Server): a macaroon; for every request the client adds a caveat binding a copy to the RPC method, body hash and time, and sends that copy in the `macaroon` header. **Requests carry only signatures or bound copies; a GUI token itself crosses the wire (inside TLS) only at login.** This is what authenticates the **client to the server**. |
 | **TLS certificate** | The server's self-signed cert, **pinned** by the client. Authenticates the **server to the client** and encrypts the channel. |
 
-So three jobs, three mechanisms: HMAC proves who's calling, cert pinning proves who's answering, TLS encrypts the bytes in between.
+So three jobs, three mechanisms: the session signature or bound macaroon proves who's calling, cert pinning proves who's answering, TLS encrypts the bytes in between.
 
-The two hops use **independent pairs** of (api_key, TLS cert):
+The two hops have **separate TLS certs but one token system**: every token is an LDK Server macaroon.
 
-- Hop 1 (client → SC daemon): the SC daemon's api_key + the SC daemon's TLS cert.
-- Hop 2 (SC daemon → LDK Server): **LDK Server's own** api_key + **LDK Server's own** TLS cert.
+- Hop 1 (client → SC daemon): an LDK Server token (then its session secret) + the SC daemon's TLS cert.
+- Hop 2 (SC daemon → LDK Server): the daemon's own LDK Server token + **LDK Server's own** TLS cert.
 
-A leak on either hop is contained. A leaked SC daemon api_key (on a wallet, on the operator GUI host, anywhere) gives the attacker access only to the SC daemon, not to LDK Server, because LDK Server only trusts its own key. Symmetrically, leaking LDK Server's key (e.g., off the host running both daemons) reveals nothing about any wallet's traffic.
+**What a leaked token reaches: its permissions, on both servers.** A GUI token is an LDK Server token, so besides logging into the SC daemon (whose own routes are checked against the same LDK permission names) it works directly against LDK Server's gRPC wherever that port can be reached. The other way round, any LDK Server token restricted only by permissions and an expiry can log into the SC daemon (tokens limited to single methods are refused at login). An `admin` token can read every channel and payment on the node, wallets' node ids included, and can move funds. A leaked session secret is worth only that session, until it ends (logout, revoke, daemon restart or its 12-hour limit). After a leak, revoke the token on the GUI's Access page: LDK Server stops accepting it and the daemon ends its sessions at once (after a revoke with LDK Server's own command line, they end within about 30 seconds).
 
-**How the SC daemon obtains LDK Server's secrets**: at startup the SC daemon reads LDK Server's own config file (path set in `sc-config.toml` under `[ldk_server] config_path`), derives the api_key file and TLS cert paths from it, and loads both into memory. Both daemons therefore need read access to a shared filesystem, usually the same host (Umbrel, VM, etc.). To split them across hosts, those two files have to be shipped over a separate secure channel, or the transport upgraded to mTLS.
+The daemon's own token is separate from GUI logins: the Access page refuses to revoke it, since that would stop stability payments. To replace it, make a new one with LDK Server's own tools, point the daemon at it and restart the daemon (see below).
+
+**GUI admin token and remote desktop GUIs**: once LDK Server answers, the daemon keeps a working admin token for the first GUI login in `<storage_dir>/<network>/gui.macaroon` (hex, mode 0600; `<storage_dir>` is the daemon's `[storage.disk] dir_path`). It makes a new one when the file is missing or refused, and at once when that token is revoked on the Access page. A desktop GUI on the same machine reads it from there. For a desktop GUI on another machine, copy the token (`gui.macaroon`, or better a limited token made on the Access page) and the daemon's `<storage_dir>/tls.crt` to it over a secure channel, and enter them as the GUI's access token and TLS cert path. The daemon's `[tls] hosts` must name the address that GUI dials; the daemon writes its certificate only when none exists, so after changing `[tls] hosts` delete `tls.crt` and `tls.key`, restart the daemon and give every client that pinned the old certificate the new one.
+
+**How the SC daemon obtains LDK Server's secrets**: at startup the SC daemon reads LDK Server's own config file (path set in `sc-config.toml` under `[ldk_server] config_path`), derives the TLS cert path and `<storage>/<network>/macaroons/admin.macaroon` from it, and loads both into memory. `[ldk_server] macaroon_path` points it at a different macaroon instead. A macaroon without a permission breaks whatever needs it: the daemon's own stability, SYNC and refund keysends, message signing and verification, channel and payment reads and the event stream, and also the operator GUI's actions: GUI sessions get at most its permissions, GUI logins need it to have `macaroons:manage`, and only an unrestricted `admin` token can make `gui.macaroon`. The daemon reads the macaroon only at startup, so restart it after replacing the file. Both daemons need read access to a shared filesystem, usually the same host (Umbrel, VM, etc.). To split them across hosts, those two files have to be shipped over a separate secure channel, or the transport upgraded to mTLS.
 
 ## Crates
 
 | Crate | Source | Role |
 |---|---|---|
-| `stable-channels-lsp/` | local | The daemon. axum REST server, HMAC auth, `ldk-server-client` wrapper. |
+| `stable-channels-lsp/` | local | The daemon. axum REST server, token login and session-signed auth, `ldk-server-client` wrapper. |
 | `sc-protos/` | local | Hand written `prost` types for SC specific REST endpoints, plus route path constants. |
 | `sc-rest-client/` | local | REST client library, linked into the GUI and consumed by mobile wallet apps. WASM compatible. |
 | `lsp-server-gui/` | local | Native (Dioxus desktop) + WASM (Dioxus web) operator GUI. Talks to `stable-channels-lsp` over REST. |
@@ -93,7 +97,7 @@ The GUI is a Dioxus app with two targets that share one codebase and stylesheet 
 ```bash
 git clone https://github.com/toneloc/stable-channels.git
 git clone https://github.com/lightningdevkit/ldk-server.git
-git -C ldk-server checkout bd95e187b0c08b3fb90fc42a96f0f8a2b6773495
+git -C ldk-server checkout aa2d60f51ebacc7edd5dbdfb90b53a9c73ee0bd3
 ```
 
 They can live anywhere on disk in any layout. Cargo pulls `ldk-server-client` from upstream at a pinned rev, so no sibling-directory requirement. Run LDK Server at that same rev (the `ldk-server-client` rev in `server/stable-channels-lsp/Cargo.toml`): the daemon and LDK Server must speak the same protobuf format.
@@ -120,7 +124,7 @@ min_payment_size_msat        = 1000000
 proxy_address = "127.0.0.1:9050"
 ```
 
-This field requires the pinned `bd95e187` LDK Server above; older Umbrel-pinned
+This field requires the pinned `aa2d60f5` LDK Server above; older Umbrel-pinned
 images reject it. Upgrade LDK Server and the SC daemon/client in lockstep and
 back up current configs and node data before changing versions. On rebuilt
 Umbrel images, the LDK image's entrypoint adds the key only if absent, preserving
@@ -160,7 +164,7 @@ network = "signet"
 config_path = "/absolute/path/to/ldk-server/contrib/ldk-server-config.toml"
 ```
 
-`config_path` is how the SC daemon discovers LDK Server's TLS cert and api_key.
+`config_path` is how the SC daemon discovers LDK Server's TLS cert and admin macaroon. LDK Server creates `admin.macaroon` on its first start, so start it before the daemon.
 
 For push notifications, add an optional `[push]` section with `apns_*` and `fcm_service_account_path` fields. Each is optional. Missing credentials disable that sender and log a warning at startup, but `RegisterPush` keeps working. See `server/stable-channels-lsp/example-config.toml` for the full schema.
 

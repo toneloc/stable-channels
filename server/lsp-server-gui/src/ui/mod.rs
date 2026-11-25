@@ -1,3 +1,4 @@
+pub mod access;
 pub mod audit_log;
 pub mod balances;
 pub mod channel_ledger;
@@ -22,6 +23,7 @@ pub mod widgets;
 
 use dioxus::prelude::*;
 
+use sc_rest_client::sc_protos::access::LIST_TOKENS_PATH;
 use crate::actions;
 use crate::format::now_secs;
 use crate::platform;
@@ -42,7 +44,7 @@ fn startup() -> (Connection, Forms, bool) {
 		let mut conn = conn;
 		let mut forms = forms;
 		conn.server_url = gui_config.server_url;
-		conn.api_key = gui_config.api_key;
+		conn.token = gui_config.token;
 		conn.tls_cert_path = gui_config.tls_cert_path;
 		conn.network = gui_config.network;
 		forms.chain_source = crate::state::ChainSourceForm::from_config(&gui_config.chain_source);
@@ -98,24 +100,28 @@ pub fn App() -> Element {
 		}
 	});
 
-	// Web: the container publishes the API key at /setup/key.txt (same origin, behind its auth), so connect with zero input.
+	// Web: the container publishes the GUI token at /setup/token.txt (same origin, behind its auth), so connect with zero input.
 	#[cfg(target_arch = "wasm32")]
 	use_future(move || async move {
 		let mut delay_ms = 500;
 		loop {
-			if let Some(key) = platform::fetch_setup_key().await {
-				let mut conn = ctx.conn;
-				let idle = !matches!(conn.peek().status, ConnectionStatus::Connected);
-				if idle && conn.peek().api_key.trim().is_empty() {
-					conn.write().api_key = key;
-					actions::connect(ctx);
-					// Leave the Settings landing page once the zero-input connect succeeded.
-					let mut nav = ctx.nav;
-					if ctx.is_connected_peek() && nav.peek().active_tab == ActiveTab::Settings {
-						nav.write().active_tab = ActiveTab::Overview;
+			match platform::fetch_setup_token().await {
+				platform::SetupToken::Found(token) => {
+					let mut conn = ctx.conn;
+					let idle = !matches!(conn.peek().status, ConnectionStatus::Connected);
+					if idle && conn.peek().token.trim().is_empty() {
+						conn.write().token = token;
+						// Leave the Settings landing page once the zero-input login succeeded.
+						let mut nav = ctx.nav;
+						if actions::connect_now(ctx).await && nav.peek().active_tab == ActiveTab::Settings {
+							nav.write().active_tab = ActiveTab::Overview;
+						}
 					}
-				}
-				break;
+					break;
+				},
+				// Closed to this browser: Settings already asks for a token, so stop asking the page.
+				platform::SetupToken::Refused => break,
+				platform::SetupToken::Unavailable => {},
 			}
 			platform::sleep_ms(delay_ms).await;
 			delay_ms = (delay_ms * 2).min(5_000);
@@ -172,6 +178,7 @@ fn CurrentTab() -> Element {
 		ActiveTab::NetworkGraph => rsx! { network_graph::NetworkGraph {} },
 		ActiveTab::Logs => rsx! { logs::Logs {} },
 		ActiveTab::Settings => rsx! { settings::Settings {} },
+		ActiveTab::Access => rsx! { access::Access {} },
 	}
 }
 
@@ -198,7 +205,7 @@ fn Sidebar() -> Element {
 			for (group, tabs) in ActiveTab::GROUPS {
 				div { class: "nav-group", key: "{group}",
 					div { class: "nav-group-title", "{group}" }
-					for tab in tabs.iter().copied() {
+					for tab in tabs.iter().copied().filter(|tab| *tab != ActiveTab::Access || ctx.can(LIST_TOKENS_PATH)) {
 						button {
 							key: "{tab:?}",
 							class: if tab == active { "nav-item active" } else { "nav-item" },
@@ -242,6 +249,11 @@ fn TopBar() -> Element {
 	};
 	let connected = conn.status == ConnectionStatus::Connected;
 	let server_url = conn.server_url.clone();
+	// Which token is logged in, whether it can change anything, and its permissions on hover.
+	let session = connected.then(|| {
+		let permissions = conn.permissions();
+		(conn.token_name(), crate::state::is_read_only(&permissions), permissions.join(", "))
+	});
 	drop(conn);
 	let price = ctx.price.read().as_ref().map(|p| p.price).filter(|p| *p > 0.0);
 	let unit = ctx.unit();
@@ -260,13 +272,24 @@ fn TopBar() -> Element {
 					span { class: "coin", "₿" }
 					match price {
 						Some(p) => rsx! { "{crate::format::format_usd(p)}" },
-						None => rsx! { span { class: "muted", "price --" } },
+						None => rsx! { span { class: "muted", "price —" } },
 					}
 				}
 				div { class: "seg", role: "group", "aria-label": "Display unit",
 					widgets::SegBtn { active: unit == DisplayUnit::Usd, onclick: move |_| set_unit(DisplayUnit::Usd), "USD" }
 					widgets::SegBtn { active: unit == DisplayUnit::Btc, onclick: move |_| set_unit(DisplayUnit::Btc), "BTC" }
 					widgets::SegBtn { active: unit == DisplayUnit::Sats, onclick: move |_| set_unit(DisplayUnit::Sats), "Sats" }
+				}
+				if let Some((name, read_only, permissions)) = session {
+					widgets::Hover { tip: format!("Logged in with token \"{name}\". Permissions: {permissions}"),
+						span { class: "conn-pill",
+							Icon { name: "key", size: 14 }
+							span { class: "url", "{name}" }
+							if read_only {
+								widgets::Pill { tone: "info", "read-only" }
+							}
+						}
+					}
 				}
 				match error {
 					Some(e) => rsx! {
@@ -346,6 +369,7 @@ fn Dialogs() -> Element {
 		Some(Dialog::LoadConfig) => rsx! { settings::LoadConfigDialog {} },
 		Some(Dialog::ConfirmSend(kind)) => rsx! { confirm::ConfirmSendDialog { kind } },
 		Some(Dialog::RefundTradeFee) => rsx! { revenue::RefundTradeFeeDialog {} },
+		Some(Dialog::RevokeToken) => rsx! { access::RevokeTokenDialog {} },
 		Some(Dialog::ReleaseStabilityPayment) => rsx! { channel_ledger::ReleaseStabilityPaymentDialog {} },
 		None => rsx! {},
 	}
@@ -411,11 +435,14 @@ mod tests {
 	#[component]
 	fn Harness(tab: ActiveTab, seed: Seed) -> Element {
 		let ctx = use_context_provider(|| {
-			let mut conn = Connection::new();
-			conn.status = match seed {
-				Seed::Disconnected => ConnectionStatus::Disconnected,
-				Seed::Unreachable => ConnectionStatus::Error("LSP unreachable: connection refused".into()),
-				_ => ConnectionStatus::Connected,
+			let conn = match seed {
+				Seed::Disconnected => Connection::new(),
+				Seed::Unreachable => {
+					let mut conn = Connection::signed_in("admin", &["admin"]);
+					conn.status = ConnectionStatus::Error("LSP unreachable: connection refused".into());
+					conn
+				},
+				_ => Connection::signed_in("admin", &["admin"]),
 			};
 			AppCtx::new(conn, Forms::default(), Nav { active_tab: tab, ..Default::default() }, Prefs::default(), false)
 		});
@@ -473,8 +500,8 @@ mod tests {
 	#[test]
 	fn node_info_shows_chain_source_even_when_disconnected() {
 		let html = render(ActiveTab::NodeInfo, Seed::Disconnected);
-		assert!(html.contains("Chain Source"));
-		assert!(html.contains("No chain source configured."));
+		assert!(html.contains("Chain source"));
+		assert!(html.contains("No chain source configured"));
 		assert!(html.contains("Not connected to an LSP"));
 	}
 
@@ -492,7 +519,7 @@ mod tests {
 		assert!(channels.contains("Active"));
 		assert!(channels.contains("sats"));
 		let payments = render(ActiveTab::Payments, Seed::ConnectedWithData);
-		assert!(payments.contains("1/1 payment(s)"));
+		assert!(payments.contains("1 of 1 payment(s)"));
 		assert!(payments.contains("Stability"));
 		assert!(payments.contains("Succeeded"));
 	}
@@ -509,8 +536,7 @@ mod tests {
 	#[component]
 	fn DashboardHarness(feed: bool) -> Element {
 		let ctx = use_context_provider(|| {
-			let mut conn = Connection::new();
-			conn.status = ConnectionStatus::Connected;
+			let conn = Connection::signed_in("admin", &["admin"]);
 			AppCtx::new(conn, Forms::default(), Nav { active_tab: ActiveTab::Overview, ..Default::default() }, Prefs::default(), false)
 		});
 		use_hook(move || {
@@ -606,7 +632,7 @@ mod tests {
 	#[test]
 	fn an_older_daemon_only_loses_the_activity_card() {
 		let html = render_dashboard(false);
-		assert!(html.contains("Activity needs the updated daemon"));
+		assert!(html.contains("Activity needs a newer LSP"));
 		assert!(html.contains("An exact ledger identifier is required"));
 		assert!(html.contains("~2 more channels"), "tiles still render");
 		assert!(html.contains("Channel with 02aa opening"), "In progress still renders from the channel list");
@@ -617,8 +643,7 @@ mod tests {
 	#[component]
 	fn ChannelPanelHarness(new_fields: bool) -> Element {
 		let ctx = use_context_provider(|| {
-			let mut conn = Connection::new();
-			conn.status = ConnectionStatus::Connected;
+			let conn = Connection::signed_in("admin", &["admin"]);
 			AppCtx::new(conn, Forms::default(), Nav::default(), Prefs::default(), false)
 		});
 		use_hook(move || {
@@ -657,8 +682,7 @@ mod tests {
 	#[component]
 	fn OnchainPaymentHarness() -> Element {
 		let ctx = use_context_provider(|| {
-			let mut conn = Connection::new();
-			conn.status = ConnectionStatus::Connected;
+			let conn = Connection::signed_in("admin", &["admin"]);
 			AppCtx::new(conn, Forms::default(), Nav { active_tab: ActiveTab::Payments, ..Default::default() }, Prefs::default(), false)
 		});
 		use_hook(move || {
@@ -696,7 +720,7 @@ mod tests {
 	#[test]
 	fn lightning_offers_every_payment_flow() {
 		let html = render(ActiveTab::Lightning, Seed::ConnectedEmpty);
-		for label in ["BOLT11 Send", "BOLT11 Receive", "BOLT12 Send", "BOLT12 Receive", "Keysend", "Pay Invoice"] {
+		for label in ["BOLT11 send", "BOLT11 receive", "BOLT12 send", "BOLT12 receive", "Keysend", "Pay invoice"] {
 			assert!(html.contains(label), "missing {label}");
 		}
 	}
@@ -704,8 +728,7 @@ mod tests {
 	#[component]
 	fn HistoryHarness() -> Element {
 		let ctx = use_context_provider(|| {
-			let mut conn = Connection::new();
-			conn.status = ConnectionStatus::Connected;
+			let conn = Connection::signed_in("admin", &["admin"]);
 			let nav = Nav { active_tab: ActiveTab::Logs, logs_tab: crate::state::LogsTab::ChannelLedger, ..Default::default() };
 			AppCtx::new(conn, Forms::default(), nav, Prefs::default(), false)
 		});
@@ -738,7 +761,7 @@ mod tests {
 		let mut dom = VirtualDom::new(HistoryHarness);
 		dom.rebuild_in_place();
 		let html = dioxus_ssr::render(&dom);
-		assert!(html.contains("Channel History"));
+		assert!(html.contains("Channel history"));
 		assert!(html.contains("LSP published balances: target $43.63"));
 		assert!(html.contains("Show technical events"));
 		assert!(!html.contains("Raw JSON"), "technical cards stay hidden by default");
@@ -748,8 +771,7 @@ mod tests {
 	#[component]
 	fn LocationHarness(connected: Option<bool>, last_seen_at: i64) -> Element {
 		let ctx = use_context_provider(|| {
-			let mut conn = Connection::new();
-			conn.status = ConnectionStatus::Connected;
+			let conn = Connection::signed_in("admin", &["admin"]);
 			AppCtx::new(conn, Forms::default(), Nav { active_tab: ActiveTab::StableChannels, ..Default::default() }, Prefs::default(), false)
 		});
 		use_hook(move || {
@@ -890,8 +912,7 @@ mod tests {
 	#[component]
 	fn RevenueHarness(loaded: bool) -> Element {
 		let ctx = use_context_provider(|| {
-			let mut conn = Connection::new();
-			conn.status = ConnectionStatus::Connected;
+			let conn = Connection::signed_in("admin", &["admin"]);
 			AppCtx::new(conn, Forms::default(), Nav { active_tab: ActiveTab::Revenue, ..Default::default() }, Prefs::default(), false)
 		});
 		use_hook(move || {
@@ -938,14 +959,14 @@ mod tests {
 		let html = render_revenue(true);
 		assert!(html.contains("1 rejected · show</button>"), "the rejected count filters the list to those trades");
 		assert!(html.contains(">Rejected trades</button>"), "a chip for rejected trades");
-		for text in ["Earned", "Spent", "Net", "Stability net", "Peg settlements, not revenue", "JIT channel opens", "574 sats", "2 opens · 287 sats each", "not tracked", "Trade fee", "Activity"] {
+		for text in ["Earned", "Spent", "Net", "Stability net", "Stability payments, not revenue", "JIT channel opens", "574 sats", "2 opens · 287 sats each", "not tracked", "Trade fee", "Activity"] {
 			assert!(html.contains(text), "missing {text}");
 		}
 		assert!(!html.contains("free opening"), "the always-zero JIT fee line is gone");
 		assert!(html.contains("Trade and routing fees") && !html.contains("JIT fees"), "no JIT earnings while opens are free");
 		assert!(html.contains("\u{2264} \u{2212}2,974 sats"), "net is a ceiling: 2,000 earned − 4,974 known spent, on-chain fees untracked");
 		assert!(html.contains("\u{2265} 4,974 sats"), "spent is a floor");
-		assert!(html.contains("At most: some fees are not tracked"));
+		assert!(html.contains("At most, as some fees are not tracked"));
 		for text in ["Channel closes", "Close fee bumps", "Claims &", ">Channel close</button>", ">Claim or sweep</button>"] {
 			assert!(html.contains(text), "missing {text}");
 		}
@@ -1053,5 +1074,165 @@ mod tests {
 		let html = dioxus_ssr::render(&dom);
 		assert!(html.contains("Send 2,000 sats back to"));
 		assert!(html.contains("Send refund"));
+	}
+
+	use sc_rest_client::ldk_server_grpc::permissions::{INVOICE_PERMISSIONS, READONLY_PERMISSIONS};
+
+	/// A logged-in session with these permissions, over one channel, stable user, peer and refundable trade.
+	#[component]
+	fn SessionHarness(tab: ActiveTab, permissions: Vec<&'static str>) -> Element {
+		let ctx = use_context_provider(|| {
+			let conn = Connection::signed_in("ops", &permissions);
+			AppCtx::new(conn, Forms::default(), Nav { active_tab: tab, ..Default::default() }, Prefs::default(), false)
+		});
+		use_hook(move || {
+			use sc_rest_client::ldk_server_grpc::api::ListPeersResponse;
+			use sc_rest_client::ldk_server_grpc::types::Peer;
+			use sc_rest_client::sc_protos::revenue::{GetRevenueResponse, RevenueItem};
+			use sc_rest_client::sc_protos::stable::{ListStableChannelsResponse, StableChannelInfo};
+			let mut data = ctx.data;
+			let mut d = data.write();
+			d.channels = Some(ListChannelsResponse {
+				channels: vec![Channel { channel_id: "c7".into(), user_channel_id: "7".into(), counterparty_node_id: "02aa".into(), channel_value_sats: 1_000_000, is_channel_ready: true, is_usable: true, ..Default::default() }],
+			});
+			d.stable_channels = Some(ListStableChannelsResponse {
+				channels: vec![StableChannelInfo { user_channel_id: "7".into(), channel_id: "c7".into(), counterparty: "02aa".into(), expected_usd: 50.0, expected_msats: 50_000_000, ..Default::default() }],
+			});
+			d.peers = Some(ListPeersResponse { peers: vec![Peer { node_id: "02aa".into(), address: "203.0.113.9:9735".into(), is_connected: true, ..Default::default() }], ..Default::default() });
+			let rejected = RevenueItem { key: "t1".into(), occurred_at: 1_790_000_000, category: "trade_fee".into(), direction: "in".into(), amount_msat: 2_000_000, node_id: "02ab".into(), payment_id: "t1".into(), trade_rejected: true, ..Default::default() };
+			d.revenue_items = vec![rejected.clone()];
+			d.revenue = Some(GetRevenueResponse { items: vec![rejected], item_count: 1, snapshot_at: crate::format::now_secs() as i64, ..Default::default() });
+		});
+		rsx! { CurrentTab {} }
+	}
+
+	fn render_as(tab: ActiveTab, permissions: &[&'static str]) -> String {
+		let mut dom = VirtualDom::new_with_props(SessionHarness, SessionHarnessProps { tab, permissions: permissions.to_vec() });
+		dom.rebuild_in_place();
+		dioxus_ssr::render(&dom)
+	}
+
+	/// The notice a page shows for a token without its permission (SSR escapes the apostrophe).
+	fn says_no_access(html: &str) -> bool {
+		html.contains("This token can&#39;t see this") || html.contains("This token can't see this")
+	}
+
+	#[test]
+	fn a_read_only_session_shows_no_send_or_edit_controls() {
+		let readonly = &READONLY_PERMISSIONS;
+		let lightning = render_as(ActiveTab::Lightning, readonly);
+		for text in ["BOLT11 send", "BOLT11 receive", "BOLT12 send", "BOLT12 receive", "Keysend", "Pay invoice", "Generate invoice"] {
+			assert!(!lightning.contains(text), "Lightning shows {text}");
+		}
+		assert!(says_no_access(&lightning) && lightning.contains("needs payments:send or invoices:create"));
+		let onchain = render_as(ActiveTab::Onchain, readonly);
+		for text in ["Send on-chain", "Generate address", "Send</button>", "Receive</button>"] {
+			assert!(!onchain.contains(text), "On-chain shows {text}");
+		}
+		assert!(onchain.contains("Transaction history"), "the read-only history tab stays");
+		let stable = render_as(ActiveTab::StableChannels, readonly);
+		assert!(stable.contains("Stable channels") && stable.contains("History</button>"), "the stable table still reads");
+		for text in ["Edit stable channel", "Edit this channel", ">Submit<"] {
+			assert!(!stable.contains(text), "Stable shows {text}");
+		}
+		let channels = render_as(ActiveTab::Channels, readonly);
+		assert!(channels.contains("1 of 1 channel(s)"));
+		assert!(!channels.contains("Open channel") && !channels.contains("Channel actions"));
+		let peers = render_as(ActiveTab::Peers, readonly);
+		assert!(peers.contains("Connected peers: 1"));
+		assert!(!peers.contains("Connect peer") && !peers.contains(">Disconnect<"));
+		let revenue = render_as(ActiveTab::Revenue, readonly);
+		assert!(revenue.contains("Activity") && !revenue.contains(">Refund<"));
+	}
+
+	#[component]
+	fn LogsHarness(tab: crate::state::LogsTab, permissions: Vec<&'static str>) -> Element {
+		use_context_provider(|| {
+			let nav = Nav { active_tab: ActiveTab::Logs, logs_tab: tab, ..Default::default() };
+			AppCtx::new(Connection::signed_in("ops", &permissions), Forms::default(), nav, Prefs::default(), false)
+		});
+		rsx! { CurrentTab {} }
+	}
+
+	#[test]
+	fn a_page_the_token_cannot_read_shows_which_permission_it_needs() {
+		let payments = render_as(ActiveTab::Payments, &["node:read"]);
+		assert!(says_no_access(&payments) && payments.contains("needs payments:read"));
+		assert!(!payments.contains("No payment data available"), "a missing permission is not an empty table");
+		let mut dom = VirtualDom::new_with_props(LogsHarness, LogsHarnessProps { tab: crate::state::LogsTab::Ldk, permissions: READONLY_PERMISSIONS.to_vec() });
+		dom.rebuild_in_place();
+		let ldk_log = dioxus_ssr::render(&dom);
+		assert!(says_no_access(&ldk_log) && ldk_log.contains("needs admin"));
+		let node = render_as(ActiveTab::NodeInfo, &["payments:read"]);
+		assert!(node.contains("needs node:read") && node.contains("Chain source"), "local config still shows");
+	}
+
+	#[test]
+	fn overview_cards_the_token_cannot_read_say_what_they_need() {
+		let html = render_as(ActiveTab::Overview, &["node:read", "channels:read"]);
+		assert!(html.contains("Stable users") && html.contains("needs payments:read"), "Net this week needs payments:read");
+		let html = render_as(ActiveTab::Overview, &["node:read"]);
+		assert!(html.contains("needs channels:read"), "stable users, room to grow and the feed need channels:read");
+		assert!(!says_no_access(&render_as(ActiveTab::Overview, &["admin"])), "an admin sees every card");
+	}
+
+	#[test]
+	fn an_admin_session_shows_every_control() {
+		let admin: &[&'static str] = &["admin"];
+		let lightning = render_as(ActiveTab::Lightning, admin);
+		for text in ["BOLT11 send", "BOLT11 receive", "BOLT12 send", "BOLT12 receive", "Keysend", "Pay invoice"] {
+			assert!(lightning.contains(text), "Lightning lacks {text}");
+		}
+		let onchain = render_as(ActiveTab::Onchain, admin);
+		for text in ["Send on-chain", "Send</button>", "Receive</button>", "History</button>"] {
+			assert!(onchain.contains(text), "On-chain lacks {text}");
+		}
+		let stable = render_as(ActiveTab::StableChannels, admin);
+		for text in ["Edit stable channel", "Edit this channel", ">Submit<"] {
+			assert!(stable.contains(text), "Stable lacks {text}");
+		}
+		let channels = render_as(ActiveTab::Channels, admin);
+		assert!(channels.contains("Open channel") && channels.contains("Channel actions"));
+		let peers = render_as(ActiveTab::Peers, admin);
+		assert!(peers.contains("Connect peer") && peers.contains(">Disconnect<"));
+		assert!(render_as(ActiveTab::Revenue, admin).contains(">Refund<"));
+		for (_, tabs) in ActiveTab::GROUPS {
+			for tab in tabs.iter().copied() {
+				assert!(!says_no_access(&render_as(tab, admin)), "{tab:?} refuses an admin");
+			}
+		}
+	}
+
+	#[test]
+	fn a_token_that_can_only_receive_sees_only_the_receive_flows() {
+		let invoice = &INVOICE_PERMISSIONS;
+		let lightning = render_as(ActiveTab::Lightning, invoice);
+		assert!(lightning.contains("BOLT11 receive") && lightning.contains("Generate invoice"), "the first allowed flow opens");
+		assert!(!lightning.contains("BOLT11 send") && !lightning.contains("Pay invoice"));
+		let onchain = render_as(ActiveTab::Onchain, invoice);
+		assert!(onchain.contains("Generate address") && !onchain.contains("Send on-chain"));
+	}
+
+	#[component]
+	fn TopBarHarness(name: &'static str, permissions: Vec<&'static str>) -> Element {
+		use_context_provider(|| AppCtx::new(Connection::signed_in(name, &permissions), Forms::default(), Nav::default(), Prefs::default(), false));
+		rsx! { TopBar {} }
+	}
+
+	fn render_topbar(name: &'static str, permissions: &[&'static str]) -> String {
+		let mut dom = VirtualDom::new_with_props(TopBarHarness, TopBarHarnessProps { name, permissions: permissions.to_vec() });
+		dom.rebuild_in_place();
+		dioxus_ssr::render(&dom)
+	}
+
+	#[test]
+	fn the_header_names_the_token_and_marks_a_read_only_session() {
+		let viewer = render_topbar("ops-viewer", &READONLY_PERMISSIONS);
+		assert!(viewer.contains("ops-viewer") && viewer.contains("read-only"));
+		let admin = render_topbar("sc-gui-admin-1", &["admin"]);
+		assert!(admin.contains("sc-gui-admin-1") && !admin.contains("read-only"));
+		assert!(!render_topbar("payer", &["node:read", "payments:send"]).contains("read-only"));
+		assert!(!render_topbar("token-admin", &["node:read", "macaroons:manage"]).contains("read-only"));
+		assert!(!render_topbar("signer", &["node:read", "messages:sign"]).contains("read-only"));
 	}
 }

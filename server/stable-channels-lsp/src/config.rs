@@ -47,13 +47,15 @@ pub struct DiskConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct LdkServerSection {
-    /// Path to LDK Server's own config.toml. We use its config helpers to resolve cert/api_key.
+    /// Path to LDK Server's own config.toml. We use its config helpers to resolve cert/macaroon.
     pub config_path: Option<String>,
     /// Explicit override for LDK Server's gRPC address (takes priority over config_path).
     pub grpc_address: Option<String>,
     /// Explicit override for LDK Server's TLS cert file.
     pub cert_path: Option<String>,
-    /// Explicit override for LDK Server's API key file.
+    /// Explicit override for LDK Server's macaroon file (hex token, default `<storage>/<network>/macaroons/admin.macaroon`).
+    pub macaroon_path: Option<String>,
+    /// Ignored since LDK Server replaced its API key with macaroons; still parsed so older configs load.
     pub api_key_path: Option<String>,
 }
 
@@ -93,7 +95,7 @@ impl Config {
         PathBuf::from(&self.storage.disk.dir_path).join("tls.key")
     }
 
-    /// SC daemon's own API key file (network-scoped).
+    /// Where the daemon kept its API key before token logins (network-scoped); it is no longer read.
     pub fn local_api_key_path(&self) -> PathBuf {
         PathBuf::from(&self.storage.disk.dir_path)
             .join(&self.node.network)
@@ -168,11 +170,34 @@ mod tests {
             [ldk_server]
             grpc_address    = "10.0.0.1:3536"
             cert_path       = "/etc/ldk/tls.crt"
-            api_key_path    = "/etc/ldk/bitcoin/api_key"
+            macaroon_path   = "/etc/ldk/bitcoin/macaroons/admin.macaroon"
         "#;
         let cfg: Config = toml::from_str(toml_text).unwrap();
         assert!(cfg.ldk_server.config_path.is_none());
         assert_eq!(cfg.ldk_server.grpc_address.as_deref(), Some("10.0.0.1:3536"));
+        assert_eq!(
+            cfg.ldk_server.macaroon_path.as_deref(),
+            Some("/etc/ldk/bitcoin/macaroons/admin.macaroon")
+        );
+    }
+
+    #[test]
+    fn a_config_written_for_the_old_api_key_still_loads() {
+        let toml_text = r#"
+            [node]
+            rest_service_address = "0.0.0.0:3002"
+            network              = "bitcoin"
+
+            [storage.disk]
+            dir_path = "/var/lib/sc"
+
+            [ldk_server]
+            config_path     = "/etc/ldk-server/config.toml"
+            api_key_path    = "/etc/ldk/bitcoin/api_key"
+        "#;
+        let cfg: Config = toml::from_str(toml_text).unwrap();
+        assert_eq!(cfg.ldk_server.api_key_path.as_deref(), Some("/etc/ldk/bitcoin/api_key"));
+        assert!(cfg.ldk_server.macaroon_path.is_none());
     }
 
     #[test]

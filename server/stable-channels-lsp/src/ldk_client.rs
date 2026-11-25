@@ -33,6 +33,7 @@ impl LdkClient {
 
 /// Whether asking again may get another answer: LDK Server timed out, wasn't reached or failed inside, rather than refusing the call.
 pub(crate) fn unanswered(error: &LdkServerError) -> bool {
+    // A missing macaroon permission (AuthorizationError) says nothing about the request, so a trade is held and retried, then dropped with a record, rather than decided.
     !matches!(
         error.error_code,
         LdkServerErrorCode::LightningError | LdkServerErrorCode::InvalidRequestError | LdkServerErrorCode::AuthError
@@ -76,18 +77,22 @@ bounded_calls! {
     get_balances: GetBalancesRequest => GetBalancesResponse,
     get_forwarded_payment_tracking_mode: GetForwardedPaymentTrackingModeRequest => GetForwardedPaymentTrackingModeResponse,
     get_node_info: GetNodeInfoRequest => GetNodeInfoResponse,
+    get_permissions: GetPermissionsRequest => GetPermissionsResponse,
     get_payment_details: GetPaymentDetailsRequest => GetPaymentDetailsResponse,
     graph_get_channel: GraphGetChannelRequest => GraphGetChannelResponse,
     graph_get_node: GraphGetNodeRequest => GraphGetNodeResponse,
     graph_list_channels: GraphListChannelsRequest => GraphListChannelsResponse,
     graph_list_nodes: GraphListNodesRequest => GraphListNodesResponse,
+    create_macaroon: CreateMacaroonRequest => CreateMacaroonResponse,
     list_channels: ListChannelsRequest => ListChannelsResponse,
+    list_macaroons: ListMacaroonsRequest => ListMacaroonsResponse,
     list_forwarded_payments: ListForwardedPaymentsRequest => ListForwardedPaymentsResponse,
     list_payments: ListPaymentsRequest => ListPaymentsResponse,
     list_peers: ListPeersRequest => ListPeersResponse,
     onchain_receive: OnchainReceiveRequest => OnchainReceiveResponse,
     onchain_send: OnchainSendRequest => OnchainSendResponse,
     open_channel: OpenChannelRequest => OpenChannelResponse,
+    revoke_macaroon: RevokeMacaroonRequest => RevokeMacaroonResponse,
     sign_message: SignMessageRequest => SignMessageResponse,
     splice_in: SpliceInRequest => SpliceInResponse,
     splice_out: SpliceOutRequest => SpliceOutResponse,
@@ -124,7 +129,8 @@ mod tests {
         let storage = tempfile::tempdir().unwrap();
         crate::tls::get_or_generate_tls_config(None, storage.path().to_str().unwrap()).unwrap();
         let cert = std::fs::read(storage.path().join("tls.crt")).unwrap();
-        LdkClient::with_limit(LdkServerClient::new(address, "00".repeat(32), &cert).unwrap(), limit)
+        let macaroon = ldk_server_client::macaroon::Macaroon::mint(b"ldk server test root key", b"timeouts").unwrap().to_hex();
+        LdkClient::with_limit(LdkServerClient::new(address, macaroon, &cert).unwrap(), limit)
     }
 
     #[tokio::test]
@@ -162,6 +168,14 @@ mod tests {
         assert!(unanswered(&error), "a timeout must not count as a node refusal");
         assert!(error.message.contains("splice_in"), "{}", error.message);
         assert!(accepted.load(Ordering::SeqCst) >= 1, "the call reached the server and waited there");
+    }
+
+    #[test]
+    fn a_missing_macaroon_permission_is_retried_rather_than_taken_as_a_refusal() {
+        let denied = LdkServerError::new(LdkServerErrorCode::AuthorizationError, "macaroon requires permission: messages:verify");
+        assert!(unanswered(&denied), "fixing the macaroon changes the answer");
+        let refused = LdkServerError::new(LdkServerErrorCode::LightningError, "no route");
+        assert!(!unanswered(&refused));
     }
 
     #[tokio::test]

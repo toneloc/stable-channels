@@ -9,6 +9,7 @@ use sc_rest_client::ldk_server_grpc::api::{
 	GraphListChannelsResponse, GraphListNodesResponse, ListChannelsResponse,
 	ListForwardedPaymentsResponse, ListPaymentsResponse, ListPeersResponse,
 };
+use sc_rest_client::sc_protos::access::{allows, required, ListTokensResponse, Requirement};
 use sc_rest_client::sc_protos::revenue::{GetRevenueResponse, RevenueItem};
 use sc_rest_client::sc_protos::stable::{
 	GetPriceResponse, ListChannelLedgerEventsResponse, ListStableChannelsResponse, LogResponse,
@@ -42,6 +43,7 @@ pub enum ActiveTab {
 	NetworkGraph,
 	Logs,
 	Settings,
+	Access,
 }
 
 impl ActiveTab {
@@ -61,13 +63,13 @@ impl ActiveTab {
 		),
 		("On-chain", &[ActiveTab::Onchain]),
 		("Network", &[ActiveTab::NetworkGraph]),
-		("System", &[ActiveTab::Tools, ActiveTab::Logs, ActiveTab::Settings]),
+		("System", &[ActiveTab::Tools, ActiveTab::Logs, ActiveTab::Settings, ActiveTab::Access]),
 	];
 
 	pub fn label(self) -> &'static str {
 		match self {
 			ActiveTab::Overview => "Overview",
-			ActiveTab::NodeInfo => "Node Info",
+			ActiveTab::NodeInfo => "Node info",
 			ActiveTab::Balances => "Balances",
 			ActiveTab::Revenue => "Revenue",
 			ActiveTab::Channels => "Channels",
@@ -81,17 +83,18 @@ impl ActiveTab {
 			ActiveTab::NetworkGraph => "Graph",
 			ActiveTab::Logs => "Logs",
 			ActiveTab::Settings => "Settings",
+			ActiveTab::Access => "Access",
 		}
 	}
 
 	pub fn title(self) -> &'static str {
 		match self {
-			ActiveTab::NodeInfo => "Node Information",
-			ActiveTab::Lightning => "Lightning Payments",
+			ActiveTab::NodeInfo => "Node information",
+			ActiveTab::Lightning => "Lightning payments",
 			ActiveTab::Onchain => "On-chain",
-			ActiveTab::StableChannels => "Stable Channels",
-			ActiveTab::ForwardedPayments => "Forwarded Payments",
-			ActiveTab::NetworkGraph => "Network Graph",
+			ActiveTab::StableChannels => "Stable channels",
+			ActiveTab::ForwardedPayments => "Forwarded payments",
+			ActiveTab::NetworkGraph => "Network graph",
 			other => other.label(),
 		}
 	}
@@ -111,8 +114,9 @@ impl ActiveTab {
 			ActiveTab::StableChannels => "USD-stabilized channels and their targets",
 			ActiveTab::Tools => "Message signing and router utilities",
 			ActiveTab::NetworkGraph => "Public channels and nodes known from gossip",
-			ActiveTab::Logs => "Audit trail, channel ledger and LDK server logs",
+			ActiveTab::Logs => "Audit log, channel history and LDK Server log",
 			ActiveTab::Settings => "Connection, display unit and appearance",
+			ActiveTab::Access => "Tokens that can log in here or call the LSP",
 		}
 	}
 
@@ -133,6 +137,7 @@ impl ActiveTab {
 			ActiveTab::NetworkGraph => "graph",
 			ActiveTab::Logs => "file",
 			ActiveTab::Settings => "sliders",
+			ActiveTab::Access => "key",
 		}
 	}
 }
@@ -463,6 +468,46 @@ pub struct RefundTradeFeeForm {
 	pub node_id: String,
 }
 
+/// A token just created: its hex is shown once and never logged (no Debug).
+#[derive(Clone)]
+pub struct CreatedToken {
+	pub name: String,
+	pub hex: String,
+}
+
+/// The token the revoke dialog is about.
+#[derive(Default, Clone)]
+pub struct RevokeTokenForm {
+	pub id: String,
+	pub name: String,
+	pub is_you: bool,
+	pub is_gui_token: bool,
+}
+
+/// When a new token stops working.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Expiry {
+	#[default]
+	Never,
+	/// This many days after the token is made.
+	Days(u32),
+	/// A local day from the calendar (none until one is picked) and a time on it.
+	At { day: Option<chrono::NaiveDate>, hour: u32, minute: u32 },
+}
+
+/// The Access page: the create form, the token just made, and the revoke target.
+#[derive(Default, Clone)]
+pub struct AccessForm {
+	pub name: String,
+	pub preset: String,
+	pub permissions: Vec<String>,
+	pub expiry: Expiry,
+	/// First day of the month the calendar shows.
+	pub calendar_month: Option<chrono::NaiveDate>,
+	pub created: Option<CreatedToken>,
+	pub revoke: RevokeTokenForm,
+}
+
 #[derive(Default, Clone)]
 pub struct Forms {
 	pub open_channel: OpenChannelForm,
@@ -488,6 +533,7 @@ pub struct Forms {
 	pub chain_source: ChainSourceForm,
 	pub refund_trade_fee: RefundTradeFeeForm,
 	pub release_stability_payment: ReleaseStabilityPaymentForm,
+	pub access: AccessForm,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -528,18 +574,85 @@ pub enum LogsTab {
 #[derive(Clone, Default)]
 pub struct Connection {
 	pub server_url: String,
-	pub api_key: String,
+	/// LDK Server token (hex) the GUI logs in with.
+	pub token: String,
 	pub tls_cert_path: String,
 	pub status: ConnectionStatus,
 	pub client: Option<Arc<LspRestClient>>,
 	pub config_file_path: Option<String>,
 	pub network: String,
 	pub chain_source: ChainSourceConfig,
+	/// Token name and permissions for tests, which have no daemon to log in to.
+	#[cfg(test)]
+	pub test_session: Option<(String, Vec<String>)>,
 }
 
 impl Connection {
 	pub fn new() -> Self {
 		Self { server_url: "localhost:3002".into(), ..Default::default() }
+	}
+
+	/// Permissions of the logged-in token, from its last Login or WhoAmI; none without a session.
+	pub fn permissions(&self) -> Vec<String> {
+		#[cfg(test)]
+		if let Some((_, permissions)) = &self.test_session {
+			return permissions.clone();
+		}
+		self.client.as_ref().map(|c| c.permissions()).unwrap_or_default()
+	}
+
+	/// Name of the logged-in token.
+	pub fn token_name(&self) -> String {
+		#[cfg(test)]
+		if let Some((name, _)) = &self.test_session {
+			return name.clone();
+		}
+		self.client.as_ref().map(|c| c.token_name()).unwrap_or_default()
+	}
+}
+
+#[cfg(test)]
+impl Connection {
+	/// A connected session with this token name and permissions, without a daemon.
+	pub fn signed_in(name: &str, permissions: &[&str]) -> Self {
+		let mut conn = Self::new();
+		conn.status = ConnectionStatus::Connected;
+		conn.test_session = Some((name.to_string(), permissions.iter().map(|p| p.to_string()).collect()));
+		conn
+	}
+}
+
+/// Permissions that move money, change channels or peers, manage tokens or sign as the node; a session with none is read-only.
+pub const WRITE_PERMISSIONS: [&str; 8] = [
+	"payments:send",
+	"onchain:send",
+	"channels:manage",
+	"channels:force_close",
+	"peers:manage",
+	"macaroons:manage",
+	"messages:sign",
+	"admin",
+];
+
+/// True when the session holds none of [`WRITE_PERMISSIONS`].
+pub fn is_read_only(permissions: &[String]) -> bool {
+	!permissions.iter().any(|p| WRITE_PERMISSIONS.contains(&p.as_str()))
+}
+
+/// Whether a session with `permissions` may call `route`; Login and routes missing from the table never are.
+pub fn route_allowed(permissions: &[String], route: &str) -> bool {
+	match required(route) {
+		Some(Requirement::Permission(permission)) => allows(permissions, permission),
+		Some(Requirement::AnySession) => true,
+		Some(Requirement::NoSession) | None => false,
+	}
+}
+
+/// The permission `route` needs, for the "needs …" notice (every GUI route has one; see the tests).
+pub fn permission_for(route: &str) -> &'static str {
+	match required(route) {
+		Some(Requirement::Permission(permission)) => permission,
+		_ => "admin",
 	}
 }
 
@@ -554,6 +667,7 @@ pub struct Nav {
 /// Cached daemon responses.
 #[derive(Clone, Default)]
 pub struct Data {
+	pub tokens: Option<ListTokensResponse>,
 	pub node_info: Option<GetNodeInfoResponse>,
 	pub balances: Option<GetBalancesResponse>,
 	pub channels: Option<ListChannelsResponse>,
@@ -786,6 +900,69 @@ pub enum Op {
 	PaymentsAll,
 	/// Exporting a table (native save dialog).
 	Export,
+	/// Logging in with the token (Connect).
+	Login,
+	ListTokens,
+	CreateToken,
+	RevokeToken,
+}
+
+impl Op {
+	/// True when it moves money or changes a channel, a stable channel or a token: its outcome is shown even after its session ended, so it is never sent twice.
+	pub fn must_report(self) -> bool {
+		match self {
+			Op::OnchainSend
+			| Op::Bolt11Send
+			| Op::Bolt12Send
+			| Op::SpontaneousSend
+			| Op::OpenChannel
+			| Op::CloseChannel
+			| Op::ForceCloseChannel
+			| Op::SpliceIn
+			| Op::SpliceOut
+			| Op::UpdateChannelConfig
+			| Op::EditStableChannel
+			| Op::ReleaseStabilityPayment
+			| Op::RefundTradeFee
+			| Op::CreateToken
+			| Op::RevokeToken => true,
+			Op::NodeInfo
+			| Op::Balances
+			| Op::Channels
+			| Op::Payments
+			| Op::Peers
+			| Op::ForwardedPayments
+			| Op::PaymentDetails
+			| Op::OnchainReceive
+			| Op::Bolt11Receive
+			| Op::Bolt12Receive
+			| Op::ConnectPeer
+			| Op::DisconnectPeer
+			| Op::SignMessage
+			| Op::VerifySignature
+			| Op::GraphListChannels
+			| Op::GraphGetChannel
+			| Op::GraphListNodes
+			| Op::GraphGetNode
+			| Op::ExportPathfindingScores
+			| Op::GetPrice
+			| Op::ListStableChannels
+			| Op::ListSettlementPayments
+			| Op::GetRevenue
+			| Op::LdkLog
+			| Op::AuditLog
+			| Op::ChannelLedger
+			| Op::ChannelLedgerExport
+			| Op::ActivityFeed
+			| Op::RevenueWeek
+			| Op::FileDialog
+			| Op::Aliases
+			| Op::PaymentsAll
+			| Op::Export
+			| Op::Login
+			| Op::ListTokens => false,
+		}
+	}
 }
 
 #[derive(Clone, Default, PartialEq)]
@@ -820,6 +997,8 @@ pub enum Dialog {
 	RefundTradeFee,
 	/// Operator's decision about a stability payment the node will not report on.
 	ReleaseStabilityPayment,
+	/// Confirm step before a token is revoked.
+	RevokeToken,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -911,6 +1090,18 @@ impl AppCtx {
 		self.conn.peek().client.clone()
 	}
 
+	/// For components: true when connected and the token may call `route` (subscribes to connection changes).
+	pub fn can(&self, route: &str) -> bool {
+		let conn = self.conn.read();
+		conn.status == ConnectionStatus::Connected && route_allowed(&conn.permissions(), route)
+	}
+
+	/// For actions: true when a client is logged in and its token may call `route`; a failed heartbeat does not stop it.
+	pub fn may_call(&self, route: &str) -> bool {
+		let conn = self.conn.peek();
+		conn.client.is_some() && route_allowed(&conn.permissions(), route)
+	}
+
 	pub fn unit(&self) -> DisplayUnit {
 		self.prefs.read().display_unit
 	}
@@ -953,5 +1144,100 @@ impl AppCtx {
 		let id = *self.status_seq.peek() + 1;
 		self.status_seq.set(id);
 		self.status.set(Some(StatusMessage { text, is_error, id }));
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::cell::RefCell;
+
+	use sc_rest_client::ldk_server_grpc::endpoints::*;
+	use sc_rest_client::ldk_server_grpc::permissions::{INVOICE_PERMISSIONS, READONLY_PERMISSIONS};
+	use sc_rest_client::sc_protos::access::{required, Requirement, LOGIN_PATH, WHO_AM_I_PATH};
+	use sc_rest_client::sc_protos::revenue::{GET_REVENUE_PATH, REFUND_TRADE_FEE_PATH};
+	use sc_rest_client::sc_protos::stable::*;
+
+	use super::*;
+
+	fn owned(permissions: &[&str]) -> Vec<String> {
+		permissions.iter().map(|p| p.to_string()).collect()
+	}
+
+	/// Every route the GUI calls; each must be in the shared table with a permission.
+	const GUI_ROUTES: [&str; 39] = [
+		GET_NODE_INFO_PATH, GET_BALANCES_PATH, LIST_CHANNELS_PATH, LIST_PAYMENTS_PATH, LIST_PEERS_PATH,
+		LIST_FORWARDED_PAYMENTS_PATH, GET_PAYMENT_DETAILS_PATH, ONCHAIN_RECEIVE_PATH, ONCHAIN_SEND_PATH,
+		BOLT11_RECEIVE_PATH, BOLT11_SEND_PATH, BOLT12_RECEIVE_PATH, BOLT12_SEND_PATH, OPEN_CHANNEL_PATH,
+		CLOSE_CHANNEL_PATH, FORCE_CLOSE_CHANNEL_PATH, SPLICE_IN_PATH, SPLICE_OUT_PATH, UPDATE_CHANNEL_CONFIG_PATH,
+		CONNECT_PEER_PATH, DISCONNECT_PEER_PATH, SPONTANEOUS_SEND_PATH, SIGN_MESSAGE_PATH, VERIFY_SIGNATURE_PATH,
+		GRAPH_LIST_CHANNELS_PATH, GRAPH_GET_CHANNEL_PATH, GRAPH_LIST_NODES_PATH, GRAPH_GET_NODE_PATH,
+		EXPORT_PATHFINDING_SCORES_PATH, GET_PRICE_PATH, LIST_STABLE_CHANNELS_PATH, EDIT_STABLE_CHANNEL_PATH,
+		RELEASE_STABILITY_PAYMENT_PATH, LIST_SETTLEMENT_PAYMENTS_PATH, GET_REVENUE_PATH, REFUND_TRADE_FEE_PATH,
+		LDK_LOG_PATH, AUDIT_LOG_PATH, LIST_CHANNEL_LEDGER_EVENTS_PATH,
+	];
+
+	#[test]
+	fn every_route_the_gui_calls_needs_a_permission() {
+		for route in GUI_ROUTES {
+			assert!(matches!(required(route), Some(Requirement::Permission(_))), "{route} has no permission in the table");
+			assert_eq!(Some(Requirement::Permission(permission_for(route))), required(route));
+		}
+	}
+
+	#[test]
+	fn a_route_needs_its_permission_or_admin() {
+		assert!(route_allowed(&owned(&["payments:read"]), LIST_PAYMENTS_PATH));
+		assert!(!route_allowed(&owned(&["node:read"]), LIST_PAYMENTS_PATH));
+		assert!(route_allowed(&owned(&["admin"]), BOLT11_SEND_PATH));
+		assert!(route_allowed(&owned(&[]), WHO_AM_I_PATH), "any session may ask who it is");
+		assert!(!route_allowed(&owned(&["admin"]), LOGIN_PATH), "Login is never a session call");
+		assert!(!route_allowed(&owned(&["admin"]), "NoSuchRoute"), "a route missing from the table is refused");
+	}
+
+	#[test]
+	fn read_only_means_no_permission_that_moves_money_or_changes_channels() {
+		assert!(is_read_only(&owned(&READONLY_PERMISSIONS)));
+		assert!(is_read_only(&owned(&INVOICE_PERMISSIONS)), "receiving moves nothing out");
+		let writes = [
+			"payments:send",
+			"onchain:send",
+			"channels:manage",
+			"channels:force_close",
+			"peers:manage",
+			"macaroons:manage",
+			"messages:sign",
+			"admin",
+		];
+		for write in writes {
+			assert!(!is_read_only(&owned(&["node:read", write])), "{write} is a write permission");
+		}
+	}
+
+	thread_local! {
+		static SEEN: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
+	}
+
+	#[component]
+	fn CanProbe(status: ConnectionStatus) -> Element {
+		let ctx = use_context_provider(|| {
+			let mut conn = Connection::signed_in("t", &["payments:read"]);
+			conn.status = status.clone();
+			AppCtx::new(conn, Forms::default(), Nav::default(), Prefs::default(), false)
+		});
+		SEEN.with(|s| *s.borrow_mut() = vec![ctx.can(LIST_PAYMENTS_PATH), ctx.can(GET_NODE_INFO_PATH), ctx.can(WHO_AM_I_PATH)]);
+		rsx! {}
+	}
+
+	fn can_while(status: ConnectionStatus) -> Vec<bool> {
+		let mut dom = VirtualDom::new_with_props(CanProbe, CanProbeProps { status });
+		dom.rebuild_in_place();
+		SEEN.with(|s| s.borrow().clone())
+	}
+
+	#[test]
+	fn can_follows_the_permissions_only_while_connected() {
+		assert_eq!(can_while(ConnectionStatus::Connected), vec![true, false, true]);
+		assert_eq!(can_while(ConnectionStatus::Error("LSP unreachable".into())), vec![false, false, false]);
+		assert_eq!(can_while(ConnectionStatus::Disconnected), vec![false, false, false]);
 	}
 }
