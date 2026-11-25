@@ -81,6 +81,26 @@ jobs:
             -retry-tests-on-failure \
             -parallel-testing-enabled NO
 
+      - name: Check the STABILITY flag per configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          project=ios/StableChannels/StableChannels.xcodeproj
+          conditions() {
+            xcodebuild -project "$project" -target "$1" -configuration "$2" -showBuildSettings 2>/dev/null \
+              | sed -n "s/^ *SWIFT_ACTIVE_COMPILATION_CONDITIONS = //p"
+          }
+          for target in StableChannels NotificationService; do
+            for config in Debug Release; do
+              conditions "$target" "$config" | grep -qw STABILITY \
+                || { echo "::error::STABILITY is missing from $target $config"; exit 1; }
+            done
+            if conditions "$target" AppStore | grep -qw STABILITY; then
+              echo "::error::STABILITY must not be set in $target AppStore"
+              exit 1
+            fi
+          done
+
       - name: Build App Store configuration
         shell: bash
         run: |
