@@ -364,6 +364,8 @@ class NodeService: AppNodeService {
             // Pre-upgrade wallet with only keys_seed, no mnemonic available
             words = ""
         }
+        // LDKNode aborts the app on a phrase it rejects; fail start so the error screen shows instead.
+        guard words.isEmpty || MnemonicUtils.isValidBIP39(words) else { throw NodeServiceError.invalidSeedPhrase }
 
         // Save mnemonic to file and derive node entropy (now passed to build()).
         let nodeEntropy: NodeEntropy
@@ -857,6 +859,7 @@ enum NodeServiceError: LocalizedError {
     case dataDirLocked
     case staleLightningSync
     case invalidFeeRate
+    case invalidSeedPhrase
 
     var errorDescription: String? {
         switch self {
@@ -864,6 +867,8 @@ enum NodeServiceError: LocalizedError {
         case .alreadyRunning: return "Node is already running"
         case .dataDirLocked: return "Wallet is busy in another process. Please try again."
         case .staleLightningSync: return "Lightning wallet chain sync is too old to safely pay"
+        case .invalidSeedPhrase:
+            return "The saved seed phrase is not valid. Restore your wallet from your seed phrase."
         case .invalidFeeRate:
             return "Fee rate must be between \(Int(Constants.minAllowedFeeRateSatVb)) and \(Int(Constants.maxAllowedFeeRateSatVb)) sat/vB"
         }
