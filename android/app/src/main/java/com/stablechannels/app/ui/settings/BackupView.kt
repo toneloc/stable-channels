@@ -1,9 +1,9 @@
 package com.stablechannels.app.ui.settings
 
+import android.widget.Toast
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material3.*
@@ -11,21 +11,23 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.SecureFlagPolicy
 import androidx.fragment.app.FragmentActivity
 import com.stablechannels.app.AppState
+import com.stablechannels.app.domain.seed.AppLifecyclePhase
+import com.stablechannels.app.domain.seed.SeedAccessPolicy
 import com.stablechannels.app.services.AppAccessPreferencesManager
 import com.stablechannels.app.services.AuditService
 import com.stablechannels.app.services.BiometricService
 import com.stablechannels.app.services.NodeService
-import com.stablechannels.app.ui.components.InkButton
 import com.stablechannels.app.ui.components.NeutralTextButton
+import com.stablechannels.app.ui.settings.seed.ObserveSeedLifecyclePhase
 import com.stablechannels.app.ui.settings.seed.RevealSecretPhraseDialog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -33,156 +35,82 @@ import kotlinx.coroutines.withContext
 
 @Composable
 fun BackupView(appState: AppState) {
-    val clipboardManager = LocalClipboardManager.current
     val context = LocalContext.current
     val activity = LocalContext.current as? FragmentActivity
     val scope = rememberCoroutineScope()
 
     var showSeedWords by remember { mutableStateOf(false) }
-    var seedAuthError by remember { mutableStateOf<String?>(null) }
-    var showRestore by remember { mutableStateOf(false) }
-    var restoreAuthError by remember { mutableStateOf<String?>(null) }
-    var restoreMnemonic by remember { mutableStateOf("") }
-    var restoreError by remember { mutableStateOf<String?>(null) }
-    var isRestoring by remember { mutableStateOf(false) }
-    var showRestoreForceCloseConfirm by remember { mutableStateOf(false) }
-    var restoreGuardUnavailable by remember { mutableStateOf(false) }
+    val restore = remember { RestoreFlow() }
+    // Read after the auth prompt returns, so a reply that lands in background opens nothing.
+    var lifecyclePhase by remember { mutableStateOf(AppLifecyclePhase.ACTIVE) }
 
     /**
      * Wipe + restart the node with the entered seed (post restore-guard), then look on chain for
      * the LSP's close of an old channel (#364).
      */
     fun performRestore(input: String, channelMayExist: Boolean) {
-        isRestoring = true
-        restoreError = null
+        if (!restore.startApply(input)) return
         scope.launch(Dispatchers.IO) {
             try {
                 appState.startRestoredNode(input, channelMayExist)
                 withContext(Dispatchers.Main) {
-                    isRestoring = false
-                    showRestore = false
-                    restoreMnemonic = ""
-                    restoreError = null
+                    restore.onApplied()
                     appState.refreshBalances()
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
-                    isRestoring = false
-                    restoreError = e.message ?: "Restore failed"
+                    restore.onApplyFailed(e.message ?: "Restore failed")
                 }
             }
         }
     }
 
-    Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
-        InkButton(
-            onClick = {
-                val requireAuth =
-                    AppAccessPreferencesManager.shouldRequireAuthForSeedPhrase(context)
-                if (requireAuth) {
-                    scope.launch {
-                        if (activity != null) {
-                            val authResult =
-                                BiometricService.authenticate(activity, "View seed phrase")
-                            if (authResult == BiometricService.AuthResult.SUCCESS) {
-                                showSeedWords = true
-                                seedAuthError = null
-                            } else {
-                                seedAuthError = "Authentication required"
-                            }
-                        } else {
-                            seedAuthError = "Authentication required"
-                        }
-                    }
-                } else {
-                    showSeedWords = true
-                    seedAuthError = null
-                }
+    // The reveal dialog closes itself on background; the restore dialog holds a typed phrase too.
+    ObserveSeedLifecyclePhase { phase ->
+        lifecyclePhase = phase
+        if (SeedAccessPolicy.shouldCloseSeedScreens(phase)) restore.onBackground()
+    }
+
+    val gate = remember {
+        SeedAccessGate(
+            scope = scope,
+            requiresAuth = { AppAccessPreferencesManager.shouldRequireAuthForSeedPhrase(context) },
+            authenticate = { reason ->
+                activity?.let { BiometricService.authenticate(it, reason) }
+                    ?: BiometricService.AuthResult.CANCELLED
             },
-            modifier = Modifier.fillMaxWidth(),
-            colors =
-                ButtonDefaults.buttonColors(
-                    containerColor = Color(0xFF10B981),
-                    contentColor = Color.White,
-                ),
-        ) {
-            Text("Backup Seed Words")
-        }
-
-        seedAuthError?.let {
-            Spacer(Modifier.height(4.dp))
-            Text(
-                it,
-                color = MaterialTheme.colorScheme.error,
-                style = MaterialTheme.typography.bodySmall,
-            )
-        }
-
-        if (showSeedWords) {
-            if (!appState.nodeService.savedMnemonic.isNullOrEmpty()) {
-                // The quiz reads the phrase itself, only once it is passed.
-                RevealSecretPhraseDialog(
-                    mnemonicProvider = { appState.nodeService.savedMnemonic },
-                    onDismiss = { showSeedWords = false },
-                )
-            } else {
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "Seed phrase not available for this wallet.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-
-        Spacer(Modifier.height(16.dp))
-
-        // Restore from seed — wipes this wallet, so it needs the same auth as viewing the seed
-        InkButton(
-            onClick = {
-                restoreAuthError = null
-                if (!AppAccessPreferencesManager.shouldRequireAuthForSeedPhrase(context)) {
-                    showRestore = true
-                } else if (activity == null) {
-                    restoreAuthError = "Authentication required"
-                } else {
-                    scope.launch {
-                        val authResult =
-                            BiometricService.authenticate(activity, "Restore from seed")
-                        if (authResult == BiometricService.AuthResult.SUCCESS) {
-                            showRestore = true
-                        } else {
-                            restoreAuthError = "Authentication required"
-                        }
-                    }
-                }
+            phase = { lifecyclePhase },
+            onAuthFeedback = { message ->
+                Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
             },
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text("Restore from Seed")
-        }
+        )
+    }
 
-        restoreAuthError?.let {
-            Spacer(Modifier.height(4.dp))
-            Text(
-                it,
-                color = MaterialTheme.colorScheme.error,
-                style = MaterialTheme.typography.bodySmall,
+    val savedMnemonic by appState.nodeService.savedMnemonicFlow.collectAsState()
+    GatedBackupSettingsList(
+        canReveal = SeedAccessPolicy.canRevealPhrase(savedMnemonic),
+        gate = gate,
+        onReveal = { showSeedWords = true },
+        onRestore = { restore.open() },
+    )
+
+    if (showSeedWords) {
+        if (SeedAccessPolicy.canRevealPhrase(savedMnemonic)) {
+            // The quiz reads the phrase itself, only once it is passed.
+            RevealSecretPhraseDialog(
+                mnemonicProvider = { appState.nodeService.savedMnemonic },
+                onDismiss = { showSeedWords = false },
             )
+        } else {
+            // No saved phrase: close at once rather than leave an empty dialog with no way out.
+            LaunchedEffect(Unit) { showSeedWords = false }
         }
     }
 
     // Restore dialog
-    if (showRestore) {
+    if (restore.isOpen) {
         AlertDialog(
-            onDismissRequest = {
-                if (!isRestoring) {
-                    showRestore = false
-                    restoreMnemonic = ""
-                    restoreError = null
-                }
-            },
-            // The typed seed stays out of screenshots and the recents thumbnail.
+            onDismissRequest = { restore.close() },
             properties = DialogProperties(securePolicy = SecureFlagPolicy.SecureOn),
             containerColor = MaterialTheme.colorScheme.surface,
             tonalElevation = 3.dp,
@@ -216,27 +144,32 @@ fun BackupView(appState: AppState) {
                     )
                     Spacer(Modifier.height(16.dp))
                     OutlinedTextField(
-                        value = restoreMnemonic,
-                        onValueChange = { restoreMnemonic = it },
+                        value = restore.phrase,
+                        onValueChange = { restore.phrase = it },
                         label = { Text("word1 word2 word3 ...") },
                         modifier = Modifier.fillMaxWidth(),
                         minLines = 3,
-                        enabled = !isRestoring,
+                        enabled = !restore.isBusy,
+                        keyboardOptions =
+                            KeyboardOptions(
+                                capitalization = KeyboardCapitalization.None,
+                                autoCorrectEnabled = false,
+                            ),
                         textStyle =
                             MaterialTheme.typography.bodyMedium.copy(
                                 fontFamily = FontFamily.Monospace
                             ),
                         shape = RoundedCornerShape(12.dp),
                     )
-                    if (restoreError != null) {
+                    restore.error?.let { error ->
                         Spacer(Modifier.height(8.dp))
                         Text(
-                            restoreError!!,
+                            error,
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.error,
                         )
                     }
-                    if (isRestoring) {
+                    if (restore.isBusy) {
                         Spacer(Modifier.height(16.dp))
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -260,21 +193,14 @@ fun BackupView(appState: AppState) {
             confirmButton = {
                 NeutralTextButton(
                     onClick = {
-                        val input = restoreMnemonic.trim()
-                        val wordCount = input.split("\\s+".toRegex()).size
-                        if (wordCount != 12 && wordCount != 24) {
-                            restoreError = "Seed phrase must be 12 or 24 words"
-                            return@NeutralTextButton
-                        }
+                        val check = restore.startCheck() ?: return@NeutralTextButton
                         // Restore guard: a seed-only restore wipes LDK state;
                         // if this seed's node still has an LSP channel it will
                         // be force-closed at the next reestablish. Detect that
                         // and require explicit opt-in; fail-warn if the LSP is
                         // unreachable or derivation fails.
-                        isRestoring = true
-                        restoreError = null
                         scope.launch(Dispatchers.IO) {
-                            val nodeId = NodeService.deriveNodeId(context, input)
+                            val nodeId = NodeService.deriveNodeId(context, check.phrase)
                             val exists = nodeId?.let { appState.lspChannelExists(it) }
                             if (exists == null) {
                                 AuditService.log(
@@ -283,31 +209,26 @@ fun BackupView(appState: AppState) {
                                 )
                             }
                             withContext(Dispatchers.Main) {
-                                when (exists) {
-                                    true -> {
-                                        AuditService.log(
-                                            "RESTORE_ACTIVE_CHANNEL_DETECTED",
-                                            mapOf("node_id" to nodeId),
-                                        )
-                                        isRestoring = false
-                                        restoreGuardUnavailable = false
-                                        showRestoreForceCloseConfirm = true
+                                restore
+                                    .onChecked(check, exists) { warning ->
+                                        // Logged only when the warning really opens, never for a
+                                        // stale check; the write stays off the main thread.
+                                        if (warning == RestoreWarning.OPEN_CHANNEL) {
+                                            scope.launch(Dispatchers.IO) {
+                                                AuditService.log(
+                                                    "RESTORE_ACTIVE_CHANNEL_DETECTED",
+                                                    mapOf("node_id" to nodeId),
+                                                )
+                                            }
+                                        }
                                     }
-                                    // Guard couldn't run — fail-warn: require
-                                    // explicit opt-in instead of proceeding.
-                                    null -> {
-                                        isRestoring = false
-                                        restoreGuardUnavailable = true
-                                        showRestoreForceCloseConfirm = true
-                                    }
-                                    false -> performRestore(input, channelMayExist = false)
-                                }
+                                    ?.let { performRestore(it, channelMayExist = false) }
                             }
                         }
                     },
-                    enabled = restoreMnemonic.trim().isNotEmpty() && !isRestoring,
+                    enabled = restore.phrase.trim().isNotEmpty() && !restore.isBusy,
                 ) {
-                    if (isRestoring) {
+                    if (restore.isBusy) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(16.dp),
                             strokeWidth = 2.dp,
@@ -319,12 +240,8 @@ fun BackupView(appState: AppState) {
             },
             dismissButton = {
                 NeutralTextButton(
-                    onClick = {
-                        showRestore = false
-                        restoreMnemonic = ""
-                        restoreError = null
-                    },
-                    enabled = !isRestoring,
+                    onClick = { restore.close() },
+                    enabled = !restore.isBusy,
                 ) {
                     Text("Cancel")
                 }
@@ -335,9 +252,10 @@ fun BackupView(appState: AppState) {
     // Restore guard: explicit opt-in when the seed's node still has an open
     // LSP channel that a seed-only restore would force-close (or when the
     // check could not run).
-    if (showRestoreForceCloseConfirm) {
+    restore.warning?.let { warning ->
+        val restoreGuardUnavailable = warning == RestoreWarning.UNVERIFIED
         AlertDialog(
-            onDismissRequest = { showRestoreForceCloseConfirm = false },
+            onDismissRequest = { restore.dismissWarning() },
             containerColor = MaterialTheme.colorScheme.surface,
             tonalElevation = 3.dp,
             title = {
@@ -365,8 +283,7 @@ fun BackupView(appState: AppState) {
             confirmButton = {
                 NeutralTextButton(
                     onClick = {
-                        showRestoreForceCloseConfirm = false
-                        performRestore(restoreMnemonic.trim(), channelMayExist = true)
+                        restore.confirmWarning()?.let { performRestore(it, channelMayExist = true) }
                     }
                 ) {
                     Text(
@@ -376,11 +293,7 @@ fun BackupView(appState: AppState) {
                 }
             },
             dismissButton = {
-                NeutralTextButton(
-                    onClick = {
-                        showRestoreForceCloseConfirm = false
-                    }
-                ) {
+                NeutralTextButton(onClick = { restore.dismissWarning() }) {
                     Text("Cancel")
                 }
             },

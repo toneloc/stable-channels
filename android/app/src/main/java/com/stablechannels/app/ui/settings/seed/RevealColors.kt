@@ -28,7 +28,7 @@ internal object RevealColors {
     val secondaryGroupedBackground: Color
         @Composable get() = if (LocalDarkTheme.current) Color(0xFF1C1C1E) else Color(0xFFFFFFFF)
 
-    // iOS systemGreen, systemRed and systemOrange.
+    // iOS systemGreen, systemRed, systemOrange and systemBlue.
     val green: Color
         @Composable get() = if (LocalDarkTheme.current) Color(0xFF30D158) else Color(0xFF34C759)
 
@@ -37,6 +37,9 @@ internal object RevealColors {
 
     val orange: Color
         @Composable get() = if (LocalDarkTheme.current) Color(0xFFFF9F0A) else Color(0xFFFF9500)
+
+    val blue: Color
+        @Composable get() = if (LocalDarkTheme.current) Color(0xFF0A84FF) else Color(0xFF007AFF)
 
     /** iOS stablePrimary: the Learn more links and illustration accents. */
     val stablePrimary = Color(0xFF00A3E0)
