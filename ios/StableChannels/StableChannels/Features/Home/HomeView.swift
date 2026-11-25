@@ -38,8 +38,10 @@ struct HomeView: View {
 
                     HomeSyncSpinnerView()
 
-                    balanceBarSection
-                        .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                    if StabilitySurface.current.showsBalanceBar {
+                        balanceBarSection
+                            .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                    }
 
                     // Funds of a closed channel the total leaves out, until they reach the wallet
                     if let funds = appState.closedChannelFunds {
@@ -70,8 +72,8 @@ struct HomeView: View {
                         isOffline: !appState.isOnline,
                         onSend: { showSendSheet = true },
                         onReceive: { showReceiveSheet = true },
-                        onBuy: { showBuySheet = true },
-                        onSell: { showSellSheet = true }
+                        onBuy: StabilitySurface.current.showsTradeButtons ? { showBuySheet = true } : nil,
+                        onSell: StabilitySurface.current.showsTradeButtons ? { showSellSheet = true } : nil
                     )
 
                     HomeSyncStatusSectionView(onOpenPaymentDetail: { openPaymentDetail() })
