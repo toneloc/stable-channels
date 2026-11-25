@@ -2,48 +2,52 @@ use dioxus::prelude::*;
 
 use std::collections::{HashMap, HashSet};
 
-use sc_rest_client::sc_protos::stable::StableChannelInfo;
+use sc_rest_client::ldk_server_grpc::endpoints::{
+	CLOSE_CHANNEL_PATH, FORCE_CLOSE_CHANNEL_PATH, LIST_CHANNELS_PATH, OPEN_CHANNEL_PATH, SPLICE_IN_PATH, SPLICE_OUT_PATH,
+	UPDATE_CHANNEL_CONFIG_PATH,
+};
+use sc_rest_client::sc_protos::stable::{StableChannelInfo, EDIT_STABLE_CHANNEL_PATH};
 
 use crate::actions;
 use crate::format::{format_sats, format_usd, unit_label};
 use crate::health::{has_stable_position, settle_threshold_usd, settlement, stable_drift, Drift, Settlement};
-use crate::state::{AppCtx, ChannelSortColumn, ChannelStatusFilter, Dialog, Drawer, Op};
+use crate::state::{permission_for, AppCtx, ChannelSortColumn, ChannelStatusFilter, Dialog, Drawer, Op};
 use crate::ui::queued_splices::splice_in_live;
 use crate::ui::widgets::{
-	Amount, Bubble, Card, Check, CopyBtn, Empty, Field, Gate, Hover, Icon, IdCopy, Kv, LiquidityBar, Modal, Peer, Pill,
-	RefreshBtn, SidePanel, SortTh, Spinner, Stat, TextInput, Th,
+	Amount, Bubble, Card, Check, CopyBtn, Empty, Field, Gate, Hover, Icon, IdCopy, Kv, LiquidityBar, Modal, NoAccess, Peer,
+	Pill, RefreshBtn, SidePanel, SortTh, Spinner, Stat, TextInput, Th,
 };
 use crate::ui::{close_dialog, close_drawer, open_dialog, open_drawer};
 
 const HELP_CHANNEL_ID: &str = "The Lightning channel identifier for this channel.";
 const HELP_USER_CHANNEL_ID: &str =
-	"Application-level identifier associated with the channel by the opener or server.";
-const HELP_COUNTERPARTY: &str = "The node public key of the peer on the other side of the channel.";
+	"This node's own ID for the channel. It stays the same across splices.";
+const HELP_COUNTERPARTY: &str = "Node ID of the peer on the other side of the channel.";
 const HELP_FUNDING_TX: &str = "The Bitcoin transaction that funded the channel.";
-const HELP_CAPACITY: &str = "The total channel size currently tracked for this channel.";
+const HELP_CAPACITY: &str = "Total size of the channel.";
 const HELP_OUTBOUND: &str =
 	"Amount this node can currently send through the channel, subject to reserves, pending HTLCs, and channel limits.";
 const HELP_INBOUND: &str =
-	"Amount this node can currently receive through the channel, subject to counterparty liquidity and channel limits.";
+	"Amount this node can currently receive through the channel, subject to the peer's liquidity and channel limits.";
 const HELP_LIQUIDITY: &str = "Visual split of outbound and inbound channel liquidity.";
 const HELP_STATUS: &str =
 	"Active: ready and usable for payments. Inactive: open but not usable, usually because the peer is offline. Opening: waiting for the funding transaction to confirm. Closing: a cooperative close is under way, with its stage. Splicing: a negotiated splice is waiting to confirm.";
 const HELP_SCID: &str = "The channel's position on-chain (block, transaction, output), used by the network to route through it.";
-const HELP_SCID_ALIAS: &str = "Random stand-ins for the short channel id: outbound is ours for routes, inbound is the peer's for invoice route hints.";
+const HELP_SCID_ALIAS: &str = "Random stand-ins for the short channel ID. Outbound is ours, for routes. Inbound is the peer's, for invoice route hints.";
 const HELP_HTLC_MAX: &str = "The largest single payment this channel can currently receive from the peer.";
 const HELP_HTLC_MIN: &str = "The smallest payment the peer will send through this channel.";
 const HELP_RESERVE_TYPE: &str = "Adaptive keeps a per-channel on-chain reserve for fee-bumping a force close. No reserve means the peer is trusted. Legacy is a pre-anchor channel.";
-const HELP_CLOSE_STAGE: &str = "Where the cooperative close is: HTLCs are resolved, the closing fee is negotiated, then the close transaction is broadcast.";
+const HELP_CLOSE_STAGE: &str = "Stage of the cooperative close. HTLCs are resolved, the closing fee is negotiated, then the close transaction is broadcast.";
 const HELP_STABLE: &str = "USD target of the stable position on this channel, its role, and how far the backing has drifted.";
 const HELP_DRIFT: &str =
 	"Backing valued at the latest price, compared with the USD target: green above it, red below.";
 const HELP_SETTLES_AT: &str =
-	"The daemon pays or asks for a stability payment once drift reaches both $0.25 and 0.1% of the target, whichever is larger.";
-const HELP_NODE_PUBKEY: &str = "The counterparty node public key to connect to or open a channel with.";
+	"The LSP pays or asks for a stability payment once drift reaches $0.25 or 0.1% of the target, whichever is larger.";
+const HELP_NODE_PUBKEY: &str = "Node ID of the peer to connect to or open a channel with.";
 const HELP_PEER_ADDRESS: &str = "Network address for the Lightning peer, typically host:port.";
 const HELP_CHANNEL_AMOUNT: &str = "The amount of on-chain bitcoin committed to the channel at open.";
 const HELP_PUSH_AMOUNT: &str =
-	"Funds given to the counterparty at channel open. This reduces this node's initial local balance.";
+	"Funds given to the peer at channel open. This lowers this node's starting balance.";
 const HELP_ANNOUNCE_CHANNEL: &str =
 	"Whether to advertise the channel publicly so it can be used for network routing.";
 const HELP_FEE_PROPORTIONAL: &str =
@@ -172,7 +176,11 @@ pub fn Channels() -> Element {
 	if !ctx.is_connected() {
 		return rsx! { Gate {} };
 	}
+	if !ctx.can(LIST_CHANNELS_PATH) {
+		return rsx! { Card { NoAccess { permission: permission_for(LIST_CHANNELS_PATH) } } };
+	}
 	let loading = ctx.busy(Op::Channels);
+	let can_open = ctx.can(OPEN_CHANNEL_PATH);
 	let price = ctx.price_value();
 	let data = ctx.data.read();
 	let stable_by_id: HashMap<String, StableSummary> = data
@@ -230,9 +238,9 @@ pub fn Channels() -> Element {
 		return rsx! {
 			Card {
 				if loading {
-					Empty { icon: "link", title: "Loading channels...", Spinner { large: true } }
+					Empty { icon: "link", title: "Loading channels…", Spinner { large: true } }
 				} else {
-					Empty { icon: "link", title: "No channel data available", hint: "Click Refresh to fetch.",
+					Empty { icon: "link", title: "No channel data available", hint: "Click Refresh to load",
 						RefreshBtn { busy: loading, onclick: move |_| actions::fetch_channels(ctx) }
 					}
 				}
@@ -295,7 +303,7 @@ pub fn Channels() -> Element {
 			div { class: "toolbar",
 				div { class: "search",
 					Icon { name: "search", size: 15 }
-					TextInput { value: filter, small: true, placeholder: "peer name, node id or channel id", oninput: move |v| view.write().channel_filter = v }
+					TextInput { value: filter, small: true, placeholder: "Peer name, node ID or channel ID", oninput: move |v| view.write().channel_filter = v }
 				}
 				select {
 					class: "select sm",
@@ -316,11 +324,13 @@ pub fn Channels() -> Element {
 				span { class: "count", "{shown} of {total} channel(s)" }
 				div { class: "row", style: "margin-left: auto;",
 					RefreshBtn { busy: loading, onclick: move |_| { actions::fetch_channels(ctx); actions::fetch_queued_splices(ctx); }, op: Op::Channels }
-					button { class: "btn sm accent", onclick: move |_| open_dialog(ctx, Dialog::OpenChannel), Icon { name: "plus", size: 14 } "Open Channel" }
+					if can_open {
+						button { class: "btn sm accent", onclick: move |_| open_dialog(ctx, Dialog::OpenChannel), Icon { name: "plus", size: 14 } "Open channel" }
+					}
 				}
 			}
 			if rows.is_empty() {
-				Empty { icon: "link", title: "No channels found.", hint: "Open a channel to start routing payments." }
+				Empty { icon: "link", title: "No channels yet", hint: "Open a channel to start routing payments." }
 			} else {
 				div { class: "table-wrap",
 					table { class: "table clickable", style: "min-width: 960px;",
@@ -432,17 +442,36 @@ fn open_channel_action(ctx: AppCtx, which: Dialog, user_channel_id: String, coun
 }
 
 const CHANNEL_ACTIONS: [(Dialog, &str, &str, &str); 4] = [
-	(Dialog::SpliceIn, "merge", "Splice+ (add funds)", ""),
-	(Dialog::SpliceOut, "split", "Splice- (remove funds)", ""),
+	(Dialog::SpliceIn, "merge", "Splice in", ""),
+	(Dialog::SpliceOut, "split", "Splice out", ""),
 	(Dialog::UpdateChannelConfig, "sliders", "Config", ""),
 	(Dialog::CloseChannel, "x", "Close", "danger"),
 ];
+
+/// Whether the token may take a channel action; Close opens both the cooperative and the force close.
+fn action_allowed(ctx: AppCtx, which: Dialog) -> bool {
+	match which {
+		Dialog::SpliceIn => ctx.can(SPLICE_IN_PATH),
+		Dialog::SpliceOut => ctx.can(SPLICE_OUT_PATH),
+		Dialog::CloseChannel => ctx.can(CLOSE_CHANNEL_PATH) || ctx.can(FORCE_CLOSE_CHANNEL_PATH),
+		_ => ctx.can(UPDATE_CHANNEL_CONFIG_PATH),
+	}
+}
+
+/// The channel actions this token may take.
+fn allowed_actions(ctx: AppCtx) -> Vec<(Dialog, &'static str, &'static str, &'static str)> {
+	CHANNEL_ACTIONS.into_iter().filter(|(which, ..)| action_allowed(ctx, *which)).collect()
+}
 
 /// Collapsed row actions menu.
 #[component]
 fn RowMenu(user_channel_id: String, counterparty: String) -> Element {
 	let ctx = use_context::<AppCtx>();
 	let mut open = use_signal(|| false);
+	let actions = allowed_actions(ctx);
+	if actions.is_empty() {
+		return rsx! {};
+	}
 	rsx! {
 		// Clicks inside the menu must not open the row's side panel; Esc closes it.
 		div {
@@ -457,7 +486,7 @@ fn RowMenu(user_channel_id: String, counterparty: String) -> Element {
 			if open() {
 				div { class: "menu-catcher", onclick: move |_| open.set(false) }
 				div { class: "menu", role: "menu",
-					for (which, icon, label, class) in CHANNEL_ACTIONS {
+					for (which, icon, label, class) in actions {
 						button {
 							key: "{label}",
 							role: "menuitem",
@@ -521,8 +550,10 @@ pub fn ChannelDrawer(user_channel_id: String) -> Element {
 	};
 	let uid = ch.user_channel_id.clone();
 	let counterparty = ch.counterparty_node_id.clone();
+	let actions = allowed_actions(ctx);
+	let has_actions = !actions.is_empty();
 	let actions_row = rsx! {
-		for (which, icon, label, class) in CHANNEL_ACTIONS {
+		for (which, icon, label, class) in actions {
 			button {
 				key: "{label}",
 				class: "btn sm {class}",
@@ -542,7 +573,7 @@ pub fn ChannelDrawer(user_channel_id: String) -> Element {
 			sub: crate::format::truncate_id(&ch.counterparty_node_id, 10, 10),
 			icon: rsx! { Bubble { icon: "link", tone: "blue" } },
 			onclose: move |_| close_drawer(ctx),
-			footer: actions_row,
+			footer: has_actions.then_some(actions_row),
 			div { class: "drawer-hero",
 				div { class: "row between",
 					span { class: "hero-amount", Amount { msat: ch.channel_value_sats * 1000, strong: true } }
@@ -561,10 +592,10 @@ pub fn ChannelDrawer(user_channel_id: String) -> Element {
 				div { class: "field-label", style: "margin-bottom: 4px;", "Identifiers" }
 				div { class: "kv",
 					Kv { label: "Channel ID", help: HELP_CHANNEL_ID, IdCopy { value: ch.channel_id.clone(), head: 10, tail: 10 } }
-					Kv { label: "User Channel ID", help: HELP_USER_CHANNEL_ID, IdCopy { value: ch.user_channel_id.clone(), head: 10, tail: 10 } }
-					Kv { label: "Counterparty", help: HELP_COUNTERPARTY, IdCopy { value: ch.counterparty_node_id.clone(), head: 10, tail: 10 } }
+					Kv { label: "User channel ID", help: HELP_USER_CHANNEL_ID, IdCopy { value: ch.user_channel_id.clone(), head: 10, tail: 10 } }
+					Kv { label: "Peer", help: HELP_COUNTERPARTY, IdCopy { value: ch.counterparty_node_id.clone(), head: 10, tail: 10 } }
 					if let Some(txo) = ch.funding_txo.clone() {
-						Kv { label: "Funding Tx", help: HELP_FUNDING_TX, IdCopy { value: txo.txid.clone(), head: 10, tail: 10 } span { class: "muted small", ":{txo.vout}" } }
+						Kv { label: "Funding transaction", help: HELP_FUNDING_TX, IdCopy { value: txo.txid.clone(), head: 10, tail: 10 } span { class: "muted small", ":{txo.vout}" } }
 					}
 					// Fields an older LDK Server leaves unset render nothing.
 					if let Some(scid) = ch.short_channel_id {
@@ -624,18 +655,20 @@ fn NoStablePosition(sc: StableChannelInfo) -> Element {
 		div { class: "card inner",
 			div { class: "row between",
 				span { class: "field-label", "Stable position" }
-				button { class: "btn sm", onclick: move |_| {
-					let mut forms = ctx.forms;
-					{
-						let mut f = forms.write();
-						f.edit_stable_channel.channel_id = sc.channel_id.clone();
-						f.edit_stable_channel.expected_usd = String::new();
-						f.edit_stable_channel.note = sc.note.clone();
-					}
-					close_drawer(ctx);
-					let mut nav = ctx.nav;
-					nav.write().active_tab = crate::state::ActiveTab::StableChannels;
-				}, Icon { name: "edit", size: 14 } "Set target" }
+				if ctx.can(EDIT_STABLE_CHANNEL_PATH) {
+					button { class: "btn sm", onclick: move |_| {
+						let mut forms = ctx.forms;
+						{
+							let mut f = forms.write();
+							f.edit_stable_channel.channel_id = sc.channel_id.clone();
+							f.edit_stable_channel.expected_usd = String::new();
+							f.edit_stable_channel.note = sc.note.clone();
+						}
+						close_drawer(ctx);
+						let mut nav = ctx.nav;
+						nav.write().active_tab = crate::state::ActiveTab::StableChannels;
+					}, Icon { name: "edit", size: 14 } "Set target" }
+				}
 			}
 			div { class: "muted small", "No stable position. This channel holds only bitcoin, so the LSP sends it no balance syncs." }
 		}
@@ -662,19 +695,21 @@ fn StableSection(sc: StableChannelInfo, price: Option<f64>) -> Element {
 					button { class: "btn sm", onclick: move |_| {
 						close_drawer(ctx);
 						actions::open_channel_ledger(ctx, uid.clone());
-					}, Icon { name: "list", size: 14 } "Ledger" }
-					button { class: "btn sm", onclick: move |_| {
-						let mut forms = ctx.forms;
-						{
-							let mut f = forms.write();
-							f.edit_stable_channel.channel_id = edit.channel_id.clone();
-							f.edit_stable_channel.expected_usd = format!("{:.2}", edit.expected_usd);
-							f.edit_stable_channel.note = edit.note.clone();
-						}
-						close_drawer(ctx);
-						let mut nav = ctx.nav;
-						nav.write().active_tab = crate::state::ActiveTab::StableChannels;
-					}, Icon { name: "edit", size: 14 } "Edit target" }
+					}, Icon { name: "list", size: 14 } "History" }
+					if ctx.can(EDIT_STABLE_CHANNEL_PATH) {
+						button { class: "btn sm", onclick: move |_| {
+							let mut forms = ctx.forms;
+							{
+								let mut f = forms.write();
+								f.edit_stable_channel.channel_id = edit.channel_id.clone();
+								f.edit_stable_channel.expected_usd = format!("{:.2}", edit.expected_usd);
+								f.edit_stable_channel.note = edit.note.clone();
+							}
+							close_drawer(ctx);
+							let mut nav = ctx.nav;
+							nav.write().active_tab = crate::state::ActiveTab::StableChannels;
+						}, Icon { name: "edit", size: 14 } "Edit target" }
+					}
 				}
 			}
 			div { class: "kv",
@@ -693,9 +728,9 @@ fn StableSection(sc: StableChannelInfo, price: Option<f64>) -> Element {
 							if let Some(px) = valued_at {
 								Kv { label: "Status",
 									match settlement(&d, sc.expected_usd, px) {
-										Settlement::NotYet { headroom_usd } => rsx! { "No settlement yet · {format_usd(headroom_usd)} more drift before one" },
-										Settlement::LspPays { sats } => rsx! { "Settlement due · LSP sends ≈ {format_sats(sats)} sats to the user" },
-										Settlement::UserPays { sats } => rsx! { "Settlement due · user's wallet sends ≈ {format_sats(sats)} sats (woken by push if offline)" },
+										Settlement::NotYet { headroom_usd } => rsx! { "No stability payment yet · {format_usd(headroom_usd)} more drift before one" },
+										Settlement::LspPays { sats } => rsx! { "Stability payment due · LSP sends ≈ {format_sats(sats)} sats to the user" },
+										Settlement::UserPays { sats } => rsx! { "Stability payment due · user's wallet sends ≈ {format_sats(sats)} sats (woken by push if offline)" },
 									}
 								}
 							}
@@ -737,7 +772,7 @@ pub fn OpenChannelDialog() -> Element {
 	};
 	rsx! {
 		Modal {
-			title: "Open Channel",
+			title: "Open channel",
 			sub: "Fund a new Lightning channel from the on-chain wallet",
 			icon: rsx! { Bubble { icon: "plus", tone: "green" } },
 			onclose: move |_| cancel(),
@@ -745,28 +780,28 @@ pub fn OpenChannelDialog() -> Element {
 				button { class: "btn ghost", onclick: move |_| cancel(), "Cancel" }
 				button { class: "btn primary", disabled: pending, onclick: move |_| actions::open_channel(ctx),
 					if pending { Spinner {} } else { Icon { name: "plus", size: 16 } }
-					"Open Channel"
+					"Open channel"
 				}
 			},
-			Field { label: "Node Pubkey", help: HELP_NODE_PUBKEY, TextInput { value: form.node_pubkey.clone(), mono: true, oninput: move |v| forms.write().open_channel.node_pubkey = v } }
+			Field { label: "Node ID", help: HELP_NODE_PUBKEY, TextInput { value: form.node_pubkey.clone(), mono: true, oninput: move |v| forms.write().open_channel.node_pubkey = v } }
 			Field { label: "Address", help: HELP_PEER_ADDRESS, TextInput { value: form.address.clone(), mono: true, placeholder: "host:port", oninput: move |v| forms.write().open_channel.address = v } }
 			div { class: "form-grid",
-				Field { label: "Channel Amount ({unit})", help: HELP_CHANNEL_AMOUNT, preview: preview(&form.channel_amount_sats),
+				Field { label: "Channel amount ({unit})", help: HELP_CHANNEL_AMOUNT, preview: preview(&form.channel_amount_sats),
 					TextInput { value: form.channel_amount_sats.clone(), oninput: move |v| forms.write().open_channel.channel_amount_sats = v }
 				}
-				Field { label: "Push Amount ({unit})", help: HELP_PUSH_AMOUNT, preview: preview(&form.push_to_counterparty_msat),
+				Field { label: "Push amount ({unit})", help: HELP_PUSH_AMOUNT, preview: preview(&form.push_to_counterparty_msat),
 					TextInput { value: form.push_to_counterparty_msat.clone(), oninput: move |v| forms.write().open_channel.push_to_counterparty_msat = v }
 				}
 			}
 			div { class: "toggle-row",
-				Check { checked: form.announce_channel, label: "Announce Channel", help: HELP_ANNOUNCE_CHANNEL, onchange: move |v| forms.write().open_channel.announce_channel = v }
+				Check { checked: form.announce_channel, label: "Announce channel", help: HELP_ANNOUNCE_CHANNEL, onchange: move |v| forms.write().open_channel.announce_channel = v }
 			}
 			details { class: "disclosure",
-				summary { Icon { name: "chevron-right", size: 14 } "Advanced Options" }
+				summary { Icon { name: "chevron-right", size: 14 } "Advanced options" }
 				div { class: "body form-grid",
-					Field { label: "Fee Proportional (millionths)", help: HELP_FEE_PROPORTIONAL, TextInput { value: form.forwarding_fee_proportional_millionths.clone(), oninput: move |v| forms.write().open_channel.forwarding_fee_proportional_millionths = v } }
-					Field { label: "Fee Base (msat)", help: HELP_FEE_BASE, TextInput { value: form.forwarding_fee_base_msat.clone(), oninput: move |v| forms.write().open_channel.forwarding_fee_base_msat = v } }
-					Field { label: "CLTV Expiry Delta", help: HELP_CLTV_EXPIRY_DELTA, TextInput { value: form.cltv_expiry_delta.clone(), oninput: move |v| forms.write().open_channel.cltv_expiry_delta = v } }
+					Field { label: "Proportional fee (ppm)", help: HELP_FEE_PROPORTIONAL, TextInput { value: form.forwarding_fee_proportional_millionths.clone(), oninput: move |v| forms.write().open_channel.forwarding_fee_proportional_millionths = v } }
+					Field { label: "Base fee (msat)", help: HELP_FEE_BASE, TextInput { value: form.forwarding_fee_base_msat.clone(), oninput: move |v| forms.write().open_channel.forwarding_fee_base_msat = v } }
+					Field { label: "CLTV expiry delta", help: HELP_CLTV_EXPIRY_DELTA, TextInput { value: form.cltv_expiry_delta.clone(), oninput: move |v| forms.write().open_channel.cltv_expiry_delta = v } }
 				}
 			}
 		}
@@ -782,39 +817,45 @@ pub fn CloseChannelDialog() -> Element {
 	let confirmed = view.read().force_close_confirm;
 	let close_pending = ctx.busy(Op::CloseChannel);
 	let force_pending = ctx.busy(Op::ForceCloseChannel);
+	let can_close = ctx.can(CLOSE_CHANNEL_PATH);
+	let can_force = ctx.can(FORCE_CLOSE_CHANNEL_PATH);
 	let mut cancel = move || {
 		forms.write().close_channel = Default::default();
 		close_dialog(ctx);
 	};
 	rsx! {
 		Modal {
-			title: "Close Channel",
+			title: "Close channel",
 			sub: "Return the channel's funds on-chain",
 			icon: rsx! { Bubble { icon: "x", tone: "red" } },
 			onclose: move |_| cancel(),
 			footer: rsx! {
 				button { class: "btn ghost", onclick: move |_| cancel(), "Cancel" }
-				Hover { tip: HELP_CLOSE_CHANNEL.to_string(),
-					button { class: "btn primary", disabled: close_pending || force_pending, onclick: move |_| actions::close_channel(ctx),
-						if close_pending { Spinner {} }
-						"Close (Cooperative)"
+				if can_close {
+					Hover { tip: HELP_CLOSE_CHANNEL.to_string(),
+						button { class: "btn primary", disabled: close_pending || force_pending, onclick: move |_| actions::close_channel(ctx),
+							if close_pending { Spinner {} }
+							"Cooperative close"
+						}
 					}
 				}
 			},
-			Field { label: "Channel ID", help: HELP_CHANNEL_ID, TextInput { value: form.user_channel_id.clone(), mono: true, oninput: move |v| forms.write().close_channel.user_channel_id = v } }
-			Field { label: "Counterparty", help: HELP_COUNTERPARTY, TextInput { value: form.counterparty_node_id.clone(), mono: true, oninput: move |v| forms.write().close_channel.counterparty_node_id = v } }
-			Field { label: "Force Close Reason", hint: "Only used for a force close",
-				TextInput { value: form.force_close_reason.clone(), oninput: move |v| forms.write().close_channel.force_close_reason = v }
-			}
-			// Destructive force close: gated behind an irreversibility checkbox.
-			div { class: "confirm-box",
-				div { class: "title", Icon { name: "alert", size: 16 } "Force Close" }
-				span { class: "small muted", "Broadcasts the latest commitment transaction unilaterally. Funds stay locked until the timelock expires." }
-				Check { checked: confirmed, danger: true, label: "I understand this is irreversible", onchange: move |v| view.write().force_close_confirm = v }
-				div { class: "row",
-					button { class: "btn danger solid", disabled: !confirmed || force_pending, onclick: move |_| actions::force_close_channel(ctx),
-						if force_pending { Spinner {} }
-						"Force Close"
+			Field { label: "User channel ID", help: HELP_USER_CHANNEL_ID, TextInput { value: form.user_channel_id.clone(), mono: true, oninput: move |v| forms.write().close_channel.user_channel_id = v } }
+			Field { label: "Peer node ID", help: HELP_COUNTERPARTY, TextInput { value: form.counterparty_node_id.clone(), mono: true, oninput: move |v| forms.write().close_channel.counterparty_node_id = v } }
+			if can_force {
+				Field { label: "Force-close reason", hint: "Only used for a force close",
+					TextInput { value: form.force_close_reason.clone(), oninput: move |v| forms.write().close_channel.force_close_reason = v }
+				}
+				// Destructive force close: gated behind an irreversibility checkbox.
+				div { class: "confirm-box",
+					div { class: "title", Icon { name: "alert", size: 16 } "Force close" }
+					span { class: "small muted", "Broadcasts the latest commitment transaction unilaterally. Funds stay locked until the timelock expires." }
+					Check { checked: confirmed, danger: true, label: "I understand this is irreversible", onchange: move |v| view.write().force_close_confirm = v }
+					div { class: "row",
+						button { class: "btn danger solid", disabled: !confirmed || force_pending, onclick: move |_| actions::force_close_channel(ctx),
+							if force_pending { Spinner {} }
+							"Force close"
+						}
 					}
 				}
 			}
@@ -836,7 +877,7 @@ pub fn SpliceInDialog() -> Element {
 	};
 	rsx! {
 		Modal {
-			title: "Splice In",
+			title: "Splice in",
 			sub: "Queue funds to add to a channel; the phone is woken by push",
 			icon: rsx! { Bubble { icon: "merge", tone: "green" } },
 			onclose: move |_| cancel(),
@@ -848,8 +889,8 @@ pub fn SpliceInDialog() -> Element {
 				}
 			},
 			div { class: "notice", Icon { name: "info", size: 16 } "{HELP_SPLICE_IN}" }
-			Field { label: "Channel ID", help: HELP_CHANNEL_ID, TextInput { value: form.user_channel_id.clone(), mono: true, oninput: move |v| forms.write().splice_in.user_channel_id = v } }
-			Field { label: "Counterparty", help: HELP_COUNTERPARTY, TextInput { value: form.counterparty_node_id.clone(), mono: true, oninput: move |v| forms.write().splice_in.counterparty_node_id = v } }
+			Field { label: "User channel ID", help: HELP_USER_CHANNEL_ID, TextInput { value: form.user_channel_id.clone(), mono: true, oninput: move |v| forms.write().splice_in.user_channel_id = v } }
+			Field { label: "Peer node ID", help: HELP_COUNTERPARTY, TextInput { value: form.counterparty_node_id.clone(), mono: true, oninput: move |v| forms.write().splice_in.counterparty_node_id = v } }
 			Field { label: "Amount ({unit})", help: HELP_SPLICE_IN, preview,
 				TextInput { value: form.splice_amount_sats.clone(), oninput: move |v| forms.write().splice_in.splice_amount_sats = v }
 			}
@@ -873,7 +914,7 @@ pub fn SpliceOutDialog() -> Element {
 	};
 	rsx! {
 		Modal {
-			title: "Splice Out",
+			title: "Splice out",
 			sub: "Remove funds from an existing channel",
 			icon: rsx! { Bubble { icon: "split", tone: "purple" } },
 			onclose: move |_| cancel(),
@@ -881,12 +922,12 @@ pub fn SpliceOutDialog() -> Element {
 				button { class: "btn ghost", onclick: move |_| cancel(), "Cancel" }
 				button { class: "btn danger solid", disabled: !confirmed || pending, onclick: move |_| actions::splice_out(ctx),
 					if pending { Spinner {} }
-					"Splice Out"
+					"Splice out"
 				}
 			},
 			div { class: "notice", Icon { name: "info", size: 16 } "{HELP_SPLICE_OUT}" }
-			Field { label: "Channel ID", help: HELP_CHANNEL_ID, TextInput { value: form.user_channel_id.clone(), mono: true, oninput: move |v| forms.write().splice_out.user_channel_id = v } }
-			Field { label: "Counterparty", help: HELP_COUNTERPARTY, TextInput { value: form.counterparty_node_id.clone(), mono: true, oninput: move |v| forms.write().splice_out.counterparty_node_id = v } }
+			Field { label: "User channel ID", help: HELP_USER_CHANNEL_ID, TextInput { value: form.user_channel_id.clone(), mono: true, oninput: move |v| forms.write().splice_out.user_channel_id = v } }
+			Field { label: "Peer node ID", help: HELP_COUNTERPARTY, TextInput { value: form.counterparty_node_id.clone(), mono: true, oninput: move |v| forms.write().splice_out.counterparty_node_id = v } }
 			div { class: "form-grid",
 				Field { label: "Amount ({unit})", help: HELP_SPLICE_OUT, preview,
 					TextInput { value: form.splice_amount_sats.clone(), oninput: move |v| forms.write().splice_out.splice_amount_sats = v }
@@ -915,7 +956,7 @@ pub fn UpdateConfigDialog() -> Element {
 	};
 	rsx! {
 		Modal {
-			title: "Update Channel Config",
+			title: "Update channel config",
 			sub: "Forwarding fees and CLTV delta for this channel",
 			icon: rsx! { Bubble { icon: "sliders", tone: "blue" } },
 			onclose: move |_| cancel(),
@@ -923,15 +964,15 @@ pub fn UpdateConfigDialog() -> Element {
 				button { class: "btn ghost", onclick: move |_| cancel(), "Cancel" }
 				button { class: "btn primary", disabled: pending, onclick: move |_| actions::update_channel_config(ctx),
 					if pending { Spinner {} }
-					"Update Config"
+					"Update config"
 				}
 			},
-			Field { label: "Channel ID", help: HELP_CHANNEL_ID, TextInput { value: form.user_channel_id.clone(), mono: true, oninput: move |v| forms.write().update_channel_config.user_channel_id = v } }
-			Field { label: "Counterparty", help: HELP_COUNTERPARTY, TextInput { value: form.counterparty_node_id.clone(), mono: true, oninput: move |v| forms.write().update_channel_config.counterparty_node_id = v } }
+			Field { label: "User channel ID", help: HELP_USER_CHANNEL_ID, TextInput { value: form.user_channel_id.clone(), mono: true, oninput: move |v| forms.write().update_channel_config.user_channel_id = v } }
+			Field { label: "Peer node ID", help: HELP_COUNTERPARTY, TextInput { value: form.counterparty_node_id.clone(), mono: true, oninput: move |v| forms.write().update_channel_config.counterparty_node_id = v } }
 			div { class: "form-grid",
-				Field { label: "Fee Proportional (millionths)", help: HELP_FEE_PROPORTIONAL, TextInput { value: form.forwarding_fee_proportional_millionths.clone(), oninput: move |v| forms.write().update_channel_config.forwarding_fee_proportional_millionths = v } }
-				Field { label: "Fee Base (msat)", help: HELP_FEE_BASE, TextInput { value: form.forwarding_fee_base_msat.clone(), oninput: move |v| forms.write().update_channel_config.forwarding_fee_base_msat = v } }
-				Field { label: "CLTV Expiry Delta", help: HELP_CLTV_EXPIRY_DELTA, TextInput { value: form.cltv_expiry_delta.clone(), oninput: move |v| forms.write().update_channel_config.cltv_expiry_delta = v } }
+				Field { label: "Proportional fee (ppm)", help: HELP_FEE_PROPORTIONAL, TextInput { value: form.forwarding_fee_proportional_millionths.clone(), oninput: move |v| forms.write().update_channel_config.forwarding_fee_proportional_millionths = v } }
+				Field { label: "Base fee (msat)", help: HELP_FEE_BASE, TextInput { value: form.forwarding_fee_base_msat.clone(), oninput: move |v| forms.write().update_channel_config.forwarding_fee_base_msat = v } }
+				Field { label: "CLTV expiry delta", help: HELP_CLTV_EXPIRY_DELTA, TextInput { value: form.cltv_expiry_delta.clone(), oninput: move |v| forms.write().update_channel_config.cltv_expiry_delta = v } }
 			}
 		}
 	}
@@ -946,8 +987,70 @@ mod tests {
 	#[component]
 	fn PanelHarness(sc: sc_rest_client::sc_protos::stable::StableChannelInfo) -> Element {
 		use crate::state::{Connection, Forms, Nav, Prefs};
-		use_context_provider(|| AppCtx::new(Connection::new(), Forms::default(), Nav::default(), Prefs::default(), false));
+		use_context_provider(|| AppCtx::new(Connection::signed_in("admin", &["admin"]), Forms::default(), Nav::default(), Prefs::default(), false));
 		rsx! { StableSection { sc, price: None } }
+	}
+
+	#[component]
+	fn ReadOnlyPanelHarness(sc: sc_rest_client::sc_protos::stable::StableChannelInfo) -> Element {
+		use crate::state::{Connection, Forms, Nav, Prefs};
+		let permissions = sc_rest_client::ldk_server_grpc::permissions::READONLY_PERMISSIONS;
+		use_context_provider(|| AppCtx::new(Connection::signed_in("viewer", &permissions), Forms::default(), Nav::default(), Prefs::default(), false));
+		rsx! { StableSection { sc, price: None } }
+	}
+
+	#[test]
+	fn a_read_only_session_cannot_set_or_edit_a_target_from_the_panel() {
+		use sc_rest_client::sc_protos::stable::StableChannelInfo;
+		for expected_usd in [0.0, 50.0] {
+			let sc = StableChannelInfo { user_channel_id: "u".into(), expected_usd, expected_msats: 50_000_000, ..Default::default() };
+			let mut dom = VirtualDom::new_with_props(ReadOnlyPanelHarness, ReadOnlyPanelHarnessProps { sc });
+			dom.rebuild_in_place();
+			let html = dioxus_ssr::render(&dom);
+			assert!(html.contains("Stable position"));
+			assert!(!html.contains("Set target") && !html.contains("Edit target"), "{expected_usd}: an edit button shows");
+		}
+	}
+
+	#[component]
+	fn ActionsHarness(permissions: Vec<&'static str>) -> Element {
+		use crate::state::{Connection, Forms, Nav, Prefs};
+		use sc_rest_client::ldk_server_grpc::{api::ListChannelsResponse, types::Channel};
+		let ctx = use_context_provider(|| AppCtx::new(Connection::signed_in("t", &permissions), Forms::default(), Nav::default(), Prefs::default(), false));
+		use_hook(move || {
+			let mut data = ctx.data;
+			data.write().channels = Some(ListChannelsResponse {
+				channels: vec![Channel { user_channel_id: "7".into(), channel_id: "c7".into(), counterparty_node_id: "02aa".into(), ..Default::default() }],
+			});
+		});
+		rsx! {
+			ChannelDrawer { user_channel_id: "7".to_string() }
+			CloseChannelDialog {}
+		}
+	}
+
+	fn actions_html(permissions: &[&'static str]) -> String {
+		let mut dom = VirtualDom::new_with_props(ActionsHarness, ActionsHarnessProps { permissions: permissions.to_vec() });
+		dom.rebuild_in_place();
+		dioxus_ssr::render(&dom)
+	}
+
+	#[test]
+	fn channel_actions_follow_the_tokens_permissions() {
+		let admin = actions_html(&["admin"]);
+		for text in ["Splice in</button>", "Splice out</button>", "Config</button>", "Close</button>", "Cooperative close", "Force close"] {
+			assert!(admin.contains(text), "admin lacks {text}");
+		}
+		let readonly = actions_html(&sc_rest_client::ldk_server_grpc::permissions::READONLY_PERMISSIONS);
+		for text in ["Splice in", "Splice out", "Config</button>", "Close</button>", "Cooperative close", "Force close"] {
+			assert!(!readonly.contains(text), "read-only shows {text}");
+		}
+		let manage = actions_html(&["channels:read", "channels:manage"]);
+		assert!(manage.contains("Splice in</button>") && manage.contains("Config</button>") && manage.contains("Cooperative close"));
+		assert!(!manage.contains("Splice out"), "splice out sends money (payments:send)");
+		assert!(!manage.contains("Force close"), "force close needs channels:force_close");
+		let force = actions_html(&["channels:read", "channels:force_close"]);
+		assert!(force.contains("Close</button>") && force.contains("Force close") && !force.contains("Cooperative close"));
 	}
 
 	#[test]
@@ -1022,13 +1125,13 @@ mod tests {
 	fn the_stable_panel_explains_drift_and_when_a_settlement_happens() {
 		let due = panel_html(49_700);
 		assert!(due.contains(">\u{2212}$0.30<") && !due.contains("from the"), "drift reads as just the signed dollars");
-		for text in ["Settles at", "±$0.25", "Settlement due", "LSP sends ≈ 300 sats to the user"] {
+		for text in ["Settles at", "±$0.25", "Stability payment due", "LSP sends ≈ 300 sats to the user"] {
 			assert!(due.contains(text), "missing {text}");
 		}
 		let above = panel_html(50_400);
 		assert!(above.contains("user&#39;s wallet sends ≈ 400 sats"), "above target the user pays (SSR escapes the apostrophe)");
 		let calm = panel_html(49_900);
-		assert!(calm.contains("No settlement yet · $0.15 more drift before one"));
+		assert!(calm.contains("No stability payment yet · $0.15 more drift before one"));
 	}
 
 	/// A queue row on channel `uid`, updated just now.
@@ -1047,14 +1150,12 @@ mod tests {
 	/// The Channels page with channels on `uids` (None: the list has not loaded) and the given queue rows.
 	#[component]
 	fn ChannelsHarness(uids: Option<Vec<String>>, rows: Vec<QueuedSpliceInfo>) -> Element {
-		use crate::state::{Connection, ConnectionStatus, Forms, Nav, Prefs};
+		use crate::state::{Connection, Forms, Nav, Prefs};
 		use sc_rest_client::ldk_server_grpc::api::ListChannelsResponse;
 		use sc_rest_client::ldk_server_grpc::types::Channel;
 		use sc_rest_client::sc_protos::stable::ListQueuedSplicesResponse;
 		let ctx = use_context_provider(|| {
-			let mut conn = Connection::new();
-			conn.status = ConnectionStatus::Connected;
-			AppCtx::new(conn, Forms::default(), Nav::default(), Prefs::default(), false)
+			AppCtx::new(Connection::signed_in("ops", &["admin"]), Forms::default(), Nav::default(), Prefs::default(), false)
 		});
 		use_hook(move || {
 			let channel = |uid: &String| Channel {

@@ -14,8 +14,8 @@ pub fn Logs() -> Element {
 	rsx! {
 		div { class: "seg", style: "align-self: flex-start;",
 			SegBtn { active: active == LogsTab::Audit, onclick: move |_| nav.write().logs_tab = LogsTab::Audit, "Audit" }
-			SegBtn { active: active == LogsTab::ChannelLedger, onclick: move |_| nav.write().logs_tab = LogsTab::ChannelLedger, "Channel History" }
-			SegBtn { active: active == LogsTab::Ldk, onclick: move |_| nav.write().logs_tab = LogsTab::Ldk, "LDK server" }
+			SegBtn { active: active == LogsTab::ChannelLedger, onclick: move |_| nav.write().logs_tab = LogsTab::ChannelLedger, "Channel history" }
+			SegBtn { active: active == LogsTab::Ldk, onclick: move |_| nav.write().logs_tab = LogsTab::Ldk, "LDK Server" }
 		}
 		match active {
 			LogsTab::Audit => rsx! { crate::ui::audit_log::AuditLog {} },

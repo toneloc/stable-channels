@@ -174,21 +174,56 @@ pub fn download_text(file_name: &str, mime: &str, content: &str) -> Result<(), S
 	Ok(())
 }
 
-/// Fetch the same-origin API key the serving container publishes at /setup/key.txt.
+/// What the setup page answered when asked for the GUI token.
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SetupToken {
+	/// A token to log in with.
+	Found(String),
+	/// The page is closed to this browser (not logged into Umbrel, or not on Umbrel): stop asking.
+	Refused,
+	/// No usable answer yet; ask again later.
+	Unavailable,
+}
+
+/// Longest token the setup page may hand over, in hex characters.
+#[cfg(any(target_arch = "wasm32", test))]
+const MAX_SETUP_TOKEN_HEX: usize = 8192;
+
+/// Reads the setup page's answer: 401/403/404 refuse for good, otherwise a non-empty hex token up to 8192 characters.
+#[cfg(any(target_arch = "wasm32", test))]
+pub fn read_setup_answer(status: u16, body: &str) -> SetupToken {
+	if matches!(status, 401 | 403 | 404) {
+		return SetupToken::Refused;
+	}
+	let token = body.trim();
+	let is_token = (200..300).contains(&status)
+		&& !token.is_empty()
+		&& token.len() <= MAX_SETUP_TOKEN_HEX
+		&& token.bytes().all(|b| b.is_ascii_hexdigit());
+	if is_token {
+		SetupToken::Found(token.to_string())
+	} else {
+		SetupToken::Unavailable
+	}
+}
+
+/// Fetch the same-origin GUI token the serving container publishes at /setup/token.txt.
 #[cfg(target_arch = "wasm32")]
-pub async fn fetch_setup_key() -> Option<String> {
+pub async fn fetch_setup_token() -> SetupToken {
 	use wasm_bindgen::JsCast;
 
-	let win = web_sys::window()?;
-	let resp = wasm_bindgen_futures::JsFuture::from(win.fetch_with_str("/setup/key.txt")).await.ok()?;
-	let resp = resp.dyn_into::<web_sys::Response>().ok()?;
+	let Some(win) = web_sys::window() else { return SetupToken::Unavailable };
+	let Ok(resp) = wasm_bindgen_futures::JsFuture::from(win.fetch_with_str("/setup/token.txt")).await else {
+		return SetupToken::Unavailable;
+	};
+	let Ok(resp) = resp.dyn_into::<web_sys::Response>() else { return SetupToken::Unavailable };
 	if !resp.ok() {
-		return None;
+		return read_setup_answer(resp.status(), "");
 	}
-	let text = resp.text().ok()?;
-	let text = wasm_bindgen_futures::JsFuture::from(text).await.ok()?;
-	let key = text.as_string()?.trim().to_string();
-	(key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit())).then_some(key)
+	let Ok(text) = resp.text() else { return SetupToken::Unavailable };
+	let body = wasm_bindgen_futures::JsFuture::from(text).await.ok().and_then(|t| t.as_string()).unwrap_or_default();
+	read_setup_answer(resp.status(), &body)
 }
 
 /// Show a crash notice in the page when the app panics after mounting.
@@ -205,4 +240,29 @@ pub fn install_panic_hook() {
 			);
 		}
 	}));
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn the_setup_page_hands_over_any_hex_token_up_to_8192_characters() {
+		let token = "0201".repeat(60);
+		assert_eq!(read_setup_answer(200, &format!("{token}\n")), SetupToken::Found(token));
+		let upper = "AB".repeat(4096);
+		assert_eq!(read_setup_answer(200, &upper), SetupToken::Found(upper.clone()));
+		assert_eq!(read_setup_answer(200, &"ab".repeat(4097)), SetupToken::Unavailable, "longer than 8192");
+		for body in ["", "  \n", "not hex", "<html></html>"] {
+			assert_eq!(read_setup_answer(200, body), SetupToken::Unavailable, "{body:?}");
+		}
+	}
+
+	#[test]
+	fn a_refused_setup_page_stops_the_polling() {
+		for status in [401, 403, 404] {
+			assert_eq!(read_setup_answer(status, "0201"), SetupToken::Refused, "{status}");
+		}
+		assert_eq!(read_setup_answer(502, ""), SetupToken::Unavailable, "a gateway hiccup is retried");
+	}
 }

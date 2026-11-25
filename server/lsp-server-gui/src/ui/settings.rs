@@ -7,13 +7,12 @@ use crate::config::ChainSourceType;
 #[cfg(target_arch = "wasm32")]
 use crate::state::Dialog;
 use crate::state::{AppCtx, ConnectionStatus, DisplayUnit, Theme};
-use crate::ui::widgets::{Card, Check, Field, Icon, Modal, SegBtn, TextArea, TextInput};
+use crate::ui::widgets::{Card, Check, Field, Icon, Modal, SegBtn, Spinner, TextArea, TextInput};
 use crate::ui::close_dialog;
 #[cfg(target_arch = "wasm32")]
 use crate::ui::open_dialog;
 
-const HINT_API_KEY: &str =
-	"Auto-generated at <storage_dir>/<network>/api_key. Get hex: xxd -p <path>/api_key | tr -d '\\n'";
+const HINT_TOKEN: &str = "The first admin token is in <storage_dir>/<network>/gui.macaroon. A token with fewer permissions sees less.";
 
 #[component]
 pub fn Settings() -> Element {
@@ -51,7 +50,7 @@ pub fn Settings() -> Element {
 						Check {
 							checked: prefs.auto_refresh,
 							label: "Auto-refresh every 30 seconds",
-							help: "Refreshes only what the current page shows. Payments stop refreshing once more than one page is loaded, so paging is never undone. Followed logs refresh every 10 seconds.",
+							help: "Refreshes only the current page. Payments stop refreshing once more than one page is loaded. Followed logs refresh every 10 seconds.",
 							onchange: move |v| prefs_signal.write().auto_refresh = v,
 						}
 					}
@@ -73,7 +72,10 @@ fn apply_config(ctx: AppCtx, gui_config: GuiConfig, path: Option<String>) {
 	let mut conn = ctx.conn;
 	let mut c = conn.write();
 	c.server_url = gui_config.server_url;
-	c.api_key = gui_config.api_key;
+	// A pasted config can't reach the daemon's files, so keep a typed token rather than blank it.
+	if !gui_config.token.is_empty() {
+		c.token = gui_config.token;
+	}
 	c.network = gui_config.network;
 	if let Some(path) = path {
 		c.tls_cert_path = gui_config.tls_cert_path;
@@ -90,7 +92,7 @@ fn ConnectionCard() -> Element {
 	let mut conn = ctx.conn;
 	let c = conn.read();
 	let server_url = c.server_url.clone();
-	let api_key = c.api_key.clone();
+	let token = c.token.clone();
 	// TLS cert path is only needed on native (browser handles TLS)
 	#[cfg(not(target_arch = "wasm32"))]
 	let cert = cert_field(ctx, c.tls_cert_path.clone());
@@ -106,14 +108,15 @@ fn ConnectionCard() -> Element {
 		ConnectionStatus::Error(e) => ("danger", e.clone()),
 	};
 	let file_busy = ctx.busy(crate::state::Op::FileDialog);
+	let logging_in = ctx.busy(crate::state::Op::Login);
 
 	rsx! {
-		Card { title: "Connection", sub: "Stable Channels LSP daemon (REST over TLS, HMAC-authenticated)",
+		Card { title: "Connection", sub: "Log in to your Stable Channels LSP",
 			div { class: "stack", style: "gap: 16px;",
-				div { class: "toggle-row",
+				div { class: "toggle-row", style: "flex-wrap: wrap;",
 					div { class: "row nowrap", style: "gap: 10px; min-width: 0;",
 						span { class: "dot {tone}" }
-						span { class: "strong break", "{label}" }
+						span { class: "strong", style: "overflow-wrap: anywhere;", "{label}" }
 					}
 					if let Some(path) = config_path {
 						span { class: "small muted break", "Loaded from: {path}" }
@@ -122,17 +125,19 @@ fn ConnectionCard() -> Element {
 				Field { label: "Server URL",
 					TextInput { value: server_url, mono: true, placeholder: "localhost:3002", oninput: move |v| conn.write().server_url = v }
 				}
-				Field { label: "API Key", hint: HINT_API_KEY,
-					TextInput { value: api_key, mono: true, placeholder: "64 hex characters", oninput: move |v| conn.write().api_key = v }
+				Field { label: "Token", hint: HINT_TOKEN,
+					TextInput { value: token, mono: true, password: true, placeholder: "hex token", oninput: move |v| conn.write().token = v }
 				}
 				{cert}
 				div { class: "row",
 					if connected {
 						button { class: "btn danger", onclick: move |_| actions::disconnect(ctx), Icon { name: "power", size: 16 } "Disconnect" }
 					} else {
-						button { class: "btn primary", onclick: move |_| actions::connect(ctx), Icon { name: "plug", size: 16 } "Connect" }
+						button { class: "btn primary", disabled: logging_in, onclick: move |_| actions::connect(ctx),
+							if logging_in { Spinner {} "Logging in…" } else { Icon { name: "plug", size: 16 } "Connect" }
+						}
 					}
-					button { class: "btn", disabled: file_busy, onclick: move |_| load_config(ctx), Icon { name: "upload", size: 16 } "Load Config" }
+					button { class: "btn", disabled: file_busy, onclick: move |_| load_config(ctx), Icon { name: "upload", size: 16 } "Load config" }
 				}
 			}
 		}
@@ -152,10 +157,10 @@ fn cert_field(ctx: AppCtx, value: String) -> Element {
 		});
 	};
 	rsx! {
-		Field { label: "TLS Cert Path", hint: "The daemon's self-signed certificate, <storage_dir>/tls.crt",
+		Field { label: "TLS certificate", hint: "The LSP's self-signed certificate, at <storage_dir>/tls.crt",
 			div { class: "row nowrap",
 				div { class: "grow", TextInput { value, mono: true, placeholder: "/path/to/tls.crt", oninput: move |v| conn.write().tls_cert_path = v } }
-				button { class: "btn", disabled: ctx.busy(crate::state::Op::FileDialog), onclick: browse, "Browse..." }
+				button { class: "btn", disabled: ctx.busy(crate::state::Op::FileDialog), onclick: browse, "Browse…" }
 			}
 		}
 	}
@@ -188,7 +193,7 @@ fn load_config(ctx: AppCtx) {
 				apply_config(ctx, gui_config, Some(path.display().to_string()));
 				ctx.success(format!("Config loaded from {}", path.display()));
 			},
-			Err(e) => ctx.error(format!("Failed to load config: {}", e)),
+			Err(e) => ctx.error(format!("Couldn't load config. {}", e)),
 		}
 	});
 }
@@ -213,17 +218,17 @@ pub fn LoadConfigDialog() -> Element {
 		match config::parse_config_from_str(&text) {
 			Ok(gui_config) => {
 				apply_config(ctx, gui_config, None);
-				ctx.success("Config loaded successfully");
+				ctx.success("Config loaded");
 				view.write().config_paste_text.clear();
 				close_dialog(ctx);
 			},
-			Err(e) => ctx.error(format!("Failed to parse config: {}", e)),
+			Err(e) => ctx.error(format!("Couldn't load config. {}", e)),
 		}
 	};
 	rsx! {
 		Modal {
-			title: "Load Config",
-			sub: "Paste your sc-config.toml content below",
+			title: "Load config",
+			sub: "Paste the contents of sc-config.toml",
 			wide: true,
 			onclose: move |_| {
 				view.write().config_paste_text.clear();
@@ -257,10 +262,10 @@ fn ChainSourceCard() -> Element {
 					conn.write().chain_source = chain_source;
 					ctx.success(format!("Config saved to {}", path));
 				},
-				Err(e) => ctx.error(format!("Failed to save: {}", e)),
+				Err(e) => ctx.error(format!("Couldn't save config. {}", e)),
 			}
 		} else {
-			ctx.error("No config file loaded. Use 'Save As...'");
+			ctx.error("No config file loaded. Use \"Save as\" instead");
 		}
 	};
 	let save_as = move |_| {
@@ -293,7 +298,7 @@ fn ChainSourceCard() -> Element {
 					drop(c);
 					ctx.success(format!("Config saved to {}", path.display()));
 				},
-				Err(e) => ctx.error(format!("Failed to save: {}", e)),
+				Err(e) => ctx.error(format!("Couldn't save config. {}", e)),
 			}
 		});
 	};
@@ -305,9 +310,9 @@ fn ChainSourceCard() -> Element {
 	};
 
 	rsx! {
-		Card { title: "Chain Source", sub: "Stored in the daemon config file",
+		Card { title: "Chain source", sub: "Stored in the LSP's config file",
 			details { class: "disclosure",
-				summary { Icon { name: "chevron-right", size: 14 } "Chain Source Settings" }
+				summary { Icon { name: "chevron-right", size: 14 } "Chain source settings" }
 				div { class: "body stack", style: "gap: 14px;",
 					Field { label: "Type",
 						select {
@@ -342,30 +347,30 @@ fn ChainSourceCard() -> Element {
 						ChainSourceType::None => rsx! { span { class: "muted", "No chain source selected" } },
 						ChainSourceType::Bitcoind => rsx! {
 							div { class: "form-grid",
-								Field { label: "RPC Address", TextInput { value: form.btc_rpc_address.clone(), mono: true, oninput: move |v| forms.write().chain_source.btc_rpc_address = v } }
-								Field { label: "RPC User", TextInput { value: form.btc_rpc_user.clone(), mono: true, oninput: move |v| forms.write().chain_source.btc_rpc_user = v } }
-								Field { label: "RPC Password", TextInput { value: form.btc_rpc_password.clone(), password: true, oninput: move |v| forms.write().chain_source.btc_rpc_password = v } }
+								Field { label: "RPC address", TextInput { value: form.btc_rpc_address.clone(), mono: true, oninput: move |v| forms.write().chain_source.btc_rpc_address = v } }
+								Field { label: "RPC user", TextInput { value: form.btc_rpc_user.clone(), mono: true, oninput: move |v| forms.write().chain_source.btc_rpc_user = v } }
+								Field { label: "RPC password", TextInput { value: form.btc_rpc_password.clone(), password: true, oninput: move |v| forms.write().chain_source.btc_rpc_password = v } }
 							}
 						},
 						ChainSourceType::Electrum => rsx! {
-							Field { label: "Server URL", hint: "e.g., ssl://electrum.blockstream.info:50002",
+							Field { label: "Server URL", hint: "For example, ssl://electrum.blockstream.info:50002",
 								TextInput { value: form.server_url.clone(), mono: true, oninput: move |v| forms.write().chain_source.server_url = v }
 							}
 						},
 						ChainSourceType::Esplora => rsx! {
-							Field { label: "Server URL", hint: "e.g., https://mempool.space/api",
+							Field { label: "Server URL", hint: "For example, https://mempool.space/api",
 								TextInput { value: form.server_url.clone(), mono: true, oninput: move |v| forms.write().chain_source.server_url = v }
 							}
 						},
 					}
 					div { class: "row",
 						button { class: "btn primary", onclick: save, "Save" }
-						button { class: "btn", disabled: file_busy, onclick: save_as, "Save As..." }
+						button { class: "btn", disabled: file_busy, onclick: save_as, "Save as…" }
 						if let Some(path) = config_path {
 							span { class: "small faint break", "({path})" }
 						}
 					}
-					div { class: "notice", Icon { name: "info", size: 16 } span { em { "Note: Chain source changes require server restart" } } }
+					div { class: "notice", Icon { name: "info", size: 16 } span { em { "Chain source changes take effect after a restart" } } }
 				}
 			}
 		}

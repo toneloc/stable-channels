@@ -4856,13 +4856,12 @@ dependencies = [
 [[package]]
 name = "ldk-server-client"
 version = "0.1.0"
-source = "git+https://github.com/lightningdevkit/ldk-server?rev=bd95e187b0c08b3fb90fc42a96f0f8a2b6773495#bd95e187b0c08b3fb90fc42a96f0f8a2b6773495"
+source = "git+https://github.com/lightningdevkit/ldk-server?rev=aa2d60f51ebacc7edd5dbdfb90b53a9c73ee0bd3#aa2d60f51ebacc7edd5dbdfb90b53a9c73ee0bd3"
 dependencies = [
- "bitcoin_hashes",
- "hex-conservative",
  "hyper 0.14.32",
  "hyper-rustls 0.24.2",
  "ldk-server-grpc",
+ "ldk-server-macaroons",
  "prost",
  "reqwest 0.11.27",
  "rustls 0.21.12",
@@ -4874,7 +4873,7 @@ dependencies = [
 [[package]]
 name = "ldk-server-grpc"
 version = "0.1.0"
-source = "git+https://github.com/lightningdevkit/ldk-server?rev=bd95e187b0c08b3fb90fc42a96f0f8a2b6773495#bd95e187b0c08b3fb90fc42a96f0f8a2b6773495"
+source = "git+https://github.com/lightningdevkit/ldk-server?rev=aa2d60f51ebacc7edd5dbdfb90b53a9c73ee0bd3#aa2d60f51ebacc7edd5dbdfb90b53a9c73ee0bd3"
 dependencies = [
  "bytes",
  "http 1.4.0",
@@ -4883,6 +4882,15 @@ dependencies = [
  "prost-build",
  "serde",
  "tokio",
+]
+
+[[package]]
+name = "ldk-server-macaroons"
+version = "0.1.0"
+source = "git+https://github.com/lightningdevkit/ldk-server?rev=aa2d60f51ebacc7edd5dbdfb90b53a9c73ee0bd3#aa2d60f51ebacc7edd5dbdfb90b53a9c73ee0bd3"
+dependencies = [
+ "bitcoin_hashes",
+ "hex-conservative",
 ]
 
 [[package]]
@@ -7582,6 +7590,7 @@ dependencies = [
 name = "sc-protos"
 version = "0.1.0"
 dependencies = [
+ "bitcoin_hashes",
  "prost",
  "serde",
 ]
@@ -7590,7 +7599,9 @@ dependencies = [
 name = "sc-rest-client"
 version = "0.1.0"
 dependencies = [
- "bitcoin_hashes",
+ "futures-executor",
+ "futures-util",
+ "getrandom 0.2.17",
  "js-sys",
  "ldk-server-grpc",
  "prost",

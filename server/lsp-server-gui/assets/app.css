@@ -142,6 +142,8 @@ html, body {
 	grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
 	background: var(--bg);
 	color: var(--text);
+	/* A word longer than its line (an id, hash or URL) breaks instead of running out of its box. */
+	overflow-wrap: break-word;
 	font-family: var(--font);
 	font-size: 14px;
 	line-height: 1.5;
@@ -465,8 +467,11 @@ html, body {
 	flex-wrap: wrap;
 }
 
+/* Keeps the items on one line. The bare `.nowrap` above also matches this element and white-space is inherited,
+   so without the reset no text inside could wrap: status messages, tokens and titles ran out of their box. */
 .row.nowrap {
 	flex-wrap: nowrap;
+	white-space: normal;
 }
 
 .row.between {
@@ -1096,6 +1101,128 @@ html, body {
 	font-variant-numeric: tabular-nums;
 }
 
+.field-preview.error {
+	color: var(--red-text);
+}
+
+/* Date picker drawn by the app: native date inputs differ per webview and are broken in some. */
+.cal {
+	align-self: flex-start;
+	display: flex;
+	flex-wrap: wrap;
+	align-items: flex-start;
+	gap: 14px 24px;
+	max-width: 100%;
+	padding: 12px;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-ctl);
+	background: var(--surface-2);
+}
+
+/* Fixed widths so the time sits beside the month, and wraps under it on a narrow window. */
+.cal-month {
+	width: 266px;
+	max-width: 100%;
+}
+
+.cal-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	margin-bottom: 6px;
+}
+
+.cal-head .icon-btn:hover {
+	background: var(--surface-3);
+}
+
+.cal-head .icon-btn:disabled {
+	opacity: 0.35;
+	cursor: default;
+	background: transparent;
+}
+
+.cal-title {
+	font-size: 13px;
+	font-weight: 600;
+}
+
+.cal-grid {
+	display: grid;
+	grid-template-columns: repeat(7, minmax(0, 1fr));
+	gap: 2px;
+}
+
+.cal-wd {
+	padding: 4px 0;
+	text-align: center;
+	font-size: 11px;
+	font-weight: 600;
+	color: var(--text-3);
+}
+
+.cal-day,
+.cal-slot {
+	height: 32px;
+	border: 0;
+	border-radius: 7px;
+	background: transparent;
+	color: var(--text);
+	font: inherit;
+	font-size: 13px;
+	font-variant-numeric: tabular-nums;
+	cursor: pointer;
+}
+
+.cal-day:hover:not(:disabled),
+.cal-slot:hover {
+	background: var(--surface-3);
+}
+
+.cal-day.today {
+	box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+
+.cal-day.on,
+.cal-day.on:hover,
+.cal-slot.on,
+.cal-slot.on:hover {
+	background: var(--blue);
+	color: #ffffff;
+	font-weight: 600;
+}
+
+.cal-day:disabled {
+	color: var(--text-3);
+	opacity: 0.45;
+	cursor: default;
+}
+
+.cal-time {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	width: 228px;
+	max-width: 100%;
+}
+
+.cal-label {
+	padding: 4px 0 2px;
+	font-size: 11px;
+	font-weight: 600;
+	color: var(--text-3);
+}
+
+.cal-slots {
+	display: grid;
+	grid-template-columns: repeat(6, minmax(0, 1fr));
+	gap: 2px;
+}
+
+.cal-slot {
+	height: 30px;
+}
+
 .form-grid {
 	display: grid;
 	grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -1412,6 +1539,17 @@ details.status-guide {
 	align-items: center;
 	gap: 2px;
 	max-width: 100%;
+	min-width: 0;
+}
+
+/* In a narrow box the id wraps instead of pushing its copy button out; tables still size to the whole id. */
+.id > span:first-child {
+	min-width: 0;
+	overflow-wrap: break-word;
+}
+
+.id > .icon-btn {
+	flex: none;
 }
 
 .id .mono {
@@ -1767,6 +1905,18 @@ details.status-guide {
 
 .toast.error {
 	border-color: color-mix(in srgb, var(--red) 45%, transparent);
+}
+
+/* An error toast stays until dismissed, so while one shows, an open dialog or side panel ends above it instead of
+   hiding its buttons. A centred dialog this tall ends 84px above the bottom; shorter ones do not move. Success
+   toasts fade on their own and move nothing. */
+.app:has(> .toast.error) .modal {
+	max-height: calc(100vh - 168px);
+}
+
+.app:has(> .toast.error) .drawer {
+	bottom: 84px;
+	border-bottom: 1px solid var(--border-strong);
 }
 
 @keyframes toast-in {

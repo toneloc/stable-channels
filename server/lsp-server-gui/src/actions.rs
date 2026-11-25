@@ -13,45 +13,160 @@ use sc_rest_client::ldk_server_grpc::api::{
 	ForceCloseChannelRequest, GetBalancesRequest, GetNodeInfoRequest, GetPaymentDetailsRequest,
 	GraphGetChannelRequest, GraphGetNodeRequest, GraphListChannelsRequest, GraphListNodesRequest,
 	ListChannelsRequest, ListForwardedPaymentsRequest, ListPaymentsRequest, ListPaymentsResponse,
-	ListPeersRequest, OnchainReceiveRequest, OnchainSendRequest, OpenChannelRequest,
-	SignMessageRequest, SpliceOutRequest, SpontaneousSendRequest,
+	ListPeersRequest, OnchainReceiveRequest, OnchainSendRequest, OnchainSendResponse, OpenChannelRequest,
+	SignMessageRequest, SpliceOutRequest, SpliceOutResponse, SpontaneousSendRequest,
 	UpdateChannelConfigRequest, VerifySignatureRequest, AllFunds, onchain_send_request, open_channel_request,
+};
+use sc_rest_client::ldk_server_grpc::endpoints::{
+	GET_BALANCES_PATH, GET_NODE_INFO_PATH, GET_PAYMENT_DETAILS_PATH,
+	GRAPH_GET_CHANNEL_PATH, GRAPH_GET_NODE_PATH, GRAPH_LIST_CHANNELS_PATH, GRAPH_LIST_NODES_PATH,
+	LIST_CHANNELS_PATH, LIST_FORWARDED_PAYMENTS_PATH, LIST_PAYMENTS_PATH, LIST_PEERS_PATH,
 };
 use sc_rest_client::ldk_server_grpc::types::{
 	bolt11_invoice_description, Bolt11InvoiceDescription, ChannelConfig,
 };
-use sc_rest_client::sc_protos::revenue::{GetRevenueRequest, RefundTradeFeeRequest};
+use sc_rest_client::error::LspRestError;
+use sc_rest_client::error::LspRestErrorCode::{AuthError, InternalError};
+use sc_rest_client::sc_protos::access::{
+	CreateTokenRequest, CreateTokenResponse, ListTokensRequest, RevokeTokenRequest, CREATE_TOKEN_PATH, LIST_TOKENS_PATH,
+	REVOKE_TOKEN_PATH,
+};
+use sc_rest_client::sc_protos::revenue::{GetRevenueRequest, RefundTradeFeeRequest, GET_REVENUE_PATH};
 use sc_rest_client::sc_protos::stable::{
 	CancelQueuedSpliceRequest, CancelQueuedSpliceResponse, EditStableChannelRequest, GetPriceRequest,
 	ListChannelLedgerEventsRequest, ListChannelLedgerEventsResponse, ListQueuedSplicesRequest,
 	ListQueuedSplicesResponse, ListSettlementPaymentsRequest, ListStableChannelsRequest, LogRequest,
-	QueueSpliceInRequest, ReleaseStabilityPaymentRequest,
+	QueueSpliceInRequest, ReleaseStabilityPaymentRequest, ReleaseStabilityPaymentResponse, AUDIT_LOG_PATH,
+	GET_PRICE_PATH, LDK_LOG_PATH, LIST_CHANNEL_LEDGER_EVENTS_PATH, LIST_QUEUED_SPLICES_PATH,
+	LIST_SETTLEMENT_PAYMENTS_PATH, LIST_STABLE_CHANNELS_PATH,
 };
 
 use crate::ledger::{checked_next_cursor, merge_ledger_events};
 use crate::state::{
-	ActiveTab, AppCtx, ChannelLedgerForm, ChannelLedgerRequestKey, ConnectionStatus, Dialog,
-	Drawer, LogsTab, Op, QueuedRelease, SendKind, SettlementKind,
+	AccessForm, ActiveTab, AppCtx, ChannelLedgerForm, ChannelLedgerRequestKey, ConnectionStatus, CreatedToken, Data, Dialog,
+	Drawer, LogsTab, Op, QueuedRelease, RevokeTokenForm, SendKind, SettlementKind,
 };
+
+/// A failed request as the operator sees it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Failure {
+	/// Show this; the session stays.
+	Show(String),
+	/// The daemon will not take this token (refused, revoked, or too old for logins): back to Settings with this reason.
+	SignedOut(String),
+}
+
+impl From<LspRestError> for Failure {
+	fn from(e: LspRestError) -> Self {
+		explain(&e, false)
+	}
+}
+
+impl From<String> for Failure {
+	fn from(text: String) -> Self {
+		Failure::Show(text)
+	}
+}
+
+/// What the daemon said when Login refused the token itself, rather than a passing limit.
+const TOKEN_REFUSALS: [&str; 2] =
+	["LDK Server refused this token (wrong, revoked or expired)", "Tokens limited to one method can't log into the GUI"];
+
+/// How a daemon from before token logins refuses /Login: its api-key check answers every request before routing.
+const OLD_DAEMON_REFUSAL: &str = "Invalid X-Auth header";
+
+/// How the operator sees a daemon error; `at_login` is true for the Login call, where any refusal signs out.
+pub fn explain(e: &LspRestError, at_login: bool) -> Failure {
+	let message = e.message.as_str();
+	// A daemon without /Login refuses it at its api-key check, or answers an empty-body 404.
+	let not_found = e.error_code == InternalError && message.starts_with("HTTP 404");
+	let old_daemon = e.error_code == AuthError && message == OLD_DAEMON_REFUSAL;
+	if at_login && (not_found || old_daemon) {
+		return Failure::SignedOut("This LSP is too old for token logins. Update it".to_string());
+	}
+	if e.error_code == AuthError && message.starts_with("request too old") {
+		return Failure::Show(
+			"The LSP refused the request as too old. Check that this computer's clock is within a minute of the LSP's".to_string(),
+		);
+	}
+	let refused = e.error_code == AuthError
+		&& (at_login || message == "token revoked or expired" || TOKEN_REFUSALS.contains(&message));
+	if refused {
+		return Failure::SignedOut(message.to_string());
+	}
+	// A login that could not reach the daemon or LDK Server says so plainly; the token was not judged.
+	if at_login {
+		return Failure::Show(message.to_string());
+	}
+	Failure::Show(e.to_string())
+}
+
+/// True while `client` is still the logged-in client, so a reply from an ended session is dropped.
+fn same_session(ctx: AppCtx, client: &Option<Arc<LspRestClient>>) -> bool {
+	match (ctx.client(), client) {
+		(Some(now), Some(then)) => Arc::ptr_eq(&now, then),
+		_ => false,
+	}
+}
+
+/// Forget everything loaded for the last session, so another token never sees it.
+fn clear_data(ctx: AppCtx) {
+	invalidate_channel_ledger(ctx);
+	// A token shown once must not outlive its session.
+	let mut forms = ctx.forms;
+	forms.write().access = AccessForm::default();
+	let mut data = ctx.data;
+	*data.write() = Data::default();
+	// A Release ticked for one session's call must not carry over to the next.
+	let mut view = ctx.view;
+	view.write().close_release();
+}
+
+/// The daemon refused the token: drop the session and land on Settings with its reason.
+fn end_session(ctx: AppCtx, reason: String) {
+	let mut conn = ctx.conn;
+	{
+		let mut c = conn.write();
+		c.client = None;
+		c.status = ConnectionStatus::Error(reason.clone());
+	}
+	clear_data(ctx);
+	// An open dialog, a confirm step above all, closes with its session; its form survives.
+	close_dialog(ctx);
+	let mut nav = ctx.nav;
+	nav.write().active_tab = ActiveTab::Settings;
+	ctx.error(reason);
+}
 
 /// Run `fut` for `op` unless it is already running; `on_ok` applies the result and errors toast.
 fn run<T, E, F, H>(ctx: AppCtx, op: Op, fut: F, on_ok: H)
 where
 	T: 'static,
-	E: std::fmt::Display + 'static,
+	E: Into<Failure> + 'static,
 	F: Future<Output = Result<T, E>> + 'static,
 	H: FnOnce(AppCtx, T) + 'static,
+{
+	run_with(ctx, op, fut, move |ctx, value, _| on_ok(ctx, value), |ctx, e| ctx.error(e));
+}
+
+/// `run` for an action whose `on_ok` must know whether the session that sent it is still the logged-in one.
+fn run_action<T, E, F, H>(ctx: AppCtx, op: Op, fut: F, on_ok: H)
+where
+	T: 'static,
+	E: Into<Failure> + 'static,
+	F: Future<Output = Result<T, E>> + 'static,
+	H: FnOnce(AppCtx, T, bool) + 'static,
 {
 	run_with(ctx, op, fut, on_ok, |ctx, e| ctx.error(e));
 }
 
-/// `run` with a custom error path, for background fetches whose failure is shown in place.
+/// `run` with a custom error path; a refused token ends the session, and only a [`Op::must_report`] reply outlives it, with `on_ok` told so.
 fn run_with<T, E, F, H, G>(ctx: AppCtx, op: Op, fut: F, on_ok: H, on_err: G)
 where
 	T: 'static,
-	E: std::fmt::Display + 'static,
+	E: Into<Failure> + 'static,
 	F: Future<Output = Result<T, E>> + 'static,
-	H: FnOnce(AppCtx, T) + 'static,
+	H: FnOnce(AppCtx, T, bool) + 'static,
 	G: FnOnce(AppCtx, String) + 'static,
 {
 	let mut pending = ctx.pending;
@@ -59,17 +174,29 @@ where
 		return;
 	}
 	pending.write().insert(op);
+	let started = ctx.client();
 	// Not scope-bound: the request finishes even if its tab or dialog unmounts.
 	spawn_forever(async move {
 		let result = fut.await;
 		let mut pending = ctx.pending;
 		pending.write().remove(op);
+		let current = same_session(ctx, &started);
+		// An action's outcome is always shown, or the operator would send it again; any other reply from an ended session is dropped.
+		if !current && !op.must_report() {
+			return;
+		}
 		match result {
 			Ok(value) => {
-				mark_fetched(ctx, op);
-				on_ok(ctx, value)
+				if current {
+					mark_fetched(ctx, op);
+				}
+				on_ok(ctx, value, current)
 			},
-			Err(e) => on_err(ctx, e.to_string()),
+			Err(e) => match e.into() {
+				Failure::SignedOut(reason) if current => end_session(ctx, reason),
+				// The session already ended or was replaced: report the refusal without ending the login that took over.
+				Failure::SignedOut(text) | Failure::Show(text) => on_err(ctx, text),
+			},
 		}
 	});
 }
@@ -88,97 +215,137 @@ fn client(ctx: AppCtx) -> Option<Arc<LspRestClient>> {
 	ctx.client()
 }
 
-pub fn connect(ctx: AppCtx) {
+/// The logged-in client when its token may call `route`, so fetches skip what the token can't read.
+fn client_for(ctx: AppCtx, route: &str) -> Option<Arc<LspRestClient>> {
+	if ctx.may_call(route) {
+		client(ctx)
+	} else {
+		None
+	}
+}
+
+/// Builds a client from the Settings fields; a missing field or unreadable certificate is reported here.
+fn build_client(ctx: AppCtx) -> Option<LspRestClient> {
 	let mut conn = ctx.conn;
-	let (url, api_key) = {
+	let (url, token) = {
 		let c = conn.peek();
-		(c.server_url.trim().to_string(), c.api_key.clone())
+		(c.server_url.trim().to_string(), c.token.trim().to_string())
 	};
 
 	#[cfg(not(target_arch = "wasm32"))]
 	let built = {
 		let cert_path = conn.peek().tls_cert_path.trim().to_string();
-		if url.is_empty() || api_key.is_empty() || cert_path.is_empty() {
-			ctx.error("Please fill in all connection fields");
-			return;
+		if url.is_empty() || token.is_empty() || cert_path.is_empty() {
+			ctx.error("Fill in all connection fields");
+			return None;
 		}
 		let cert_data = match std::fs::read(&cert_path) {
 			Ok(data) => data,
 			Err(e) => {
-				ctx.error(format!("Failed to read TLS cert: {}", e));
-				return;
+				ctx.error(format!("Couldn't read the TLS certificate: {}", e));
+				return None;
 			},
 		};
-		LspRestClient::new(url, api_key, &cert_data)
+		LspRestClient::new(url, token, &cert_data)
 	};
 
 	#[cfg(target_arch = "wasm32")]
 	let built = {
-		if url.is_empty() || api_key.is_empty() {
-			ctx.error("Please fill in server URL and API key");
-			return;
+		if url.is_empty() || token.is_empty() {
+			ctx.error("Fill in the server URL and token");
+			return None;
 		}
 		// On WASM, the browser handles TLS - no certificate needed
-		LspRestClient::new(url, api_key, &[])
+		LspRestClient::new(url, token, &[])
 	};
 
 	match built {
-		Ok(client) => {
-			{
-				let mut c = conn.write();
-				c.client = Some(Arc::new(client));
-				c.status = ConnectionStatus::Connected;
-			}
-			ctx.success("Connected");
-			{
-				// A new daemon may support what the last one refused.
-				let mut data = ctx.data;
-				let mut d = data.write();
-				d.activity_unsupported = false;
-				d.revenue_week_unsupported = false;
-			}
-			fetch_node_info(ctx);
-			fetch_balances(ctx);
-			fetch_channels(ctx);
-			fetch_price(ctx);
-			fetch_stable_channels(ctx);
-			fetch_queued_splices(ctx);
-			fetch_payments(ctx, false);
-			fetch_forwarded_payments(ctx);
-			fetch_peers(ctx);
-			fetch_activity_feed(ctx, false);
-			fetch_revenue_week(ctx);
-		},
+		Ok(client) => Some(client),
 		Err(e) => {
 			conn.write().status = ConnectionStatus::Error(e.clone());
 			ctx.error(e);
+			None
 		},
 	}
 }
 
+/// Logs in with the token in Settings in the background; a bad token is reported at once.
+pub fn connect(ctx: AppCtx) {
+	spawn_forever(async move {
+		connect_now(ctx).await;
+	});
+}
+
+/// Builds the client and logs in; on success the session goes live and the pages load. Returns whether it connected.
+pub async fn connect_now(ctx: AppCtx) -> bool {
+	if busy(ctx, Op::Login) {
+		return false;
+	}
+	let Some(client) = build_client(ctx) else { return false };
+	let client = Arc::new(client);
+	let mut pending = ctx.pending;
+	pending.write().insert(Op::Login);
+	let login = client.login().await;
+	pending.write().remove(Op::Login);
+	if let Err(e) = login {
+		match explain(&e, true) {
+			Failure::SignedOut(reason) => end_session(ctx, reason),
+			Failure::Show(reason) => {
+				// Not a refusal of the token (the daemon or LDK Server is down): stay put so the page offers Retry.
+				let mut conn = ctx.conn;
+				{
+					let mut c = conn.write();
+					c.client = None;
+					c.status = ConnectionStatus::Error(reason.clone());
+				}
+				clear_data(ctx);
+				ctx.error(reason);
+			},
+		}
+		return false;
+	}
+	clear_data(ctx);
+	{
+		let mut conn = ctx.conn;
+		let mut c = conn.write();
+		c.client = Some(Arc::clone(&client));
+		c.status = ConnectionStatus::Connected;
+	}
+	ctx.success(format!("Connected as {}", client.token_name()));
+	fetch_node_info(ctx);
+	fetch_balances(ctx);
+	fetch_channels(ctx);
+	fetch_price(ctx);
+	fetch_stable_channels(ctx);
+	fetch_queued_splices(ctx);
+	fetch_payments(ctx, false);
+	fetch_forwarded_payments(ctx);
+	fetch_peers(ctx);
+	fetch_activity_feed(ctx, false);
+	fetch_revenue_week(ctx);
+	true
+}
+
+/// Ends the session here and on the daemon, and forgets what it loaded.
 pub fn disconnect(ctx: AppCtx) {
 	let mut conn = ctx.conn;
-	{
+	let client = {
 		let mut c = conn.write();
-		c.client = None;
 		c.status = ConnectionStatus::Disconnected;
+		c.client.take()
+	};
+	if let Some(client) = client {
+		// Frees the daemon's session slot; nothing waits on the answer.
+		spawn_forever(async move {
+			let _ = client.logout().await;
+		});
 	}
-	let mut data = ctx.data;
-	{
-		let mut d = data.write();
-		d.node_info = None;
-		d.balances = None;
-		d.channels = None;
-		d.payments = None;
-		d.queued_splices = None;
-	}
-	let mut view = ctx.view;
-	view.write().queued_release = None;
+	clear_data(ctx);
 	ctx.error("Disconnected");
 }
 
 pub fn fetch_node_info(ctx: AppCtx) {
-	let Some(client) = client(ctx) else { return };
+	let Some(client) = client_for(ctx, GET_NODE_INFO_PATH) else { return };
 	run(ctx, Op::NodeInfo, async move { client.get_node_info(GetNodeInfoRequest {}).await }, |ctx, v| {
 		let mut data = ctx.data;
 		data.write().node_info = Some(v);
@@ -186,7 +353,7 @@ pub fn fetch_node_info(ctx: AppCtx) {
 }
 
 pub fn fetch_balances(ctx: AppCtx) {
-	let Some(client) = client(ctx) else { return };
+	let Some(client) = client_for(ctx, GET_BALANCES_PATH) else { return };
 	run(ctx, Op::Balances, async move { client.get_balances(GetBalancesRequest {}).await }, |ctx, v| {
 		let mut data = ctx.data;
 		data.write().balances = Some(v);
@@ -194,7 +361,7 @@ pub fn fetch_balances(ctx: AppCtx) {
 }
 
 pub fn fetch_channels(ctx: AppCtx) {
-	let Some(client) = client(ctx) else { return };
+	let Some(client) = client_for(ctx, LIST_CHANNELS_PATH) else { return };
 	run(ctx, Op::Channels, async move { client.list_channels(ListChannelsRequest {}).await }, |ctx, v| {
 		let peers: Vec<String> = v.channels.iter().map(|c| c.counterparty_node_id.clone()).collect();
 		let mut data = ctx.data;
@@ -203,7 +370,7 @@ pub fn fetch_channels(ctx: AppCtx) {
 	});
 }
 
-/// Apply one payments page: "Load More" appends, anything else replaces.
+/// Apply one payments page: "Load more" appends, anything else replaces.
 pub fn apply_payments_page(
 	payments: &mut Option<ListPaymentsResponse>, page_token: &mut Option<String>,
 	page: ListPaymentsResponse, appending: bool,
@@ -249,7 +416,7 @@ where
 	loop {
 		if let Some(token) = &page_token {
 			if !seen.insert(token.clone()) {
-				return Err("Stopped loading payments: the server repeated a page token".to_string());
+				return Err("Stopped loading payments. The LSP sent the same page twice".to_string());
 			}
 		}
 
@@ -266,7 +433,7 @@ pub fn load_all_payments(ctx: AppCtx) {
 	if busy(ctx, Op::Payments) || busy(ctx, Op::PaymentsAll) {
 		return;
 	}
-	let Some(client) = client(ctx) else { return };
+	let Some(client) = client_for(ctx, LIST_PAYMENTS_PATH) else { return };
 	let mut pending = ctx.pending;
 	pending.write().insert(Op::PaymentsAll);
 	spawn_forever(async move {
@@ -280,7 +447,7 @@ pub fn load_all_payments(ctx: AppCtx) {
 				break Some(format!("Stopped loading payments after {MAX_PAYMENT_PAGES} pages"));
 			}
 			if !seen.insert(token.clone()) {
-				break Some("Stopped loading payments: the server repeated a page token".to_string());
+				break Some("Stopped loading payments. The LSP sent the same page twice".to_string());
 			}
 			match client.list_payments(ListPaymentsRequest { page_token: Some(token) }).await {
 				Ok(page) => {
@@ -305,10 +472,10 @@ pub fn load_all_payments(ctx: AppCtx) {
 	});
 }
 
-/// Fetch the first payments page, or the next one when `appending` ("Load More").
+/// Fetch the first payments page, or the next one when `appending` ("Load more").
 pub fn fetch_payments(ctx: AppCtx, appending: bool) {
 	if !busy(ctx, Op::Payments) && !busy(ctx, Op::PaymentsAll) {
-		if let Some(client) = client(ctx) {
+		if let Some(client) = client_for(ctx, LIST_PAYMENTS_PATH) {
 			let page_token = if appending { ctx.data.peek().payments_page_token.clone() } else { None };
 			if appending {
 				run(
@@ -342,7 +509,7 @@ pub fn fetch_payments(ctx: AppCtx, appending: bool) {
 }
 
 pub fn fetch_peers(ctx: AppCtx) {
-	let Some(client) = client(ctx) else { return };
+	let Some(client) = client_for(ctx, LIST_PEERS_PATH) else { return };
 	run(ctx, Op::Peers, async move { client.list_peers(ListPeersRequest {}).await }, |ctx, v| {
 		let peers: Vec<String> = v.peers.iter().map(|p| p.node_id.clone()).collect();
 		let mut data = ctx.data;
@@ -352,7 +519,7 @@ pub fn fetch_peers(ctx: AppCtx) {
 }
 
 pub fn fetch_forwarded_payments(ctx: AppCtx) {
-	let Some(client) = client(ctx) else { return };
+	let Some(client) = client_for(ctx, LIST_FORWARDED_PAYMENTS_PATH) else { return };
 	run(
 		ctx,
 		Op::ForwardedPayments,
@@ -383,7 +550,7 @@ fn log_lines(input: &str) -> u32 {
 }
 
 pub fn fetch_ldk_log(ctx: AppCtx) {
-	let Some(client) = client(ctx) else { return };
+	let Some(client) = client_for(ctx, LDK_LOG_PATH) else { return };
 	let max_lines = log_lines(&ctx.forms.peek().ldk_log.max_lines);
 	run(
 		ctx,
@@ -397,7 +564,7 @@ pub fn fetch_ldk_log(ctx: AppCtx) {
 }
 
 pub fn fetch_audit_log(ctx: AppCtx) {
-	let Some(client) = client(ctx) else { return };
+	let Some(client) = client_for(ctx, AUDIT_LOG_PATH) else { return };
 	let max_lines = log_lines(&ctx.forms.peek().audit_log.max_lines);
 	run(
 		ctx,
@@ -475,7 +642,7 @@ pub(crate) fn ledger_request(form: &ChannelLedgerForm, cursor: String, page_size
 /// The Overview feed: newest state events across every channel, or the next older page when `more`.
 /// An older daemon rejects the request; that is shown on the card, never toasted.
 pub fn fetch_activity_feed(ctx: AppCtx, more: bool) {
-	let Some(client) = client(ctx) else { return };
+	let Some(client) = client_for(ctx, LIST_CHANNEL_LEDGER_EVENTS_PATH) else { return };
 	if ctx.data.peek().activity_unsupported {
 		return;
 	}
@@ -493,7 +660,7 @@ pub fn fetch_activity_feed(ctx: AppCtx, more: bool) {
 		ctx,
 		Op::ActivityFeed,
 		async move { client.list_channel_ledger_events(request).await },
-		move |ctx, v: ListChannelLedgerEventsResponse| {
+		move |ctx, v: ListChannelLedgerEventsResponse, _| {
 			let mut data = ctx.data;
 			let mut d = data.write();
 			d.activity_error = None;
@@ -520,7 +687,7 @@ pub fn fetch_activity_feed(ctx: AppCtx, more: bool) {
 
 /// Revenue lines for the last 7 days (the "Net this week" tile); no activity rows are needed.
 pub fn fetch_revenue_week(ctx: AppCtx) {
-	let Some(client) = client(ctx) else { return };
+	let Some(client) = client_for(ctx, GET_REVENUE_PATH) else { return };
 	if ctx.data.peek().revenue_week_unsupported {
 		return;
 	}
@@ -530,7 +697,7 @@ pub fn fetch_revenue_week(ctx: AppCtx) {
 		ctx,
 		Op::RevenueWeek,
 		async move { client.get_revenue(request).await },
-		|ctx, v| {
+		|ctx, v, _| {
 			let mut data = ctx.data;
 			let mut d = data.write();
 			d.revenue_week_error = None;
@@ -546,7 +713,7 @@ pub fn fetch_revenue_week(ctx: AppCtx) {
 }
 
 pub fn fetch_channel_ledger(ctx: AppCtx, appending: bool) {
-	let Some(client) = client(ctx) else { return };
+	let Some(client) = client_for(ctx, LIST_CHANNEL_LEDGER_EVENTS_PATH) else { return };
 	let form = ctx.forms.peek().channel_ledger.clone();
 	let request = ChannelLedgerRequestKey::from(&form);
 	let cursor =
@@ -583,7 +750,7 @@ pub fn fetch_channel_ledger(ctx: AppCtx, appending: bool) {
 /// Fetch every page matching the current exact filters, then save it as JSONL.
 /// Export never depends on which pages happen to be loaded.
 pub fn export_channel_ledger(ctx: AppCtx) {
-	let Some(client) = client(ctx) else { return };
+	let Some(client) = client_for(ctx, LIST_CHANNEL_LEDGER_EVENTS_PATH) else { return };
 	let form = ctx.forms.peek().channel_ledger.clone();
 	let request = ChannelLedgerRequestKey::from(&form);
 	run_ledger(
@@ -638,7 +805,7 @@ pub fn save_export(ctx: AppCtx, file_name: &'static str, mime: &'static str, con
 			if let Some(path) = crate::platform::save_file(&[], file_name, None).await {
 				match std::fs::write(&path, content) {
 					Ok(()) => ctx.success(format!("Exported {} to {}", what, path.display())),
-					Err(error) => ctx.error(format!("Export failed: {error}")),
+					Err(error) => ctx.error(format!("Couldn't export: {error}")),
 				}
 			}
 			let mut pending = ctx.pending;
@@ -649,7 +816,7 @@ pub fn save_export(ctx: AppCtx, file_name: &'static str, mime: &'static str, con
 	#[cfg(target_arch = "wasm32")]
 	match crate::platform::download_text(file_name, mime, &content) {
 		Ok(()) => ctx.success(format!("Exported {} to {}", what, file_name)),
-		Err(error) => ctx.error(format!("Export failed: {error}")),
+		Err(error) => ctx.error(format!("Couldn't export: {error}")),
 	}
 }
 
@@ -673,7 +840,7 @@ pub fn open_payment_details(ctx: AppCtx, payment_id: String) {
 	data.write().payment_details = None;
 	let mut drawer = ctx.drawer;
 	drawer.set(Some(Drawer::Payment(payment_id.clone())));
-	let Some(client) = client(ctx) else { return };
+	let Some(client) = client_for(ctx, GET_PAYMENT_DETAILS_PATH) else { return };
 	let id = payment_id.clone();
 	run(
 		ctx,
@@ -731,17 +898,19 @@ pub fn send_onchain(ctx: AppCtx) {
 	}
 	let Some(client) = client(ctx) else { return };
 	let Some(request) = prepare_onchain(ctx) else { return };
-	run(ctx, Op::OnchainSend, async move { client.onchain_send(request).await }, |ctx, v| {
-		let mut results = ctx.results;
-		results.write().last_txid = Some(v.txid.clone());
-		ctx.success(format!("Sent! TXID: {}", v.txid));
-		let mut forms = ctx.forms;
-		forms.write().onchain_send = Default::default();
-		let mut view = ctx.view;
-		view.write().send_all_confirm = false;
-		close_dialog(ctx);
-		fetch_balances(ctx);
-	});
+	run(ctx, Op::OnchainSend, async move { client.onchain_send(request).await }, onchain_sent);
+}
+
+fn onchain_sent(ctx: AppCtx, v: OnchainSendResponse) {
+	let mut results = ctx.results;
+	results.write().last_txid = Some(v.txid.clone());
+	ctx.success("Transaction sent");
+	let mut forms = ctx.forms;
+	forms.write().onchain_send = Default::default();
+	let mut view = ctx.view;
+	view.write().send_all_confirm = false;
+	close_dialog(ctx);
+	fetch_balances(ctx);
 }
 
 pub fn generate_bolt11_invoice(ctx: AppCtx) {
@@ -790,7 +959,7 @@ pub fn send_bolt11(ctx: AppCtx) {
 	run(ctx, Op::Bolt11Send, async move { client.bolt11_send(request).await }, |ctx, v| {
 		let mut results = ctx.results;
 		results.write().last_payment_id = Some(v.payment_id.clone());
-		ctx.success(format!("Payment sent! ID: {}", v.payment_id));
+		ctx.success("Payment sent");
 		let mut forms = ctx.forms;
 		forms.write().bolt11_send = Default::default();
 		close_dialog(ctx);
@@ -848,7 +1017,7 @@ pub fn send_bolt12(ctx: AppCtx) {
 	run(ctx, Op::Bolt12Send, async move { client.bolt12_send(request).await }, |ctx, v| {
 		let mut results = ctx.results;
 		results.write().last_payment_id = Some(v.payment_id.clone());
-		ctx.success(format!("Payment sent! ID: {}", v.payment_id));
+		ctx.success("Payment sent");
 		let mut forms = ctx.forms;
 		forms.write().bolt12_send = Default::default();
 		close_dialog(ctx);
@@ -899,7 +1068,7 @@ pub fn open_channel(ctx: AppCtx) {
 		form.cltv_expiry_delta.trim(),
 	);
 	if node_pubkey.is_empty() || address.is_empty() {
-		ctx.error("Node pubkey and address are required");
+		ctx.error("Node ID and address are required");
 		return;
 	}
 	run(
@@ -918,8 +1087,8 @@ pub fn open_channel(ctx: AppCtx) {
 				})
 				.await
 		},
-		|ctx, v| {
-			ctx.success(format!("Channel opened! ID: {}", v.user_channel_id));
+		|ctx, _v| {
+			ctx.success("Channel open started");
 			let mut forms = ctx.forms;
 			forms.write().open_channel = Default::default();
 			close_dialog(ctx);
@@ -934,7 +1103,7 @@ fn channel_ids(user_channel_id: &str, counterparty_node_id: &str) -> Option<(Str
 	(!user_channel_id.is_empty() && !counterparty_node_id.is_empty()).then_some((user_channel_id, counterparty_node_id))
 }
 
-const CHANNEL_IDS_REQUIRED: &str = "Channel ID and counterparty node ID are required";
+const CHANNEL_IDS_REQUIRED: &str = "User channel ID and peer node ID are required";
 
 pub fn close_channel(ctx: AppCtx) {
 	if busy(ctx, Op::CloseChannel) {
@@ -953,7 +1122,7 @@ pub fn close_channel(ctx: AppCtx) {
 		Op::CloseChannel,
 		async move { client.close_channel(CloseChannelRequest { user_channel_id, counterparty_node_id }).await },
 		|ctx, _v| {
-			ctx.success("Channel close initiated");
+			ctx.success("Channel close started");
 			let mut forms = ctx.forms;
 			forms.write().close_channel = Default::default();
 			close_dialog(ctx);
@@ -992,7 +1161,7 @@ pub fn force_close_channel(ctx: AppCtx) {
 				.await
 		},
 		|ctx, _v| {
-			ctx.success("Force close initiated");
+			ctx.success("Force close started");
 			let mut forms = ctx.forms;
 			forms.write().close_channel = Default::default();
 			close_dialog(ctx);
@@ -1030,7 +1199,7 @@ pub fn splice_in(ctx: AppCtx) {
 				})
 				.await
 		},
-		|ctx, v| {
+		|ctx, v, _| {
 			if v.ok {
 				ctx.success(v.status);
 				let mut forms = ctx.forms;
@@ -1048,12 +1217,12 @@ pub fn splice_in(ctx: AppCtx) {
 
 /// Every channel's queued splice-in. An older daemon without the route leaves the list as it was; any other failure is reported like the other fetches.
 pub fn fetch_queued_splices(ctx: AppCtx) {
-	let Some(client) = client(ctx) else { return };
+	let Some(client) = client_for(ctx, LIST_QUEUED_SPLICES_PATH) else { return };
 	run_with(
 		ctx,
 		Op::ListQueuedSplices,
 		async move { client.list_queued_splices(ListQueuedSplicesRequest {}).await },
-		queued_splices_listed,
+		|ctx, list, _| queued_splices_listed(ctx, list),
 		queued_splices_failed,
 	);
 }
@@ -1167,14 +1336,16 @@ pub fn splice_out(ctx: AppCtx) {
 				.splice_out(SpliceOutRequest { user_channel_id, counterparty_node_id, address, splice_amount_sats })
 				.await
 		},
-		|ctx, v| {
-			ctx.success(format!("Splice-out initiated to {}", v.address));
-			let mut forms = ctx.forms;
-			forms.write().splice_out = Default::default();
-			close_dialog(ctx);
-			fetch_channels(ctx);
-		},
+		splice_out_started,
 	);
+}
+
+fn splice_out_started(ctx: AppCtx, v: SpliceOutResponse) {
+	ctx.success(format!("Splice-out to {} started", v.address));
+	let mut forms = ctx.forms;
+	forms.write().splice_out = Default::default();
+	close_dialog(ctx);
+	fetch_channels(ctx);
 }
 
 pub fn update_channel_config(ctx: AppCtx) {
@@ -1229,7 +1400,7 @@ pub fn connect_peer(ctx: AppCtx) {
 	let address = form.address.trim().to_string();
 	let persist = form.persist;
 	if node_pubkey.is_empty() || address.is_empty() {
-		ctx.error("Node pubkey and address are required");
+		ctx.error("Node ID and address are required");
 		return;
 	}
 	run(
@@ -1237,7 +1408,7 @@ pub fn connect_peer(ctx: AppCtx) {
 		Op::ConnectPeer,
 		async move { client.connect_peer(ConnectPeerRequest { node_pubkey, address, persist }).await },
 		|ctx, _v| {
-			ctx.success("Peer connected successfully");
+			ctx.success("Peer connected");
 			let mut forms = ctx.forms;
 			forms.write().connect_peer = Default::default();
 			close_dialog(ctx);
@@ -1255,33 +1426,49 @@ pub fn fetch_price(ctx: AppCtx) {
 	if pending.peek().has(Op::GetPrice) {
 		return;
 	}
+	// A token without node:read beats with WhoAmI instead, so a revoked token is still noticed.
+	let read_price = ctx.may_call(GET_PRICE_PATH);
 	pending.write().insert(Op::GetPrice);
+	let started = Some(Arc::clone(&client));
 	spawn_forever(async move {
-		let result = client.get_price(GetPriceRequest {}).await;
+		let result = if read_price {
+			client.get_price(GetPriceRequest {}).await.map(Some)
+		} else {
+			client.who_am_i().await.map(|_| None)
+		};
 		let mut pending = ctx.pending;
 		pending.write().remove(Op::GetPrice);
 		let mut conn = ctx.conn;
-		// A disconnect while the request was in flight wins.
-		if conn.peek().client.is_none() {
+		// A disconnect or a new login while the request was in flight wins.
+		if !same_session(ctx, &started) {
 			return;
 		}
 		match result {
 			Ok(v) => {
-				let mut price = ctx.price;
-				price.set(Some(v));
+				if let Some(v) = v {
+					let mut price = ctx.price;
+					price.set(Some(v));
+				}
 				if conn.peek().status != ConnectionStatus::Connected {
 					conn.write().status = ConnectionStatus::Connected;
 				}
 			},
 			Err(e) => {
-				conn.write().status = ConnectionStatus::Error(format!("LSP unreachable: {}", e));
+				let unreachable = e.error_code == InternalError;
+				match explain(&e, false) {
+					Failure::SignedOut(reason) => end_session(ctx, reason),
+					Failure::Show(text) if unreachable => {
+						conn.write().status = ConnectionStatus::Error(format!("LSP unreachable: {text}"))
+					},
+					Failure::Show(text) => conn.write().status = ConnectionStatus::Error(text),
+				}
 			},
 		}
 	});
 }
 
 pub fn fetch_stable_channels(ctx: AppCtx) {
-	let Some(client) = client(ctx) else { return };
+	let Some(client) = client_for(ctx, LIST_STABLE_CHANNELS_PATH) else { return };
 	run(
 		ctx,
 		Op::ListStableChannels,
@@ -1297,7 +1484,7 @@ pub fn fetch_stable_channels(ctx: AppCtx) {
 
 /// Loads the revenue summary and the first activity page, or the next page when `more`.
 pub fn fetch_revenue(ctx: AppCtx, more: bool) {
-	let Some(client) = client(ctx) else { return };
+	let Some(client) = client_for(ctx, GET_REVENUE_PATH) else { return };
 	let (window, categories) = {
 		let view = ctx.view.peek();
 		(view.revenue_window, view.revenue_categories.clone())
@@ -1354,6 +1541,95 @@ pub fn refund_trade_fee(ctx: AppCtx) {
 			fetch_revenue(ctx, false);
 		},
 	);
+}
+
+pub fn fetch_tokens(ctx: AppCtx) {
+	let Some(client) = client_for(ctx, LIST_TOKENS_PATH) else { return };
+	run(ctx, Op::ListTokens, async move { client.list_tokens(ListTokensRequest {}).await }, |ctx, v| {
+		let mut data = ctx.data;
+		data.write().tokens = Some(v);
+	});
+}
+
+/// Creates the token the Access form describes; its hex is kept only for the one-time box.
+pub fn create_token(ctx: AppCtx) {
+	if busy(ctx, Op::CreateToken) {
+		return;
+	}
+	let Some(client) = client_for(ctx, CREATE_TOKEN_PATH) else { return };
+	let form = ctx.forms.peek().access.clone();
+	let name = form.name.trim().to_string();
+	if name.is_empty() {
+		ctx.error("Token name is required");
+		return;
+	}
+	if form.permissions.is_empty() {
+		ctx.error("Pick a preset or at least one permission");
+		return;
+	}
+	let expires_at = match crate::ui::access::expiry_secs(&form.expiry, crate::format::now_secs()) {
+		Ok(secs) => secs,
+		Err(e) => {
+			ctx.error(e);
+			return;
+		},
+	};
+	let request = CreateTokenRequest { name, permissions: form.permissions, expires_at };
+	run_action(ctx, Op::CreateToken, async move { client.create_token(request).await }, token_created);
+}
+
+/// Shows the new token once; after its session ended it is reported without the hex, which must never reach another session.
+fn token_created(ctx: AppCtx, v: CreateTokenResponse, current: bool) {
+	let name = v.token.map(|t| t.name).unwrap_or_default();
+	if current {
+		ctx.success(format!("Token {name} created"));
+		let mut forms = ctx.forms;
+		forms.write().access = AccessForm { created: Some(CreatedToken { name, hex: v.token_hex }), ..Default::default() };
+	} else {
+		ctx.error(format!("Token {name} was created, but its session ended before it was shown. Revoke it"));
+	}
+	fetch_tokens(ctx);
+}
+
+/// Revokes the token the dialog names; revoking your own ends your session.
+pub fn revoke_token(ctx: AppCtx) {
+	if busy(ctx, Op::RevokeToken) {
+		return;
+	}
+	let Some(client) = client_for(ctx, REVOKE_TOKEN_PATH) else { return };
+	let chosen = ctx.forms.peek().access.revoke.clone();
+	if chosen.id.is_empty() {
+		return;
+	}
+	let request = RevokeTokenRequest { id: chosen.id.clone() };
+	run_action(ctx, Op::RevokeToken, async move { client.revoke_token(request).await }, move |ctx, _, current| {
+		token_revoked(ctx, &chosen, current)
+	});
+}
+
+/// Reports a revoke; revoking your own token ends your session, unless it already ended or another login took its place.
+fn token_revoked(ctx: AppCtx, chosen: &RevokeTokenForm, current: bool) {
+	let mut forms = ctx.forms;
+	forms.write().access.revoke = Default::default();
+	close_dialog(ctx);
+	if chosen.is_you {
+		if current {
+			// The daemon already ended this session; just return to the logged-out state.
+			let mut conn = ctx.conn;
+			{
+				let mut c = conn.write();
+				c.client = None;
+				c.status = ConnectionStatus::Disconnected;
+			}
+			clear_data(ctx);
+			let mut nav = ctx.nav;
+			nav.write().active_tab = ActiveTab::Settings;
+		}
+		ctx.error("You revoked your own token. Log in with another one");
+	} else {
+		ctx.success(format!("Token {} revoked", chosen.name));
+		fetch_tokens(ctx);
+	}
 }
 
 pub fn edit_stable_channel(ctx: AppCtx) {
@@ -1433,33 +1709,39 @@ pub fn release_stability_payment(ctx: AppCtx, arrived: bool) {
 	}
 	let request = release_request(&form, arrived);
 	let requested_payment_id = form.payment_id;
-	run(
+	run_action(
 		ctx,
 		Op::ReleaseStabilityPayment,
 		async move { client.release_stability_payment(request).await },
-		move |ctx, v| {
-			let mut forms = ctx.forms;
-			if v.needs_acknowledgement {
-				show_release_preview(&mut forms.write().release_stability_payment, &requested_payment_id, arrived, v.status);
-			} else if v.ok {
-				ctx.success(v.status);
-				// The dialog may by now be open for another payment, which this answer must not close.
-				if finish_release(&mut forms.write().release_stability_payment, &requested_payment_id) {
-					close_dialog(ctx);
-				}
-				// Reload the history so the released payment shows its outcome.
-				invalidate_channel_ledger(ctx);
-				fetch_channel_ledger(ctx, false);
-				fetch_stable_channels(ctx);
-			} else {
-				ctx.error(v.status);
-			}
-		},
+		move |ctx, v, current| release_answered(ctx, v, &requested_payment_id, arrived, current),
 	);
 }
 
+/// Applies the daemon's answer about `requested_payment_id`: figures to confirm, the release, or a refusal.
+fn release_answered(ctx: AppCtx, v: ReleaseStabilityPaymentResponse, requested_payment_id: &str, arrived: bool, current: bool) {
+	let mut forms = ctx.forms;
+	if v.needs_acknowledgement {
+		// Nothing moved yet, and an ended session's figures must not be confirmed in the next one.
+		if current {
+			show_release_preview(&mut forms.write().release_stability_payment, requested_payment_id, arrived, v.status);
+		}
+	} else if v.ok {
+		ctx.success(v.status);
+		// The dialog may by now be open for another payment, which this answer must not close.
+		if finish_release(&mut forms.write().release_stability_payment, requested_payment_id) {
+			close_dialog(ctx);
+		}
+		// Reload the history so the released payment shows its outcome.
+		invalidate_channel_ledger(ctx);
+		fetch_channel_ledger(ctx, false);
+		fetch_stable_channels(ctx);
+	} else {
+		ctx.error(v.status);
+	}
+}
+
 pub fn fetch_settlement_payments(ctx: AppCtx) {
-	let Some(client) = client(ctx) else { return };
+	let Some(client) = client_for(ctx, LIST_SETTLEMENT_PAYMENTS_PATH) else { return };
 	run(
 		ctx,
 		Op::ListSettlementPayments,
@@ -1512,7 +1794,7 @@ pub fn spontaneous_send(ctx: AppCtx) {
 	run(ctx, Op::SpontaneousSend, async move { client.spontaneous_send(request).await }, |ctx, v| {
 		let mut results = ctx.results;
 		results.write().last_payment_id = Some(v.payment_id.clone());
-		ctx.success(format!("Keysend sent! ID: {}", v.payment_id));
+		ctx.success("Keysend sent");
 		let mut forms = ctx.forms;
 		forms.write().spontaneous_send = Default::default();
 		close_dialog(ctx);
@@ -1565,15 +1847,15 @@ pub fn resolve_aliases(ctx: AppCtx, node_ids: impl IntoIterator<Item = String>) 
 	if pending.peek().has(Op::Aliases) {
 		return;
 	}
-	if client(ctx).is_none() {
+	if client_for(ctx, GRAPH_GET_NODE_PATH).is_none() {
 		return;
 	}
 	pending.write().insert(Op::Aliases);
 	spawn_forever(async move {
 		let mut data = ctx.data;
 		loop {
-			// Re-read the client each time so a reconnect never resolves against the old daemon.
-			let Some(client) = client(ctx) else { break };
+			// Re-read the client each time so a reconnect never resolves against the old daemon or token.
+			let Some(client) = client_for(ctx, GRAPH_GET_NODE_PATH) else { break };
 			let next = data.write().alias_queue.pop();
 			let Some(node_id) = next else { break };
 			// Private or unknown nodes simply have no alias; a failed lookup is retried on the next fetch.
@@ -1710,14 +1992,14 @@ pub fn verify_signature(ctx: AppCtx) {
 			if v.valid {
 				ctx.success("Signature is valid");
 			} else {
-				ctx.error("Signature is INVALID");
+				ctx.error("Signature is not valid");
 			}
 		},
 	);
 }
 
 pub fn fetch_graph_channels(ctx: AppCtx) {
-	let Some(client) = client(ctx) else { return };
+	let Some(client) = client_for(ctx, GRAPH_LIST_CHANNELS_PATH) else { return };
 	run(
 		ctx,
 		Op::GraphListChannels,
@@ -1733,7 +2015,7 @@ pub fn fetch_graph_channel(ctx: AppCtx) {
 	if busy(ctx, Op::GraphGetChannel) {
 		return;
 	}
-	let Some(client) = client(ctx) else { return };
+	let Some(client) = client_for(ctx, GRAPH_GET_CHANNEL_PATH) else { return };
 	let Ok(short_channel_id) = ctx.forms.peek().graph_get_channel.short_channel_id.trim().parse::<u64>() else {
 		ctx.error("Invalid short channel ID");
 		return;
@@ -1750,7 +2032,7 @@ pub fn fetch_graph_channel(ctx: AppCtx) {
 }
 
 pub fn fetch_graph_nodes(ctx: AppCtx) {
-	let Some(client) = client(ctx) else { return };
+	let Some(client) = client_for(ctx, GRAPH_LIST_NODES_PATH) else { return };
 	run(ctx, Op::GraphListNodes, async move { client.graph_list_nodes(GraphListNodesRequest {}).await }, |ctx, v| {
 		let mut data = ctx.data;
 		data.write().graph_nodes = Some(v);
@@ -1761,7 +2043,7 @@ pub fn fetch_graph_node(ctx: AppCtx) {
 	if busy(ctx, Op::GraphGetNode) {
 		return;
 	}
-	let Some(client) = client(ctx) else { return };
+	let Some(client) = client_for(ctx, GRAPH_GET_NODE_PATH) else { return };
 	let node_id = ctx.forms.peek().graph_get_node.node_id.trim().to_string();
 	if node_id.is_empty() {
 		ctx.error("Node ID is required");
@@ -1922,7 +2204,7 @@ mod tests {
 		.await
 		.unwrap_err();
 
-		assert_eq!(error, "Stopped loading payments: the server repeated a page token");
+		assert_eq!(error, "Stopped loading payments. The LSP sent the same page twice");
 		assert_eq!(requested, vec![Some("t1".to_string()), Some("t2".to_string())]);
 	}
 
@@ -1938,5 +2220,353 @@ mod tests {
 	fn channel_ids_are_trimmed_and_required() {
 		assert_eq!(channel_ids(" a ", " b "), Some(("a".to_string(), "b".to_string())));
 		assert_eq!(channel_ids("a", "  "), None);
+	}
+
+	use sc_rest_client::error::LspRestErrorCode::InternalServerError;
+
+	#[test]
+	fn the_clock_error_tells_the_operator_to_check_the_clock() {
+		let stale = LspRestError::new(AuthError, "request too old: check this computer's clock");
+		let Failure::Show(text) = explain(&stale, false) else { panic!("a clock error keeps the session") };
+		assert!(text.contains("Check that this computer's clock") && text.contains("minute"), "{text}");
+		assert!(!text.contains("AuthError"), "the hint replaces the raw error: {text}");
+	}
+
+	#[test]
+	fn a_daemon_without_login_is_reported_as_too_old() {
+		let too_old = Failure::SignedOut("This LSP is too old for token logins. Update it".into());
+		// What a daemon from before token logins really answers: its api-key check runs before routing.
+		let old_daemon = LspRestError::new(AuthError, "Invalid X-Auth header");
+		assert_eq!(explain(&old_daemon, true), too_old);
+		let missing = LspRestError::new(InternalError, "HTTP 404 Not Found");
+		assert_eq!(explain(&missing, true), too_old);
+		assert!(matches!(explain(&missing, false), Failure::Show(_)), "a 404 on an ordinary request is not about logins");
+	}
+
+	#[test]
+	fn a_refused_or_revoked_token_ends_the_session_in_the_daemons_words() {
+		for message in [
+			"token revoked or expired",
+			"LDK Server refused this token (wrong, revoked or expired)",
+			"Tokens limited to one method can't log into the GUI",
+		] {
+			assert_eq!(explain(&LspRestError::new(AuthError, message), false), Failure::SignedOut(message.into()));
+		}
+		// At login every refusal lands on Settings in the daemon's words; an outage does not call the token bad.
+		assert_eq!(explain(&LspRestError::new(AuthError, "too many sessions"), true), Failure::SignedOut("too many sessions".into()));
+		let down = LspRestError::new(InternalServerError, "Can't reach LDK Server");
+		assert_eq!(explain(&down, true), Failure::Show("Can't reach LDK Server".into()));
+	}
+
+	#[test]
+	fn a_missing_permission_or_a_passing_outage_is_shown_as_is() {
+		for error in [
+			LspRestError::new(AuthError, "this token lacks payments:send"),
+			LspRestError::new(AuthError, "too many logins for this token, wait a minute"),
+			LspRestError::new(InternalServerError, "Can't reach LDK Server"),
+		] {
+			assert_eq!(explain(&error, false), Failure::Show(error.to_string()));
+		}
+	}
+
+	/// A self-signed certificate so tests can build a real client; no request is ever polled.
+	const TEST_CERT: &str = "-----BEGIN CERTIFICATE-----
+MIIBgDCCASWgAwIBAgIUH8bXjc3DNbImV0bNNHlTEtA6IlIwCgYIKoZIzj0EAwIw
+FDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MTExODE5NDUyNVoYDzIxMjYxMDI1
+MTk0NTI1WjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjO
+PQMBBwNCAAQC2YhpNQPaPLcWR/4j4juAGiqc7y6kkyPLiUKTGAbTCW1aDBomsocf
+AOydQXSh7omWK0pB1LGj68APuh4xiq4bo1MwUTAdBgNVHQ4EFgQU9g7U37w89Z6J
+rcnN5+ipfbVPZx4wHwYDVR0jBBgwFoAU9g7U37w89Z6JrcnN5+ipfbVPZx4wDwYD
+VR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAgNJADBGAiEA95rmpRrugkaBRmQiVPDk
+rryFE9twO1qdq/pwPZpPekQCIQDhC0K9qQAKvtBD7jWw/nhCIH9FuqDNL7sU2gTt
+NHhGIw==
+-----END CERTIFICATE-----
+";
+
+	thread_local! {
+		static QUEUED: std::cell::RefCell<Vec<Op>> = const { std::cell::RefCell::new(Vec::new()) };
+	}
+
+	/// Runs one refresh of the Overview for a session with these permissions and records which fetches it started.
+	#[component]
+	fn RefreshProbe(permissions: Vec<&'static str>) -> Element {
+		use crate::state::{Connection, Forms, Nav, Prefs};
+		let ctx = use_context_provider(|| {
+			let mut conn = Connection::signed_in("t", &permissions);
+			conn.client = Some(Arc::new(LspRestClient::new("127.0.0.1:9".into(), "00".into(), TEST_CERT.as_bytes()).unwrap()));
+			AppCtx::new(conn, Forms::default(), Nav::default(), Prefs::default(), false)
+		});
+		use_hook(move || {
+			refresh_visible(ctx);
+			fetch_price(ctx);
+			let all = [
+				Op::NodeInfo, Op::Balances, Op::Channels, Op::ListStableChannels, Op::Peers, Op::Payments,
+				Op::ListSettlementPayments, Op::RevenueWeek, Op::ActivityFeed, Op::GetPrice,
+			];
+			let started: Vec<Op> = all.into_iter().filter(|op| ctx.pending.peek().has(*op)).collect();
+			QUEUED.with(|q| *q.borrow_mut() = started);
+		});
+		rsx! {}
+	}
+
+	fn refreshed(permissions: &[&'static str]) -> Vec<Op> {
+		let mut dom = VirtualDom::new_with_props(RefreshProbe, RefreshProbeProps { permissions: permissions.to_vec() });
+		dom.rebuild_in_place();
+		QUEUED.with(|q| q.borrow().clone())
+	}
+
+	#[test]
+	fn auto_refresh_skips_what_the_token_cannot_fetch() {
+		assert_eq!(refreshed(&["node:read"]), vec![Op::NodeInfo, Op::Balances, Op::GetPrice]);
+		assert_eq!(
+			refreshed(&["admin"]),
+			vec![
+				Op::NodeInfo, Op::Balances, Op::Channels, Op::ListStableChannels, Op::Peers, Op::Payments,
+				Op::ListSettlementPayments, Op::RevenueWeek, Op::ActivityFeed, Op::GetPrice,
+			],
+		);
+	}
+
+	thread_local! {
+		static SESSION: std::cell::Cell<Option<AppCtx>> = const { std::cell::Cell::new(None) };
+	}
+
+	fn test_client() -> Arc<LspRestClient> {
+		Arc::new(LspRestClient::new("127.0.0.1:9".into(), "00".into(), TEST_CERT.as_bytes()).unwrap())
+	}
+
+	/// A signed-in admin session whose context the test drives.
+	#[component]
+	fn SessionProbe() -> Element {
+		use crate::state::{Connection, Forms, Nav, Prefs};
+		let ctx = use_context_provider(|| {
+			let mut conn = Connection::signed_in("ops", &["admin"]);
+			conn.client = Some(test_client());
+			AppCtx::new(conn, Forms::default(), Nav::default(), Prefs::default(), false)
+		});
+		SESSION.with(|s| s.set(Some(ctx)));
+		rsx! {}
+	}
+
+	/// How the session moves on while a request is in flight.
+	#[derive(Clone, Copy, Debug)]
+	enum Moved {
+		/// A background fetch was refused, so the session ended.
+		Ended,
+		/// Another login took its place.
+		Replaced,
+	}
+
+	type Reply<T> = tokio::sync::oneshot::Receiver<Result<T, LspRestError>>;
+
+	/// Starts a request whose reply the test holds, moves the session on, then delivers `reply` and lets the request finish.
+	fn finish_after<T: 'static>(how: Moved, reply: Result<T, LspRestError>, start: impl FnOnce(AppCtx, Reply<T>)) -> (VirtualDom, AppCtx) {
+		let mut dom = VirtualDom::new(SessionProbe);
+		dom.rebuild_in_place();
+		let ctx = SESSION.with(|s| s.get()).unwrap();
+		let (send, receive) = tokio::sync::oneshot::channel();
+		dom.in_scope(ScopeId::ROOT, || start(ctx, receive));
+		dom.process_events();
+		dom.in_scope(ScopeId::ROOT, || match how {
+			Moved::Ended => end_session(ctx, "token revoked or expired".into()),
+			Moved::Replaced => {
+				let mut conn = ctx.conn;
+				let mut c = conn.write();
+				c.client = Some(test_client());
+				// The new login can read nothing, so no refresh it would start ever reaches the network.
+				c.test_session = Some(("other".into(), Vec::new()));
+			},
+		});
+		assert!(send.send(reply).is_ok(), "the request is still waiting for its reply");
+		dom.process_events();
+		(dom, ctx)
+	}
+
+	fn shown(ctx: AppCtx) -> Option<(String, bool)> {
+		ctx.status.peek().as_ref().map(|s| (s.text.clone(), s.is_error))
+	}
+
+	/// The login that took over is untouched by the old session's reply.
+	fn new_session_kept(ctx: AppCtx, how: Moved) {
+		if let Moved::Replaced = how {
+			let conn = ctx.conn.peek();
+			assert_eq!(conn.token_name(), "other");
+			assert!(conn.client.is_some() && conn.status == ConnectionStatus::Connected, "the new login stays signed in");
+		}
+	}
+
+	#[test]
+	fn a_send_that_succeeds_after_the_session_ended_still_reports_and_clears_its_form() {
+		for how in [Moved::Ended, Moved::Replaced] {
+			let sent = OnchainSendResponse { txid: "5e9b".into(), ..Default::default() };
+			let (_dom, ctx) = finish_after(how, Ok(sent), |ctx, reply| {
+				let mut forms = ctx.forms;
+				forms.write().onchain_send.address = "bcrt1qrecipient".into();
+				forms.write().onchain_send.amount_sats = "50000".into();
+				let mut dialog = ctx.dialog;
+				dialog.set(Some(Dialog::ConfirmSend(SendKind::Onchain)));
+				run(ctx, Op::OnchainSend, async move { reply.await.unwrap() }, onchain_sent);
+			});
+			assert!(!ctx.pending.peek().has(Op::OnchainSend), "{how:?}: the reply was handled");
+			assert_eq!(shown(ctx), Some(("Transaction sent".into(), false)), "{how:?}: the operator learns the money left");
+			assert_eq!(*ctx.dialog.peek(), None, "{how:?}: the confirm step cannot send it again");
+			assert_eq!(ctx.forms.peek().onchain_send.address, "", "{how:?}: the form cannot send it again");
+			assert!(!ctx.data.peek().fetched_at.contains_key(&Op::OnchainSend), "{how:?}: nothing lands in the next session's data");
+			new_session_kept(ctx, how);
+		}
+	}
+
+	#[test]
+	fn a_splice_out_that_succeeds_after_the_session_ended_still_reports_and_clears_its_form() {
+		for how in [Moved::Ended, Moved::Replaced] {
+			let started = SpliceOutResponse { address: "bcrt1qsweep".into(), ..Default::default() };
+			let (_dom, ctx) = finish_after(how, Ok(started), |ctx, reply| {
+				let mut forms = ctx.forms;
+				forms.write().splice_out.user_channel_id = "7".into();
+				forms.write().splice_out.splice_amount_sats = "20000".into();
+				let mut dialog = ctx.dialog;
+				dialog.set(Some(Dialog::SpliceOut));
+				run(ctx, Op::SpliceOut, async move { reply.await.unwrap() }, splice_out_started);
+			});
+			assert_eq!(shown(ctx), Some(("Splice-out to bcrt1qsweep started".into(), false)), "{how:?}");
+			assert_eq!(*ctx.dialog.peek(), None, "{how:?}");
+			assert_eq!(ctx.forms.peek().splice_out.user_channel_id, "", "{how:?}");
+			new_session_kept(ctx, how);
+		}
+	}
+
+	#[test]
+	fn a_fetch_that_returns_after_the_session_changed_writes_nothing() {
+		use sc_rest_client::ldk_server_grpc::api::GetBalancesResponse;
+		for how in [Moved::Ended, Moved::Replaced] {
+			let balances = GetBalancesResponse { total_onchain_balance_sats: 7, ..Default::default() };
+			let (_dom, ctx) = finish_after(how, Ok(balances), |ctx, reply| {
+				run(ctx, Op::Balances, async move { reply.await.unwrap() }, |ctx, v| {
+					let mut data = ctx.data;
+					data.write().balances = Some(v);
+				});
+			});
+			assert!(!ctx.pending.peek().has(Op::Balances), "{how:?}: the reply was handled");
+			let data = ctx.data.peek();
+			assert!(data.balances.is_none() && !data.fetched_at.contains_key(&Op::Balances), "{how:?}: an old session's figures never show");
+			new_session_kept(ctx, how);
+		}
+	}
+
+	#[test]
+	fn a_send_that_fails_after_the_session_changed_still_shows_the_error() {
+		use sc_rest_client::ldk_server_grpc::api::SpontaneousSendResponse;
+		let failed = LspRestError::new(InternalServerError, "no route to the recipient");
+		let (_dom, ctx) = finish_after(Moved::Ended, Err(failed.clone()), |ctx, reply| {
+			run(ctx, Op::SpontaneousSend, async move { reply.await.unwrap() }, |_, _: SpontaneousSendResponse| panic!("it failed"));
+		});
+		assert_eq!(shown(ctx), Some((failed.to_string(), true)));
+		// The old token's refusal is shown without ending the login that replaced it.
+		let refused = LspRestError::new(AuthError, "token revoked or expired");
+		let (_dom, ctx) = finish_after(Moved::Replaced, Err(refused), |ctx, reply| {
+			run(ctx, Op::SpontaneousSend, async move { reply.await.unwrap() }, |_, _: SpontaneousSendResponse| panic!("it failed"));
+		});
+		assert_eq!(shown(ctx), Some(("token revoked or expired".into(), true)));
+		new_session_kept(ctx, Moved::Replaced);
+	}
+
+	#[test]
+	fn end_session_closes_an_open_dialog() {
+		let mut dom = VirtualDom::new(SessionProbe);
+		dom.rebuild_in_place();
+		let ctx = SESSION.with(|s| s.get()).unwrap();
+		dom.in_scope(ScopeId::ROOT, || {
+			let mut dialog = ctx.dialog;
+			dialog.set(Some(Dialog::ConfirmSend(SendKind::Keysend)));
+			end_session(ctx, "token revoked or expired".into());
+		});
+		assert_eq!(*ctx.dialog.peek(), None, "a confirm step must not outlive its session");
+		assert!(ctx.client().is_none());
+	}
+
+	#[test]
+	fn money_channel_and_token_actions_always_report_and_reads_do_not() {
+		let actions = [
+			Op::OnchainSend, Op::Bolt11Send, Op::Bolt12Send, Op::SpontaneousSend, Op::OpenChannel, Op::CloseChannel,
+			Op::ForceCloseChannel, Op::SpliceIn, Op::SpliceOut, Op::UpdateChannelConfig, Op::EditStableChannel,
+			Op::ReleaseStabilityPayment, Op::RefundTradeFee, Op::CreateToken, Op::RevokeToken,
+		];
+		for op in actions {
+			assert!(op.must_report(), "{op:?} moves money or changes a channel or a token");
+		}
+		let dropped = [
+			Op::NodeInfo, Op::Balances, Op::Channels, Op::Payments, Op::ListStableChannels, Op::ListTokens, Op::GetPrice,
+			Op::ActivityFeed, Op::RevenueWeek, Op::PaymentDetails, Op::Bolt11Receive, Op::ConnectPeer, Op::SignMessage,
+		];
+		for op in dropped {
+			assert!(!op.must_report(), "{op:?} is dropped with its session");
+		}
+	}
+
+	#[test]
+	fn a_token_created_after_the_session_changed_is_reported_without_its_secret() {
+		use sc_rest_client::sc_protos::access::{CreateTokenResponse, TokenInfo};
+		for how in [Moved::Ended, Moved::Replaced] {
+			let token = TokenInfo { name: "ops-2".into(), ..Default::default() };
+			let created = CreateTokenResponse { token: Some(token), token_hex: "deadbeef00".into() };
+			let (_dom, ctx) = finish_after(how, Ok(created), |ctx, reply| {
+				run_action(ctx, Op::CreateToken, async move { reply.await.unwrap() }, token_created);
+			});
+			let (text, is_error) = shown(ctx).unwrap();
+			assert!(is_error && text.contains("ops-2") && text.contains("Revoke it"), "{how:?}: {text}");
+			assert!(ctx.forms.peek().access.created.is_none(), "{how:?}: a token shown once never reaches another session");
+			new_session_kept(ctx, how);
+		}
+	}
+
+	#[test]
+	fn revoking_your_own_token_after_the_session_changed_keeps_the_new_login() {
+		use sc_rest_client::sc_protos::access::RevokeTokenResponse;
+		for how in [Moved::Ended, Moved::Replaced] {
+			let (_dom, ctx) = finish_after(how, Ok(RevokeTokenResponse {}), |ctx, reply| {
+				let chosen = RevokeTokenForm { id: "t1".into(), name: "ops".into(), is_you: true, is_gui_token: true };
+				let mut dialog = ctx.dialog;
+				dialog.set(Some(Dialog::RevokeToken));
+				run_action(ctx, Op::RevokeToken, async move { reply.await.unwrap() }, move |ctx, _, current| {
+					token_revoked(ctx, &chosen, current)
+				});
+			});
+			assert_eq!(shown(ctx), Some(("You revoked your own token. Log in with another one".into(), true)), "{how:?}");
+			assert_eq!(*ctx.dialog.peek(), None, "{how:?}");
+			new_session_kept(ctx, how);
+		}
+	}
+
+	#[test]
+	fn a_release_answer_after_the_session_changed_reports_a_release_but_never_offers_a_preview() {
+		use crate::state::ReleaseStabilityPaymentForm;
+		let form = || ReleaseStabilityPaymentForm { payment_id: "p1".into(), summary: "top-up".into(), ..Default::default() };
+		for how in [Moved::Ended, Moved::Replaced] {
+			// The first step only returns figures: nothing moved, and an old session's figures are never offered to confirm.
+			let preview = ReleaseStabilityPaymentResponse { needs_acknowledgement: true, status: "figures".into(), ..Default::default() };
+			let (_dom, ctx) = finish_after(how, Ok(preview), |ctx, reply| {
+				let mut forms = ctx.forms;
+				forms.write().release_stability_payment = form();
+				run_action(ctx, Op::ReleaseStabilityPayment, async move { reply.await.unwrap() }, |ctx, v, current| {
+					release_answered(ctx, v, "p1", true, current)
+				});
+			});
+			let after = ctx.forms.peek().release_stability_payment.clone();
+			assert!(after.confirming.is_none() && after.notice.is_empty(), "{how:?}: no stale figures to confirm");
+			let released = ReleaseStabilityPaymentResponse { ok: true, status: "Released".into(), ..Default::default() };
+			let (_dom, ctx) = finish_after(how, Ok(released), |ctx, reply| {
+				let mut forms = ctx.forms;
+				forms.write().release_stability_payment = ReleaseStabilityPaymentForm { confirming: Some(true), ..form() };
+				let mut dialog = ctx.dialog;
+				dialog.set(Some(Dialog::ReleaseStabilityPayment));
+				run_action(ctx, Op::ReleaseStabilityPayment, async move { reply.await.unwrap() }, |ctx, v, current| {
+					release_answered(ctx, v, "p1", true, current)
+				});
+			});
+			assert_eq!(shown(ctx), Some(("Released".into(), false)), "{how:?}");
+			assert_eq!(*ctx.dialog.peek(), None, "{how:?}");
+			assert!(ctx.forms.peek().release_stability_payment.payment_id.is_empty(), "{how:?}");
+			new_session_kept(ctx, how);
+		}
 	}
 }

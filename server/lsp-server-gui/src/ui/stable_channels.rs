@@ -3,20 +3,22 @@ use dioxus::prelude::*;
 use crate::actions;
 use crate::format::format_usd;
 use crate::health::{stable_drift, Drift};
-use crate::state::{AppCtx, Drawer, Op};
+use sc_rest_client::sc_protos::stable::{EDIT_STABLE_CHANNEL_PATH, LIST_STABLE_CHANNELS_PATH};
+
+use crate::state::{permission_for, AppCtx, Drawer, Op};
 use crate::ui::channels::drift_pill;
 use crate::ui::open_drawer;
-use crate::ui::widgets::{Amount, Card, Empty, Field, Gate, Icon, Peer, Pill, RefreshBtn, Spinner, TextInput, Th};
+use crate::ui::widgets::{Amount, Card, Empty, Field, Gate, Icon, NoAccess, Peer, Pill, RefreshBtn, Spinner, TextInput, Th};
 
-const HELP_CHANNEL_ID: &str = "The Lightning channel tied to this stable-channel record.";
+const HELP_CHANNEL_ID: &str = "ID of the channel whose target you set.";
 const HELP_DRIFT: &str =
-	"Backing valued at the latest price, and how far that is from the USD target: green above it, red below. Open the channel to see when a stability payment happens.";
-const HELP_COUNTERPARTY: &str = "The peer node public key for the stable-channel counterparty.";
-const HELP_LOCATION: &str = "Where this user's wallet last connected from: country from the LSP's offline IP database, and the IP. Tor and VPN users show their exit, not their real location.";
-const HELP_STABLE_USD: &str = "The USD target value this stable channel is intended to maintain.";
-const HELP_BACKING: &str = "Bitcoin backing currently associated with the stable-channel target.";
+	"Backing at the latest price, and its drift from the USD target. Green is above, red is below. Open the channel to see when a stability payment is due.";
+const HELP_COUNTERPARTY: &str = "The peer's node ID.";
+const HELP_LOCATION: &str = "Country and IP the user's wallet last connected from. Tor and VPN users show their exit, not their real location.";
+const HELP_STABLE_USD: &str = "The USD value this channel is kept at.";
+const HELP_BACKING: &str = "Bitcoin that backs the USD target.";
 const HELP_ROLE: &str = "Whether this side is acting as the stable-value receiver or provider.";
-const HELP_NOTE: &str = "Operator note stored with the stable-channel record. Do not use this for secrets.";
+const HELP_NOTE: &str = "Your note for this channel. Don't put secrets here.";
 
 #[derive(Clone, PartialEq)]
 struct StableRow {
@@ -56,6 +58,9 @@ pub fn StableChannels() -> Element {
 	});
 	if !ctx.is_connected() {
 		return rsx! { Gate {} };
+	}
+	if !ctx.can(LIST_STABLE_CHANNELS_PATH) {
+		return rsx! { Card { NoAccess { permission: permission_for(LIST_STABLE_CHANNELS_PATH) } } };
 	}
 	let loading = ctx.busy(Op::ListStableChannels);
 	let price = ctx.price.read().as_ref().map(|p| p.price);
@@ -99,11 +104,11 @@ pub fn StableChannels() -> Element {
 				div { class: "stat-value",
 					match price {
 						Some(p) if p > 0.0 => rsx! { "{format_usd(p)}" },
-						Some(_) => rsx! { span { class: "muted", "fetching..." } },
-						None => rsx! { span { class: "muted", "--" } },
+						Some(_) => rsx! { span { class: "muted", "fetching…" } },
+						None => rsx! { span { class: "muted", "—" } },
 					}
 				}
-				div { class: "stat-sub", "Live daemon price feed" }
+				div { class: "stat-sub", "Live LSP price feed" }
 			}
 			div { class: "card stat",
 				div { class: "stat-title", "Stabilized value" }
@@ -145,12 +150,12 @@ pub fn StableChannels() -> Element {
 						}
 					}
 				},
-				Some(_) => rsx! { Empty { icon: "shield", title: "No stable users yet.", hint: "A channel becomes a stable user once it has a USD target." } },
+				Some(_) => rsx! { Empty { icon: "shield", title: "No stable users yet", hint: "A channel becomes a stable user once it has a USD target." } },
 				None => rsx! {
 					if loading {
-						Empty { icon: "shield", title: "Loading...", Spinner { large: true } }
+						Empty { icon: "shield", title: "Loading…", Spinner { large: true } }
 					} else {
-						Empty { icon: "shield", title: "Not loaded yet.", hint: "Click Refresh." }
+						Empty { icon: "shield", title: "Not loaded yet", hint: "Click Refresh to load" }
 					}
 				},
 			}
@@ -160,11 +165,13 @@ pub fn StableChannels() -> Element {
 						if unpositioned == 1 { "1 channel has no stable position" } else { "{unpositioned} channels have no stable position" }
 						" (routing peers or bitcoin-only wallets)"
 					}
-					button { class: "btn sm ghost", onclick: toggle_unpositioned, if show_all { "hide" } else { "show" } }
+					button { class: "btn sm ghost", onclick: toggle_unpositioned, if show_all { "Hide" } else { "Show" } }
 				}
 			}
 		}
-		EditCard {}
+		if ctx.can(EDIT_STABLE_CHANNEL_PATH) {
+			EditCard {}
+		}
 	}
 }
 
@@ -211,22 +218,24 @@ fn StableRowView(row: StableRow) -> Element {
 			}
 			td { Pill { tone: role_tone, "{role_text}" } }
 			td { style: "max-width: 160px; overflow: hidden; text-overflow: ellipsis;", title: "{row.note}",
-				if row.note.is_empty() { span { class: "faint", "---" } } else { "{row.note}" }
+				if row.note.is_empty() { span { class: "faint", "—" } } else { "{row.note}" }
 			}
 			// Open the exact stable identity or prefill the edit form.
 			td { class: "right",
 				// Buttons act on their own; they must not also open the row's side panel.
 				div { class: "row nowrap end", style: "gap: 6px;", onclick: move |e| e.stop_propagation(),
-					button { class: "btn sm", title: "Open this stable user_channel_id", onclick: move |_| actions::open_channel_ledger(ctx, ledger_id.clone()),
-						Icon { name: "list", size: 14 } "Ledger"
+					button { class: "btn sm", title: "Open this channel's history", onclick: move |_| actions::open_channel_ledger(ctx, ledger_id.clone()),
+						Icon { name: "list", size: 14 } "History"
 					}
-					button { class: "btn sm", title: "Edit this channel's stable target", onclick: move |_| {
-						let mut forms = ctx.forms;
-						let mut f = forms.write();
-						f.edit_stable_channel.channel_id = edit_row.channel_id.clone();
-						f.edit_stable_channel.expected_usd = format!("{:.2}", edit_row.expected_usd);
-						f.edit_stable_channel.note = edit_row.note.clone();
-					}, Icon { name: "edit", size: 14 } "Edit" }
+					if ctx.can(EDIT_STABLE_CHANNEL_PATH) {
+						button { class: "btn sm", title: "Edit this channel's stable target", onclick: move |_| {
+							let mut forms = ctx.forms;
+							let mut f = forms.write();
+							f.edit_stable_channel.channel_id = edit_row.channel_id.clone();
+							f.edit_stable_channel.expected_usd = format!("{:.2}", edit_row.expected_usd);
+							f.edit_stable_channel.note = edit_row.note.clone();
+						}, Icon { name: "edit", size: 14 } "Edit" }
+					}
 				}
 			}
 		}
@@ -243,13 +252,13 @@ fn EditCard() -> Element {
 	let loading = ctx.busy(Op::EditStableChannel);
 	rsx! {
 		div { class: "narrow",
-			Card { title: "Edit Stable Channel", sub: "Use Edit on a row to prefill",
+			Card { title: "Edit stable channel", sub: "Use Edit on a row to prefill",
 				div { class: "stack", style: "gap: 14px;",
 					Field { label: "Channel ID", help: HELP_CHANNEL_ID,
 						TextInput { value: form.channel_id.clone(), mono: true, oninput: move |v| forms.write().edit_stable_channel.channel_id = v }
 					}
 					div { class: "form-grid",
-						Field { label: "Target USD", help: HELP_STABLE_USD, hint: "0 = stop stabilizing",
+						Field { label: "Target USD", help: HELP_STABLE_USD, hint: "0 stops stabilizing",
 							TextInput { value: form.expected_usd.clone(), placeholder: "0.00", oninput: move |v| forms.write().edit_stable_channel.expected_usd = v }
 						}
 						Field { label: "Note", help: HELP_NOTE,
@@ -257,7 +266,7 @@ fn EditCard() -> Element {
 						}
 					}
 					button { class: "btn primary", style: "align-self: flex-start;", disabled: loading, onclick: move |_| actions::edit_stable_channel(ctx),
-						if loading { Spinner {} "Submitting..." } else { "Submit" }
+						if loading { Spinner {} "Submitting…" } else { "Submit" }
 					}
 				}
 			}

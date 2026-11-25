@@ -1,0 +1,71 @@
+# Shared by the plain (80) and optional TLS (8443) servers, so they never drift.
+# Rendered by the stock nginx envsubst entrypoint to conf.d/gui-locations.inc
+# (only defined env vars are substituted; $uri survives).
+
+# Relative redirects: nginx only knows its internal port, so absolute
+# redirects (e.g. /setup -> /setup/) would drop the host-facing port.
+absolute_redirect off;
+
+root /usr/share/nginx/html;
+index index.html;
+
+# The wasm bundle compresses ~3x; application/wasm comes from the stock mime.types.
+gzip on;
+gzip_types application/wasm application/javascript text/css;
+
+# The shell references the bundle by content hash, so it must never be served stale.
+location = /index.html {
+    add_header Cache-Control "no-cache";
+}
+
+location = /setup {
+    # Serve setup files only on their exact paths.
+    if ($request_uri !~ "^/setup(\?.*)?$") { return 404; }
+    return 302 /setup/;
+}
+
+# The GUI admin token (hex), as 40-provision-gui-token.sh copies it from sc-lsp's gui.macaroon every few seconds.
+location = /setup/token.txt {
+    # Serve setup files only on their exact paths.
+    if ($request_uri !~ "^/setup/token\.txt(\?.*)?$") { return 404; }
+    include /etc/nginx/setup-key-allow.conf;
+    root /run/sc-gui-token;
+    default_type text/plain;
+    add_header Cache-Control "no-store";
+    # Not copied yet: 503 so the web GUI keeps polling.
+    try_files /token.txt @token_pending;
+}
+
+location @token_pending {
+    default_type text/plain;
+    add_header Cache-Control "no-store";
+    return 503 "gui token not ready\n";
+}
+
+location /setup/ {
+    # Serve setup files only on their exact paths.
+    if ($request_uri !~ "^/setup/(index\.html)?(\?.*)?$") { return 404; }
+    include /etc/nginx/setup-key-allow.conf;
+    try_files $uri $uri/ =404;
+}
+
+# Only GUI routes go to the daemon.
+location ^~ /api/api/ {
+    return 404;
+}
+
+location /api/ {
+    # Resolve the upstream per-request via docker's embedded DNS: a static
+    # proxy_pass caches the IP at nginx startup, which breaks (and blocks
+    # nginx from even starting) when the daemon container restarts or
+    # isn't up yet.
+    resolver 127.0.0.11 valid=30s;
+    set $sc_lsp_upstream "${SC_LSP_UPSTREAM}";
+    rewrite ^/api/(.*)$ /$1 break;
+    proxy_pass $sc_lsp_upstream;
+    proxy_ssl_verify off;   # sc-lsp's cert is self-signed; traffic stays on the app's docker network
+}
+
+location / {
+    try_files $uri $uri/ /index.html;
+}

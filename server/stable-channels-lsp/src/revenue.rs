@@ -711,7 +711,10 @@ pub async fn refund_trade_fee(
         // Only a server-reported rejection proves nothing left; a transport or internal error may follow a real send.
         Err(error) if matches!(
             error.error_code,
-            LdkServerErrorCode::LightningError | LdkServerErrorCode::InvalidRequestError | LdkServerErrorCode::AuthError
+            LdkServerErrorCode::LightningError
+                | LdkServerErrorCode::InvalidRequestError
+                | LdkServerErrorCode::AuthError
+                | LdkServerErrorCode::AuthorizationError
         ) => {
             let _ = db.release_trade_fee_refund(trade_payment_id, Some(&expected_payment_id));
             return Err(RefundError::Send(error.to_string()));
@@ -1063,6 +1066,7 @@ mod tests {
         pub endless: bool,
         pub fail_list: AtomicBool,
         pub send_fails: bool,
+        pub send_denied: bool,
         pub ambiguous_send: bool,
         pub details_fail: bool,
         pub sends: StdMutex<Vec<SpontaneousSendRequest>>,
@@ -1079,6 +1083,9 @@ mod tests {
         async fn spontaneous_send(&self, req: SpontaneousSendRequest) -> Result<SpontaneousSendResponse, LdkServerError> {
             if self.send_fails {
                 return Err(LdkServerError::new(LdkServerErrorCode::LightningError, "no route".to_string()));
+            }
+            if self.send_denied {
+                return Err(LdkServerError::new(LdkServerErrorCode::AuthorizationError, "macaroon requires permission: payments:send".to_string()));
             }
             if self.ambiguous_send {
                 return Err(LdkServerError::new(LdkServerErrorCode::InternalError, "connection reset".to_string()));
@@ -1314,6 +1321,20 @@ mod tests {
         let (again, _) = refund_trade_fee(&db, &fake, "t1", 13).await.unwrap();
         assert_eq!(again, "refund-2");
         assert_eq!(fake.sends.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_refund_the_macaroon_may_not_send_releases_the_claim_and_a_retry_sends_once() {
+        let (_dir, db) = temp_db();
+        let denied = Fake { send_denied: true, ..Default::default() };
+        rejected_trade(&db, &denied, "t1", 5_000);
+        assert!(matches!(refund_trade_fee(&db, &denied, "t1", 10).await, Err(RefundError::Send(_))));
+        assert!(db.list_trade_fee_refunds().unwrap().is_empty(), "LDK Server refuses before sending, so nothing is left to wait for");
+        let fake = Fake::default();
+        rejected_trade(&db, &fake, "t1", 5_000);
+        let (sent, _) = refund_trade_fee(&db, &fake, "t1", 11).await.unwrap();
+        assert_eq!(sent, "refund-1");
+        assert_eq!(fake.sends.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

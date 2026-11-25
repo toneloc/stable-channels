@@ -471,14 +471,14 @@ pub fn feed_attention(c: &Ctx, room: Option<&Room>, fmt_sats: &dyn Fn(u64) -> St
 			items.push(Attention {
 				severity: if history::top_up_alarm_is_urgent(&f.entry.events) { Severity::Danger } else { Severity::Warning },
 				title: if release {
-					format!("Stability payment to {} needs an operator's release", peer_of(f))
+					format!("Stability payment to {} needs releasing", peer_of(f))
 				} else {
 					format!("Stability payment to {} needs a look", peer_of(f))
 				},
 				detail: if release {
-					format!("Latest alarm: {alarm}. At {}. Release it from the channel's history: as arrived once the balance shows it, as not arrived once it is 14 days old.", clock(f.entry.occurred_at_ms))
+					format!("Latest alarm at {}: {alarm}. Release it from the channel's history, as arrived once the balance shows it, or as not arrived once it is 14 days old.", clock(f.entry.occurred_at_ms))
 				} else {
-					format!("Latest alarm: {alarm}. At {}.", clock(f.entry.occurred_at_ms))
+					format!("Latest alarm at {}: {alarm}.", clock(f.entry.occurred_at_ms))
 				},
 				target: c.target(uid),
 			});
@@ -533,7 +533,7 @@ pub fn feed_attention(c: &Ctx, room: Option<&Room>, fmt_sats: &dyn Fn(u64) -> St
 			items.push(Attention {
 				severity: Severity::Warning,
 				title: format!("Splice with {} failed", peer_of(f)),
-				detail: format!("Nothing changed on-chain; the channel keeps its current funding. At {}.", clock(f.entry.occurred_at_ms)),
+				detail: format!("Failed at {}. Nothing changed on-chain; the channel keeps its current funding.", clock(f.entry.occurred_at_ms)),
 				target: c.target(uid),
 			});
 		}
@@ -832,7 +832,7 @@ mod tests {
 		let c = ctx(Some(&channels), Some(&feed), &aliases);
 		let items = feed_attention(&c, None, &fmt);
 		assert_eq!(items.len(), 1);
-		assert_eq!(items[0].title, "Stability payment to Alice needs an operator's release");
+		assert_eq!(items[0].title, "Stability payment to Alice needs releasing");
 		assert_eq!(items[0].severity, Severity::Danger);
 		assert!(items[0].detail.contains("Release it from the channel's history") && items[0].detail.contains("14 days old"), "{}", items[0].detail);
 

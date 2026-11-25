@@ -1,9 +1,11 @@
 use dioxus::prelude::*;
 
 use crate::actions;
-use crate::state::{AppCtx, Op};
+use sc_rest_client::sc_protos::stable::AUDIT_LOG_PATH;
+
+use crate::state::{permission_for, AppCtx, Op};
 use crate::ui::log_view::{LogKind, LogView};
-use crate::ui::widgets::{Empty, Icon, Spinner, TextInput};
+use crate::ui::widgets::{Empty, Icon, NoAccess, Spinner, TextInput};
 
 /// Render one audit JSON line (`{ts,event,data}`) as a compact single line. Non-JSON returns unchanged.
 pub fn format_audit_line(line: &str) -> String {
@@ -64,6 +66,9 @@ pub fn LogToolbar(lines: String, loading: bool, oninput: EventHandler<String>, o
 #[component]
 pub fn AuditLog() -> Element {
 	let ctx = use_context::<AppCtx>();
+	if !ctx.can(AUDIT_LOG_PATH) {
+		return rsx! { div { class: "card", NoAccess { permission: permission_for(AUDIT_LOG_PATH) } } };
+	}
 	let mut forms = ctx.forms;
 	let lines = forms.read().audit_log.max_lines.clone();
 	let loading = ctx.busy(Op::AuditLog);
@@ -72,7 +77,7 @@ pub fn AuditLog() -> Element {
 		div { class: "card stack", style: "gap: 14px;",
 			LogToolbar { lines, loading, oninput: move |v| forms.write().audit_log.max_lines = v, onrefresh: move |_| actions::fetch_audit_log(ctx) }
 			match log {
-				Some(content) if content.is_empty() => rsx! { Empty { icon: "file", title: "No audit events yet." } },
+				Some(content) if content.is_empty() => rsx! { Empty { icon: "file", title: "No audit events yet" } },
 				Some(content) => {
 					let formatted = content.lines().map(format_audit_line).collect::<Vec<_>>().join("\n");
 					rsx! { LogView { kind: LogKind::Audit, text: formatted } }

@@ -6,18 +6,22 @@ use crate::actions;
 use crate::dashboard::{self, FeedEntry, Peg, Progress};
 use crate::format::{format_usd, local_time, relative_short};
 use crate::health::{self, Attention, Severity, Target};
-use crate::state::{ActiveTab, AppCtx, Drawer, Op, RevenueWindow};
+use sc_rest_client::ldk_server_grpc::endpoints::{GET_BALANCES_PATH, LIST_CHANNELS_PATH};
+use sc_rest_client::sc_protos::revenue::GET_REVENUE_PATH;
+use sc_rest_client::sc_protos::stable::{LIST_CHANNEL_LEDGER_EVENTS_PATH, LIST_STABLE_CHANNELS_PATH};
+
+use crate::state::{permission_for, ActiveTab, AppCtx, Drawer, Op, RevenueWindow};
 use crate::ui::open_drawer;
 use crate::ui::revenue::{bounded, spent_untracked, totals};
-use crate::ui::widgets::{Bubble, Card, Empty, Gate, Icon, Pill, RefreshBtn, Spinner, Stat};
+use crate::ui::widgets::{no_access_text, Bubble, Card, Empty, Gate, Icon, NoAccess, Pill, RefreshBtn, Spinner, Stat};
 
-const HELP_USERS: &str = "Channels with a USD target. Online counts the wallets connected right now; new means the LSP started tracking them in the last 7 days.";
-const HELP_STABILIZED: &str = "Sum of the USD targets the LSP keeps stable, and whether every position is at its peg.";
-const HELP_NET: &str = "Fees earned minus fees paid over the last 7 days. Stability settlements are the peg working, not revenue, so they are left out.";
-const HELP_ROOM: &str = "How many more JIT channels the spendable on-chain balance can fund at the average size of the private channels this LSP has opened.";
-const HELP_ATTENTION: &str = "Things the operator may need to act on. Normal work underway is listed under In progress instead.";
+const HELP_USERS: &str = "Channels with a USD target. Online wallets are connected now. New ones were added in the last 7 days.";
+const HELP_STABILIZED: &str = "Total USD the LSP keeps stable, and whether every channel is at its peg.";
+const HELP_NET: &str = "Fees earned minus fees paid in the last 7 days. Stability payments are not counted.";
+const HELP_ROOM: &str = "How many more JIT channels the spendable on-chain balance can fund at your average JIT channel size.";
+const HELP_ATTENTION: &str = "Things you may need to act on. Normal work underway is under In progress.";
 const HELP_PROGRESS: &str = "Channels opening, splicing or closing, funds unlocking after a close, and channel transactions waiting to confirm.";
-const HELP_ACTIVITY: &str = "What happened across every channel, one line per trade, settlement or lifecycle step. Successful balance syncs and wallet reconnects are left out; Channel History has them.";
+const HELP_ACTIVITY: &str = "One line per trade, stability payment or channel step. Successful syncs and reconnects are only in Channel history.";
 const SHORT_LIST: usize = 15;
 const LONG_LIST: usize = 60;
 
@@ -51,7 +55,7 @@ pub fn Overview() -> Element {
 	let peg = data.stable_channels.as_ref().map(|s| dashboard::stabilized(s, price));
 	let week = data.revenue_week.as_ref().map(|r| (totals(&r.lines), spent_untracked(&r.untracked), r.partial));
 	let week_sub_error = data.revenue_week_error.as_ref().map(|_| {
-		if data.revenue_week_unsupported { "Revenue needs the updated daemon" } else { "Revenue unavailable right now" }
+		if data.revenue_week_unsupported { "Revenue needs a newer LSP" } else { "Revenue unavailable right now" }
 	});
 	let room = match (data.balances.as_ref(), data.channels.as_ref()) {
 		(Some(b), Some(c)) => Some(dashboard::room_to_grow(b, c)),
@@ -128,7 +132,7 @@ pub fn Overview() -> Element {
 	});
 	let peg_sub = peg.map(|(_, peg)| match peg {
 		Peg::AtPar => "all at peg".to_string(),
-		Peg::SettlementsDue(n) => format!("{n} settlement{} due", if n == 1 { "" } else { "s" }),
+		Peg::SettlementsDue(n) => format!("{n} stability payment{} due", if n == 1 { "" } else { "s" }),
 		Peg::OffTarget(n) => format!("{n} off target"),
 	});
 	let (week_value, week_sub) = match (&week, week_sub_error) {
@@ -147,7 +151,7 @@ pub fn Overview() -> Element {
 		(None, Some(e)) => (dash(), e.to_string()),
 		(None, None) => (dash(), String::new()),
 	};
-	let feed_title = if activity_unsupported { "Activity needs the updated daemon" } else { "Activity feed unavailable" };
+	let feed_title = if activity_unsupported { "Activity needs a newer LSP" } else { "Activity feed unavailable" };
 	let (room_value, room_sub) = match &room {
 		Some(r) => match (r.channels, r.avg_jit_sats) {
 			(Some(n), Some(avg)) => (
@@ -158,25 +162,37 @@ pub fn Overview() -> Element {
 		},
 		None => (dash(), String::new()),
 	};
+	// Each card follows its own data's permission: a card the token can't read names what it needs.
+	let locked = |route: &str| (dash(), no_access_text(permission_for(route)));
+	let (users_value, users_sub) = if ctx.can(LIST_STABLE_CHANNELS_PATH) {
+		(users.as_ref().map(|u| u.count.to_string()).unwrap_or_else(dash), users_sub.unwrap_or_default())
+	} else {
+		locked(LIST_STABLE_CHANNELS_PATH)
+	};
+	let (peg_value, peg_sub) = if ctx.can(LIST_STABLE_CHANNELS_PATH) {
+		(peg.map(|(usd, _)| format_usd(usd)).unwrap_or_else(dash), peg_sub.unwrap_or_default())
+	} else {
+		locked(LIST_STABLE_CHANNELS_PATH)
+	};
+	let can_revenue = ctx.can(GET_REVENUE_PATH);
+	let (room_value, room_sub) = match [GET_BALANCES_PATH, LIST_CHANNELS_PATH].into_iter().find(|route| !ctx.can(route)) {
+		Some(route) => locked(route),
+		None => (room_value, room_sub),
+	};
+	let can_feed = ctx.can(LIST_CHANNEL_LEDGER_EVENTS_PATH);
 
 	rsx! {
 		div { class: "row end",
 			RefreshBtn { busy, onclick: refresh_all, label: "Refresh all", op: Op::Channels }
 		}
 		div { class: "grid-4",
-			Stat {
-				title: "Stable users",
-				help: HELP_USERS,
-				value: users.as_ref().map(|u| u.count.to_string()).unwrap_or_else(dash),
-				sub: users_sub.unwrap_or_default(),
+			Stat { title: "Stable users", help: HELP_USERS, value: users_value, sub: users_sub }
+			Stat { title: "Stabilized", help: HELP_STABILIZED, value: peg_value, sub: peg_sub }
+			if can_revenue {
+				Stat { title: "Net this week", help: HELP_NET, value: week_value, sub: week_sub, onclick: open_revenue_week }
+			} else {
+				Stat { title: "Net this week", help: HELP_NET, value: dash(), sub: no_access_text(permission_for(GET_REVENUE_PATH)) }
 			}
-			Stat {
-				title: "Stabilized",
-				help: HELP_STABILIZED,
-				value: peg.map(|(usd, _)| format_usd(usd)).unwrap_or_else(dash),
-				sub: peg_sub.unwrap_or_default(),
-			}
-			Stat { title: "Net this week", help: HELP_NET, value: week_value, sub: week_sub, onclick: open_revenue_week }
 			Stat { title: "Room to grow", help: HELP_ROOM, value: room_value, sub: room_sub }
 		}
 		Card {
@@ -213,19 +229,22 @@ pub fn Overview() -> Element {
 			help: HELP_ACTIVITY,
 			sub: if extended { "Last 7 days across every channel" } else { "Last 24 hours across every channel" },
 			class: "flush",
-			match (recent, activity_error) {
-				(None, Some(error)) => rsx! {
+			match (can_feed, recent, activity_error) {
+				(false, _, _) => rsx! {
+					NoAccess { permission: permission_for(LIST_CHANNEL_LEDGER_EVENTS_PATH) }
+				},
+				(true, None, Some(error)) => rsx! {
 					Empty { icon: "list", title: feed_title, hint: error }
 				},
-				(None, None) => rsx! {
+				(true, None, None) => rsx! {
 					div { class: "empty", Spinner { large: true } }
 				},
-				(Some(list), error) => rsx! {
+				(true, Some(list), error) => rsx! {
 					if let Some(error) = error {
-						div { class: "small danger", style: "padding: 10px 16px;", "Last refresh failed: {error}" }
+						div { class: "small danger", style: "padding: 10px 16px;", "Couldn't refresh: {error}" }
 					}
 					if list.is_empty() {
-						Empty { icon: "list", title: "Nothing happened in this window", hint: "Trades, settlements and channel changes will show here." }
+						Empty { icon: "list", title: "Nothing happened in this window", hint: "Trades, stability payments and channel changes show here." }
 					}
 					for (i, entry) in list.into_iter().enumerate() {
 						ActivityRow { key: "{entry.channel}-{entry.entry.key}", entry, peer: peers_of[i].clone(), now }

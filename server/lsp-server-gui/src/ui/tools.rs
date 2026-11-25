@@ -1,8 +1,10 @@
 use dioxus::prelude::*;
 
+use sc_rest_client::ldk_server_grpc::endpoints::{EXPORT_PATHFINDING_SCORES_PATH, SIGN_MESSAGE_PATH, VERIFY_SIGNATURE_PATH};
+
 use crate::actions;
 use crate::state::{AppCtx, Op};
-use crate::ui::widgets::{Bubble, Card, Field, Gate, Icon, Pill, Spinner, TextArea, TextInput};
+use crate::ui::widgets::{any_permission_of, Bubble, Card, Field, Gate, Icon, NoAccess, Pill, Spinner, TextArea, TextInput};
 
 #[component]
 pub fn Tools() -> Element {
@@ -10,13 +12,27 @@ pub fn Tools() -> Element {
 	if !ctx.is_connected() {
 		return rsx! { Gate {} };
 	}
+	// Each tool calls one route; only the ones this token may call are shown.
+	let routes = [SIGN_MESSAGE_PATH, VERIFY_SIGNATURE_PATH, EXPORT_PATHFINDING_SCORES_PATH];
+	let [sign, verify, export] = routes.map(|route| ctx.can(route));
+	if !(sign || verify || export) {
+		return rsx! { Card { NoAccess { permission: any_permission_of(&routes) } } };
+	}
 	rsx! {
 		div { class: "tools",
-			div { class: "tools-pair",
-				SignCard {}
-				VerifyCard {}
+			if sign || verify {
+				div { class: "tools-pair",
+					if sign {
+						SignCard {}
+					}
+					if verify {
+						VerifyCard {}
+					}
+				}
 			}
-			ExportCard {}
+			if export {
+				ExportCard {}
+			}
 		}
 	}
 }
@@ -29,7 +45,7 @@ fn SignCard() -> Element {
 	let pending = ctx.busy(Op::SignMessage);
 	let signature = ctx.results.read().sign_result.clone();
 	rsx! {
-		Card { title: "Sign Message", sub: "Sign with the node's key",
+		Card { title: "Sign message", sub: "Sign with the node's key",
 			icon: rsx! { Bubble { icon: "pen", tone: "blue" } },
 			div { class: "tool-body",
 				Field { label: "Message",
@@ -37,7 +53,7 @@ fn SignCard() -> Element {
 				}
 				div { class: "tool-actions",
 					button { class: "btn primary", disabled: pending, onclick: move |_| actions::sign_message(ctx),
-						if pending { Spinner {} "Signing..." } else { "Sign" }
+						if pending { Spinner {} "Signing…" } else { "Sign" }
 					}
 				}
 				if let Some(signature) = signature {
@@ -47,7 +63,7 @@ fn SignCard() -> Element {
 							button { class: "btn sm", onclick: {
 								let signature = signature.clone();
 								move |_| crate::actions::copy(ctx, &signature)
-							}, Icon { name: "copy", size: 14 } "Copy Signature" }
+							}, Icon { name: "copy", size: 14 } "Copy signature" }
 						}
 						div { class: "value", "{signature}" }
 					}
@@ -65,7 +81,7 @@ fn VerifyCard() -> Element {
 	let pending = ctx.busy(Op::VerifySignature);
 	let result = ctx.results.read().verify_result;
 	rsx! {
-		Card { title: "Verify Signature", sub: "Check a message against a node public key",
+		Card { title: "Verify signature", sub: "Check a message against a node ID",
 			icon: rsx! { Bubble { icon: "shield", tone: "green" } },
 			div { class: "tool-body",
 				Field { label: "Message",
@@ -74,16 +90,16 @@ fn VerifyCard() -> Element {
 				Field { label: "Signature (zbase32)",
 					TextInput { value: form.signature.clone(), mono: true, oninput: move |v| forms.write().verify_signature.signature = v }
 				}
-				Field { label: "Public Key (hex)",
+				Field { label: "Node ID",
 					TextInput { value: form.public_key.clone(), mono: true, oninput: move |v| forms.write().verify_signature.public_key = v }
 				}
 				div { class: "tool-actions",
 					button { class: "btn primary", disabled: pending, onclick: move |_| actions::verify_signature(ctx),
-						if pending { Spinner {} "Verifying..." } else { "Verify" }
+						if pending { Spinner {} "Verifying…" } else { "Verify" }
 					}
 					match result {
-						Some(true) => rsx! { Pill { tone: "success", Icon { name: "check", size: 12 } "VALID" } },
-						Some(false) => rsx! { Pill { tone: "danger", Icon { name: "x", size: 12 } "INVALID" } },
+						Some(true) => rsx! { Pill { tone: "success", Icon { name: "check", size: 12 } "Valid" } },
+						Some(false) => rsx! { Pill { tone: "danger", Icon { name: "x", size: 12 } "Not valid" } },
 						None => rsx! {},
 					}
 				}
@@ -98,14 +114,14 @@ fn ExportCard() -> Element {
 	let pending = ctx.busy(Op::ExportPathfindingScores);
 	let size = ctx.results.read().export_scores_result.as_ref().map(|r| r.scores.len());
 	rsx! {
-		Card { title: "Export Pathfinding Scores", sub: "Export the pathfinding scores used by the router.",
+		Card { title: "Export pathfinding scores", sub: "The scores the router uses to pick paths",
 			icon: rsx! { Bubble { icon: "graph", tone: "purple" } },
 			actions: rsx! {
 				if let Some(n) = size {
 					Pill { tone: "success", "Exported {n} bytes" }
 				}
 				button { class: "btn", disabled: pending, onclick: move |_| actions::export_pathfinding_scores(ctx),
-					if pending { Spinner {} "Exporting..." } else { Icon { name: "download", size: 16 } "Export Scores" }
+					if pending { Spinner {} "Exporting…" } else { Icon { name: "download", size: 16 } "Export scores" }
 				}
 			},
 		}

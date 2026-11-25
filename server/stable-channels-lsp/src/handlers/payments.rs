@@ -1,7 +1,7 @@
 //! REST proxies for LDK Server payment-history endpoints.
 
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::Extension;
 use axum::response::Response;
 
 use std::collections::HashSet;
@@ -11,9 +11,9 @@ use ldk_server_client::ldk_server_grpc::api::{
     ListPaymentsResponse,
 };
 
+use crate::access::sessions::Caller;
 use crate::handlers::{decode_body, map_grpc_error, ok_response};
 use crate::stable_manager::LdkServerCalls;
-use crate::state::AppState;
 
 /// A malformed or unusual upstream pagination implementation must not make this REST request
 /// loop forever. A normal LDK Server history page is much smaller than this bound.
@@ -68,34 +68,34 @@ async fn list_visible_payments(
     })
 }
 
-pub async fn list_payments(State(state): State<AppState>, body: Bytes) -> Response {
+pub async fn list_payments(Extension(caller): Extension<Caller>, body: Bytes) -> Response {
     let req: ListPaymentsRequest = match decode_body(&body) {
         Ok(r) => r,
         Err(resp) => return resp,
     };
-    match list_visible_payments(state.ldk_server.as_ref(), req).await {
+    match list_visible_payments(caller.ldk.as_ref(), req).await {
         Ok(resp) => ok_response(resp),
         Err(e) => map_grpc_error(e),
     }
 }
 
-pub async fn get_payment_details(State(state): State<AppState>, body: Bytes) -> Response {
+pub async fn get_payment_details(Extension(caller): Extension<Caller>, body: Bytes) -> Response {
     let req: GetPaymentDetailsRequest = match decode_body(&body) {
         Ok(r) => r,
         Err(resp) => return resp,
     };
-    match state.ldk_server.get_payment_details(req).await {
+    match caller.ldk.get_payment_details(req).await {
         Ok(resp) => ok_response(resp),
         Err(e) => map_grpc_error(e),
     }
 }
 
-pub async fn list_forwarded_payments(State(state): State<AppState>, body: Bytes) -> Response {
+pub async fn list_forwarded_payments(Extension(caller): Extension<Caller>, body: Bytes) -> Response {
     let req: ListForwardedPaymentsRequest = match decode_body(&body) {
         Ok(r) => r,
         Err(resp) => return resp,
     };
-    match state.ldk_server.list_forwarded_payments(req).await {
+    match caller.ldk.list_forwarded_payments(req).await {
         Ok(resp) => ok_response(resp),
         Err(e) => map_grpc_error(e),
     }

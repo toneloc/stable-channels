@@ -1,5 +1,8 @@
 use dioxus::prelude::*;
-use sc_rest_client::sc_protos::stable::{AccountingSnapshot, ChannelLedgerEvent, ChannelLedgerOverview, LedgerRef};
+use sc_rest_client::sc_protos::stable::{
+	AccountingSnapshot, ChannelLedgerEvent, ChannelLedgerOverview, LedgerRef, LIST_CHANNEL_LEDGER_EVENTS_PATH,
+	RELEASE_STABILITY_PAYMENT_PATH,
+};
 
 use crate::actions;
 use crate::ledger::{
@@ -8,8 +11,8 @@ use crate::ledger::{
 	latest_state_caption, loaded_events_caption, relative_timestamp, sats_delta, snapshot_rows, status_help,
 	status_tone, timeline_order, ForwardingLeg,
 };
-use crate::state::{AppCtx, ChannelLedgerForm, ChannelLedgerRequestKey, Dialog, Op, ReleaseStabilityPaymentForm};
-use crate::ui::widgets::{Bubble, Empty, Hover, Icon, IdCopy, InfoTip, Modal, Pill, SegBtn, Spinner, Stat, TextInput};
+use crate::state::{permission_for, AppCtx, ChannelLedgerForm, ChannelLedgerRequestKey, Dialog, Op, ReleaseStabilityPaymentForm};
+use crate::ui::widgets::{Bubble, Empty, Hover, Icon, IdCopy, InfoTip, Modal, NoAccess, Pill, SegBtn, Spinner, Stat, TextInput};
 use crate::ui::{close_dialog, open_dialog};
 
 const CATEGORIES: [&str; 10] =
@@ -53,6 +56,9 @@ pub fn ChannelLedger() -> Element {
 			actions::fetch_channels(ctx);
 		}
 	});
+	if !ctx.can(LIST_CHANNEL_LEDGER_EVENTS_PATH) {
+		return rsx! { div { class: "card", NoAccess { permission: permission_for(LIST_CHANNEL_LEDGER_EVENTS_PATH) } } };
+	}
 	let form = ctx.forms.read().channel_ledger.clone();
 	let loading = ctx.busy(Op::ChannelLedger);
 	let exporting = ctx.busy(Op::ChannelLedgerExport);
@@ -98,7 +104,7 @@ pub fn ChannelLedger() -> Element {
 				}
 				div { class: "search", style: "flex: 1 1 260px; max-width: 420px;",
 					Icon { name: "search", size: 15 }
-					TextInput { value: form.identifier.clone(), small: true, mono: true, placeholder: "or paste any channel, payment or transaction id", oninput: move |v| edit_form(ctx, |f| f.identifier = v) }
+					TextInput { value: form.identifier.clone(), small: true, mono: true, placeholder: "or paste a channel, payment or transaction ID", oninput: move |v| edit_form(ctx, |f| f.identifier = v) }
 				}
 				label { class: "check",
 					input {
@@ -124,7 +130,7 @@ pub fn ChannelLedger() -> Element {
 				button {
 					class: "btn sm primary",
 					disabled: loading || !has_identifier,
-					title: if has_identifier { "" } else { "Pick a channel or paste an identifier" },
+					title: if has_identifier { "" } else { "Pick a channel or paste an ID" },
 					onclick: move |_| actions::fetch_channel_ledger(ctx, false),
 					Icon { name: "refresh", size: 14 }
 					"Refresh"
@@ -136,7 +142,7 @@ pub fn ChannelLedger() -> Element {
 				button {
 					class: "btn sm",
 					disabled: exporting || !has_identifier,
-					title: if has_identifier { "Export every page for this channel as JSONL" } else { "Pick a channel or paste an identifier" },
+					title: if has_identifier { "Export every page for this channel as JSONL" } else { "Pick a channel or paste an ID" },
 					onclick: move |_| actions::export_channel_ledger(ctx),
 					Icon { name: "download", size: 14 }
 					"Export JSONL"
@@ -172,7 +178,7 @@ pub fn ChannelLedger() -> Element {
 						span { class: "small muted", "{caption}" }
 					}
 					if history.events.is_empty() {
-						div { class: "card", Empty { icon: "list", title: "No ledger events match these exact filters." } }
+						div { class: "card", Empty { icon: "list", title: "No events match these filters" } }
 					}
 					for index in order {
 						EventCard { key: "{history.events[index].id}", event: history.events[index].clone() }
@@ -208,7 +214,7 @@ fn HistoryHeader(channel: String, overview: Option<ChannelLedgerOverview>, first
 	let since = last_ms.map(|t| format!("last activity {}", relative_timestamp(t))).unwrap_or_default();
 	rsx! {
 		div { class: "grid-4",
-			Stat { title: "Counterparty", value: or_dash(peer), sub: capacity }
+			Stat { title: "Peer", value: or_dash(peer), sub: capacity }
 			Stat { title: "Stable target", value: or_dash(target), sub: "Current recorded target" }
 			Stat { title: "Backing / native", value: or_dash(split), sub: "sats" }
 			Stat { title: "History since", value: or_dash(first_ms.map(crate::history::day_label)), sub: since }
@@ -238,7 +244,7 @@ fn Timeline(events: Vec<ChannelLedgerEvent>, overview: Option<ChannelLedgerOverv
 	rsx! {
 		HistoryHeader { channel: channel.clone(), overview, first_ms, last_ms }
 		if days.is_empty() {
-			div { class: "card", Empty { icon: "list", title: "No history yet for this channel." } }
+			div { class: "card", Empty { icon: "list", title: "No history yet for this channel" } }
 		}
 		for (day, list) in days {
 			section { key: "{day}", class: "card flush hist-day",
@@ -270,7 +276,7 @@ fn Timeline(events: Vec<ChannelLedgerEvent>, overview: Option<ChannelLedgerOverv
 							if let Some(target) = entry.target_after.filter(|_| entry.target_changed) {
 								Pill { tone: "info", "target {crate::format::format_usd(target)}" }
 							}
-							if let Some(payment_id) = crate::history::top_up_to_release(&entry.events) {
+							if let Some(payment_id) = crate::history::top_up_to_release(&entry.events).filter(|_| ctx.can(RELEASE_STABILITY_PAYMENT_PATH)) {
 								button {
 									class: "btn sm",
 									onclick: {
@@ -343,7 +349,7 @@ pub fn ReleaseStabilityPaymentDialog() -> Element {
 			if form.confirming.is_some() {
 				p { class: "small", strong { "{form.notice}" } }
 			} else {
-				span { class: "small muted", "Choosing an answer first shows the channel's balance and books and what that answer will do; nothing changes until it is confirmed. \"It arrived\" adds the payment's sats to the channel's books. \"It did not arrive\" drops the payment and the next stability check pays whatever is still owed, so a wrong answer pays the user twice; it is accepted only once the payment is 14 days old and can no longer be in flight. A payment the node still holds is not released, and one it cannot be asked about only once it is 14 days old." }
+				span { class: "small muted", "Picking an answer first shows the channel's balance and books, and what that answer will do. Nothing changes until you confirm. \"It arrived\" adds the payment's sats to the channel's books. \"It did not arrive\" drops the payment, and the next stability check pays what is still owed, so a wrong answer pays the user twice. It is accepted only once the payment is 14 days old and can no longer be in flight. A payment the node still holds is not released; one it cannot be asked about is released only at 14 days old." }
 			}
 		}
 	}
@@ -369,7 +375,7 @@ fn Overview(overview: ChannelLedgerOverview) -> Element {
 	};
 	let span = (overview.oldest_occurred_at_ms.is_some() || overview.newest_occurred_at_ms.is_some()).then(|| {
 		format!(
-			"{} -> {}",
+			"{} → {}",
 			overview.oldest_occurred_at_ms.map(exact_timestamp).unwrap_or_else(|| "—".to_owned()),
 			overview.newest_occurred_at_ms.map(exact_timestamp).unwrap_or_else(|| "—".to_owned())
 		)
@@ -384,7 +390,7 @@ fn Overview(overview: ChannelLedgerOverview) -> Element {
 	let (live, live_sub) = split(sats(state.as_ref().and_then(|s| s.live_receiver_sats), price), latest_state_caption(&overview));
 	rsx! {
 		div { class: "grid-3",
-			Stat { title: "Expected USD", value: expected, sub: "Current recorded target" }
+			Stat { title: "Stable target", value: expected, sub: "Current recorded target" }
 			Stat { title: "Backing", value: backing, sub: backing_sub }
 			Stat { title: "Native", value: native, sub: native_sub }
 			Stat { title: "Live balance", value: live, sub: live_sub }
@@ -447,7 +453,7 @@ fn Accounting(before: Option<AccountingSnapshot>, after: Option<AccountingSnapsh
 			let sats = |value: Option<u64>, price: Option<f64>| value.map(|v| format_sats_with_usd(v, price));
 			let usd = |value: Option<f64>| value.map(|v| format!("${v:.2}"));
 			let rows = vec![
-				("Expected USD", usd(before.expected_usd), usd(after.expected_usd), decimal_delta(before.expected_usd, after.expected_usd, "$")),
+				("Stable target", usd(before.expected_usd), usd(after.expected_usd), decimal_delta(before.expected_usd, after.expected_usd, "$")),
 				("Backing", sats(before.backing_sats, before.btc_price), sats(after.backing_sats, after.btc_price), sats_delta(before.backing_sats, after.backing_sats)),
 				("Native", sats(before.native_sats, before.btc_price), sats(after.native_sats, after.btc_price), sats_delta(before.native_sats, after.native_sats)),
 				(

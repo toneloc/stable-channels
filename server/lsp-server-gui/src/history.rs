@@ -193,18 +193,18 @@ pub fn top_up_alarm(events: &[ChannelLedgerEvent]) -> Option<&'static str> {
 		|| has(events, &["STABILITY_PAYMENT_FAILED", "PAYMENT_FAILED", "STABILITY_PAYMENT_ROLLED_BACK", "STABILITY_PAYMENT_ROLLBACK_SKIPPED", "STABILITY_TOP_UP_RELEASED"]);
 	if has(events, &["STABILITY_TOP_UP_RELEASE_CONFLICT"]) {
 		// The node contradicted the operator's release; booking it does not take back what was paid in its place.
-		Some("it was claimed after an operator counted it as not arrived: the user may have been paid twice")
+		Some("it was claimed after an operator counted it as not arrived, so the user may have been paid twice")
 	} else if has(events, &["STABILITY_TOP_UP_FAILED_AFTER_BOOKING"]) {
-		Some("the node reports it failed after it was booked: verify this channel's books")
+		Some("the node reports it failed after it was booked, so verify this channel's books")
 	} else if has(events, &["STABILITY_TOP_UP_LOOKUP_FAILED"]) {
 		// Booking it later does not undo an event handled without knowing its outcome.
-		Some("its outcome could not be checked before another event was handled: verify this channel's books")
+		Some("its outcome could not be checked before another event was handled, so verify this channel's books")
 	} else if !settled && has(events, &["STABILITY_TOP_UP_BOOKING_FAILED"]) {
-		Some("it was claimed but not booked: the channel record was not found")
+		Some("it was claimed but not booked, as the channel record was not found")
 	} else if !over && has(events, &["STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN"]) {
-		Some("the node will not report what happened to it: nothing is resent until an operator releases it")
+		Some("the node will not report what happened to it, so nothing is resent until an operator releases it")
 	} else if !over && has(events, &["STABILITY_TOP_UP_DEFERRED_STILL_PENDING"]) {
-		Some("it has had no outcome for over an hour: waiting, nothing resent")
+		Some("it has had no outcome for over an hour, so it waits and nothing is resent")
 	} else {
 		None
 	}
@@ -402,13 +402,13 @@ fn describe(events: &[ChannelLedgerEvent], channel: &str, amount: Option<u64>, t
 		"PEER_DISCONNECTED" => (EntryKind::Peer, "Wallet offline".to_owned()),
 		"STABILITY_PUSH_QUEUED" => (EntryKind::Other, "Wallet above peg: push sent to wake it".to_owned()),
 		"STABILITY_CHECK_ONLY" => (EntryKind::Other, "Wallet above peg: waiting for it to pay".to_owned()),
-		"STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN" => (EntryKind::Other, "Node will not report on a stability payment: nothing is resent until an operator releases it".to_owned()),
+		"STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN" => (EntryKind::Other, "Node will not report on a stability payment, so nothing is resent until an operator releases it".to_owned()),
 		"STABILITY_TOP_UP_RELEASED" => (EntryKind::Other, "Operator released a stability payment".to_owned()),
-		"STABILITY_TOP_UP_RELEASE_CONFLICT" => (EntryKind::Other, "Released stability payment was claimed after all: the user may have been paid twice".to_owned()),
-		"STABILITY_TOP_UP_FAILED_AFTER_BOOKING" => (EntryKind::Other, "Booked stability payment reported failed: verify this channel's books".to_owned()),
-		"STABILITY_TOP_UP_DEFERRED_STILL_PENDING" => (EntryKind::Other, "Stability payment without an outcome for over an hour: waiting, nothing resent".to_owned()),
+		"STABILITY_TOP_UP_RELEASE_CONFLICT" => (EntryKind::Other, "Released stability payment was claimed after all, so the user may have been paid twice".to_owned()),
+		"STABILITY_TOP_UP_FAILED_AFTER_BOOKING" => (EntryKind::Other, "Booked stability payment reported failed. Verify this channel's books".to_owned()),
+		"STABILITY_TOP_UP_DEFERRED_STILL_PENDING" => (EntryKind::Other, "Stability payment without an outcome for over an hour. Waiting, nothing resent".to_owned()),
 		"STABILITY_TOP_UP_BOOKING_FAILED" => (EntryKind::Other, "Claimed stability payment not booked: channel record not found".to_owned()),
-		"STABILITY_TOP_UP_LOOKUP_FAILED" => (EntryKind::Other, "Stability payment outcome could not be checked: verify this channel's books".to_owned()),
+		"STABILITY_TOP_UP_LOOKUP_FAILED" => (EntryKind::Other, "Stability payment outcome could not be checked. Verify this channel's books".to_owned()),
 		"SYNC_RETRY_EXHAUSTED" => (EntryKind::Sync, "Stopped retrying the balance sync".to_owned()),
 		"SYNC_RETRY_BLOCKED" => (EntryKind::Sync, "Balance sync blocked: the channel cannot carry it".to_owned()),
 		"CHANNEL_ACCOUNTING_STATE_COMMITTED"
@@ -593,9 +593,9 @@ mod tests {
 			entries[0].summary.clone()
 		};
 		for (alarm, text) in [
-			("STABILITY_TOP_UP_DEFERRED_STILL_PENDING", "it has had no outcome for over an hour: waiting, nothing resent"),
-			("STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN", "the node will not report what happened to it: nothing is resent until an operator releases it"),
-			("STABILITY_TOP_UP_BOOKING_FAILED", "it was claimed but not booked: the channel record was not found"),
+			("STABILITY_TOP_UP_DEFERRED_STILL_PENDING", "it has had no outcome for over an hour, so it waits and nothing is resent"),
+			("STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN", "the node will not report what happened to it, so nothing is resent until an operator releases it"),
+			("STABILITY_TOP_UP_BOOKING_FAILED", "it was claimed but not booked, as the channel record was not found"),
 			("STABILITY_TOP_UP_LOOKUP_FAILED", "verify this channel's books"),
 		] {
 			assert!(flow(alarm, false).ends_with(text), "{alarm}: {}", flow(alarm, false));
@@ -666,7 +666,7 @@ mod tests {
 		assert!(build_entries(&dropped, "uid")[0].summary.ends_with("the user may have been paid twice; an operator counted it as not arrived"));
 		let failed_after = [arrived[0].clone(), arrived[3].clone(), alarm(5, "STABILITY_TOP_UP_FAILED_AFTER_BOOKING")];
 		assert!(top_up_alarm_is_urgent(&failed_after));
-		assert_eq!(top_up_alarm(&failed_after), Some("the node reports it failed after it was booked: verify this channel's books"));
+		assert_eq!(top_up_alarm(&failed_after), Some("the node reports it failed after it was booked, so verify this channel's books"));
 	}
 
 	#[test]
