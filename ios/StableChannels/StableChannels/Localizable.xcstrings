@@ -12885,6 +12885,17 @@
         }
       }
     },
+    "info_notifications_needed_no_stability" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Notifications are required to receive payments while the app is closed."
+          }
+        }
+      }
+    },
     "info_pending_trade" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -13027,6 +13038,17 @@
         }
       }
     },
+    "info_push_connectivity_no_stability" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Your device maintains a persistent connection to receive incoming payments."
+          }
+        }
+      }
+    },
     "info_push_description" : {
       "extractionState" : "extracted_with_value",
       "localizations" : {
@@ -13094,6 +13116,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "后台付款和稳定性更新"
+          }
+        }
+      }
+    },
+    "info_push_description_no_stability" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Background payments"
           }
         }
       }
@@ -20464,6 +20497,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "启用通知以接收付款提醒"
+          }
+        }
+      }
+    },
+    "notifications_disabled_subtitle_no_stability" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Enable notifications to receive payments while the app is closed"
           }
         }
       }

@@ -39,10 +39,7 @@ struct NotificationsSettingsView: View {
                         }
                     }
                 } footer: {
-                    Text(String(
-                        localized: "info_notifications_needed",
-                        defaultValue: "Notifications are required to receive stability payments while the app is closed."
-                    ))
+                    Text(StabilitySurface.current.notificationsRequired)
                 }
             }
         }
