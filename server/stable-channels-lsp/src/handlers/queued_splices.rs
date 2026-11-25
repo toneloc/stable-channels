@@ -69,11 +69,16 @@ pub async fn cancel_queued_splice(State(state): State<AppState>, body: Bytes) ->
         Ok(r) => r,
         Err(resp) => return resp,
     };
-    let (ok, status) = crate::queued_splice::cancel(
-        &state.db,
-        &req.user_channel_id,
-        req.force,
-        crate::revenue::now_secs(),
-    );
+    let now = crate::revenue::now_secs();
+    let (ok, status) = if req.force {
+        let checked = crate::queued_splice::CheckedCall {
+            created_at: req.created_at,
+            last_attempt_at: req.last_attempt_at,
+            funding_txo: req.funding_txo,
+        };
+        crate::queued_splice::release(&state.db, state.ldk_server.as_ref() as &dyn LdkServerCalls, &req.user_channel_id, &checked, now).await
+    } else {
+        crate::queued_splice::cancel(&state.db, &req.user_channel_id, now)
+    };
     ok_response(CancelQueuedSpliceResponse { ok, status })
 }

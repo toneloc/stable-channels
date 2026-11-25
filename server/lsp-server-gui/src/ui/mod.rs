@@ -15,6 +15,7 @@ pub mod onchain;
 pub mod overview;
 pub mod payments;
 pub mod peers;
+pub mod queued_splices;
 pub mod revenue;
 pub mod settings;
 pub mod stable_channels;
@@ -173,6 +174,7 @@ fn CurrentTab() -> Element {
 		ActiveTab::ForwardedPayments => rsx! { forwarded_payments::ForwardedPayments {} },
 		ActiveTab::Lightning => rsx! { lightning::Lightning {} },
 		ActiveTab::Onchain => rsx! { onchain::Onchain {} },
+		ActiveTab::QueuedSplices => rsx! { queued_splices::QueuedSplices {} },
 		ActiveTab::StableChannels => rsx! { stable_channels::StableChannels {} },
 		ActiveTab::Tools => rsx! { tools::Tools {} },
 		ActiveTab::NetworkGraph => rsx! { network_graph::NetworkGraph {} },
@@ -193,6 +195,11 @@ const DOC_LINKS: [(&str, &str); 4] = [
 fn Sidebar() -> Element {
 	let ctx = use_context::<AppCtx>();
 	let active = ctx.nav.read().active_tab;
+	// A memo, so the sidebar re-renders when a splice-in starts or stops being live, not on every data change.
+	let splice_in_live = use_memo(move || {
+		ctx.data.read().queued_splices.as_ref().is_some_and(|q| q.splices.iter().any(queued_splices::splice_in_live))
+	});
+	let splice_in_live = *splice_in_live.read();
 	rsx! {
 		nav { class: "sidebar", "aria-label": "Sections",
 			div { class: "brand",
@@ -205,7 +212,7 @@ fn Sidebar() -> Element {
 			for (group, tabs) in ActiveTab::GROUPS {
 				div { class: "nav-group", key: "{group}",
 					div { class: "nav-group-title", "{group}" }
-					for tab in tabs.iter().copied().filter(|tab| *tab != ActiveTab::Access || ctx.can(LIST_TOKENS_PATH)) {
+					for tab in tabs.iter().copied().filter(|tab| tab.in_sidebar(active, splice_in_live) && (*tab != ActiveTab::Access || ctx.can(LIST_TOKENS_PATH))) {
 						button {
 							key: "{tab:?}",
 							class: if tab == active { "nav-item active" } else { "nav-item" },
@@ -418,7 +425,7 @@ mod tests {
 	use dioxus::prelude::*;
 	use sc_rest_client::ldk_server_grpc::api::{ListChannelsResponse, ListPaymentsResponse};
 	use sc_rest_client::ldk_server_grpc::types::{Channel, Payment};
-	use sc_rest_client::sc_protos::stable::ListChannelLedgerEventsResponse;
+	use sc_rest_client::sc_protos::stable::{ListChannelLedgerEventsResponse, ListQueuedSplicesResponse, QueuedSpliceInfo};
 
 	use super::*;
 	use crate::state::{Op, Prefs, SettlementKind};
@@ -481,7 +488,7 @@ mod tests {
 
 	#[test]
 	fn data_tabs_gate_while_disconnected() {
-		for tab in [ActiveTab::Balances, ActiveTab::Channels, ActiveTab::Payments, ActiveTab::Peers, ActiveTab::Logs] {
+		for tab in [ActiveTab::Balances, ActiveTab::Channels, ActiveTab::Payments, ActiveTab::Peers, ActiveTab::Logs, ActiveTab::QueuedSplices] {
 			let html = render(tab, Seed::Disconnected);
 			assert!(html.contains("Not connected to an LSP"), "{tab:?} should gate");
 			assert!(html.contains("Open Settings"));
@@ -510,6 +517,7 @@ mod tests {
 		assert!(render(ActiveTab::Channels, Seed::ConnectedEmpty).contains("No channel data available"));
 		assert!(render(ActiveTab::Payments, Seed::ConnectedEmpty).contains("No payment data available"));
 		assert!(render(ActiveTab::Balances, Seed::ConnectedEmpty).contains("No balance data"));
+		assert!(render(ActiveTab::QueuedSplices, Seed::ConnectedEmpty).contains("No splice-ins in progress"), "the tab opens its own page");
 	}
 
 	#[test]
@@ -531,6 +539,97 @@ mod tests {
 		assert!(calm.contains("All clear"));
 		assert!(!calm.contains(">In progress<"), "an empty In progress card is hidden");
 		assert!(render(ActiveTab::Overview, Seed::Disconnected).contains("Not connected to an LSP"));
+	}
+
+	#[component]
+	fn SidebarHarness(tab: ActiveTab, rows: Option<Vec<QueuedSpliceInfo>>) -> Element {
+		let ctx = use_context_provider(|| {
+			AppCtx::new(Connection::signed_in("ops", &["admin"]), Forms::default(), Nav { active_tab: tab, ..Default::default() }, Prefs::default(), false)
+		});
+		use_hook(move || {
+			let mut data = ctx.data;
+			data.write().queued_splices = rows.clone().map(|splices| ListQueuedSplicesResponse { splices });
+		});
+		rsx! { Sidebar {} }
+	}
+
+	fn render_sidebar(tab: ActiveTab, rows: Option<Vec<QueuedSpliceInfo>>) -> String {
+		let mut dom = VirtualDom::new_with_props(SidebarHarness, SidebarHarnessProps { tab, rows });
+		dom.rebuild_in_place();
+		dioxus_ssr::render(&dom)
+	}
+
+	/// The opening tag and icon of the sidebar button labelled `label`, when it is listed.
+	fn nav_button<'a>(html: &'a str, label: &str) -> Option<&'a str> {
+		let at = html.find(&format!("<span>{label}</span>"))?;
+		Some(&html[html[..at].rfind("<button")?..at])
+	}
+
+	#[test]
+	fn the_sidebar_lists_queued_splice_ins_only_while_one_is_live_or_open() {
+		let row = |status: &str, pending_on_node: bool| QueuedSpliceInfo { user_channel_id: "7".into(), status: status.into(), pending_on_node, ..Default::default() };
+		let listed = |tab: ActiveTab, rows: Option<Vec<QueuedSpliceInfo>>| nav_button(&render_sidebar(tab, rows), "Queued splice-ins").is_some();
+		assert!(!listed(ActiveTab::Overview, None), "the daemon has not answered");
+		assert!(!listed(ActiveTab::Overview, Some(vec![row("locked", false), row("cancelled", false)])), "nothing live");
+		for (status, pending) in [("queued", false), ("failed", false), ("cancelled", true)] {
+			assert!(listed(ActiveTab::Overview, Some(vec![row("locked", false), row(status, pending)])), "{status}, pending on node: {pending}");
+		}
+		// Kept while it is the open page, so it never vanishes under the operator.
+		let open = render_sidebar(ActiveTab::QueuedSplices, Some(vec![row("locked", false)]));
+		assert!(nav_button(&open, "Queued splice-ins").is_some_and(|button| button.contains("aria-current=\"page\"")));
+		// Under On-chain, after On-chain.
+		let html = render_sidebar(ActiveTab::Overview, Some(vec![row("queued", false)]));
+		let at = |text: &str| html.find(text).unwrap_or_else(|| panic!("missing {text}"));
+		assert!(at("<span>On-chain</span>") < at("<span>Queued splice-ins</span>") && at("<span>Queued splice-ins</span>") < at(">Network<"));
+		// Every other tab is always listed.
+		let plain = render_sidebar(ActiveTab::Overview, None);
+		for tab in ActiveTab::GROUPS.iter().flat_map(|(_, tabs)| tabs.iter()).filter(|tab| **tab != ActiveTab::QueuedSplices) {
+			assert!(nav_button(&plain, tab.label()).is_some(), "{tab:?}");
+		}
+	}
+
+	/// The Queued splice-ins button once `change` has run on the mounted sidebar and rendered; None when it is not listed.
+	fn entry_after(dom: &mut VirtualDom, change: impl FnOnce(AppCtx)) -> Option<String> {
+		let ctx = dom.in_scope(ScopeId::APP, consume_context::<AppCtx>);
+		dom.in_runtime(|| change(ctx));
+		// Polls the memo's recompute task, then reruns the sidebar it marked dirty.
+		dom.render_immediate(&mut dioxus::core::NoOpMutations);
+		nav_button(&dioxus_ssr::render(dom), "Queued splice-ins").map(str::to_owned)
+	}
+
+	#[test]
+	fn the_sidebar_entry_follows_the_queue_after_the_first_render() {
+		// In the app the queue always arrives after the sidebar has rendered.
+		let mut dom = VirtualDom::new_with_props(SidebarHarness, SidebarHarnessProps { tab: ActiveTab::Overview, rows: None });
+		dom.rebuild_in_place();
+		assert!(nav_button(&dioxus_ssr::render(&dom), "Queued splice-ins").is_none());
+		let queue = |status: &'static str, pending_on_node: bool| {
+			move |ctx: AppCtx| {
+				let row = QueuedSpliceInfo { user_channel_id: "7".into(), status: status.into(), pending_on_node, ..Default::default() };
+				let mut data = ctx.data;
+				data.write().queued_splices = Some(ListQueuedSplicesResponse { splices: vec![row] });
+			}
+		};
+		let open = |tab: ActiveTab| {
+			move |ctx: AppCtx| {
+				let mut nav = ctx.nav;
+				nav.write().active_tab = tab;
+			}
+		};
+		let forget = |ctx: AppCtx| {
+			let mut data = ctx.data;
+			data.write().queued_splices = None;
+		};
+		let current = |button: Option<String>| button.is_some_and(|button| button.contains("aria-current=\"page\""));
+		assert!(entry_after(&mut dom, queue("queued", false)).is_some(), "goes live after the first render");
+		assert!(entry_after(&mut dom, queue("locked", false)).is_none(), "locked");
+		assert!(entry_after(&mut dom, queue("splicing", true)).is_some(), "live again");
+		assert!(entry_after(&mut dom, forget).is_none(), "disconnecting forgets the queue");
+		assert!(entry_after(&mut dom, queue("failed", false)).is_some(), "a failed row is still live");
+		// Opened while live, then its last row locks: kept until the operator leaves.
+		assert!(current(entry_after(&mut dom, open(ActiveTab::QueuedSplices))));
+		assert!(current(entry_after(&mut dom, queue("locked", false))), "kept while open");
+		assert!(entry_after(&mut dom, open(ActiveTab::Overview)).is_none(), "gone once the operator leaves");
 	}
 
 	#[component]

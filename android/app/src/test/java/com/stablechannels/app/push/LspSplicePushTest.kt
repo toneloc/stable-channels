@@ -66,6 +66,46 @@ class LspSplicePushTest {
     }
 
     @Test
+    fun `a heartbeat left by a killed process does not count as a running app`() {
+        // Written 3 s before this process started: the app that wrote it is gone.
+        assertFalse(
+            heartbeatIsLive(
+                lastActiveSecs = 100,
+                nowSecs = 105,
+                processStartSecs = 103,
+                thresholdSecs = 10,
+            )
+        )
+        // Written by this process.
+        assertTrue(
+            heartbeatIsLive(
+                lastActiveSecs = 104,
+                nowSecs = 105,
+                processStartSecs = 103,
+                thresholdSecs = 10,
+            )
+        )
+        // From the second the process started: still counts, as before.
+        assertTrue(
+            heartbeatIsLive(
+                lastActiveSecs = 103,
+                nowSecs = 105,
+                processStartSecs = 103,
+                thresholdSecs = 10,
+            )
+        )
+        // Too old, even from this process.
+        assertFalse(
+            heartbeatIsLive(
+                lastActiveSecs = 104,
+                nowSecs = 114,
+                processStartSecs = 50,
+                thresholdSecs = 10,
+            )
+        )
+    }
+
+    @Test
     fun `with nothing owning the node the service is started`() {
         for (direction in
             listOf(LSP_SPLICE_IN_DIRECTION, "lsp_to_user", "incoming_payment", "user_to_lsp")) {

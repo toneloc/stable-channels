@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use sc_rest_client::ldk_server_grpc::endpoints::{
 	CLOSE_CHANNEL_PATH, FORCE_CLOSE_CHANNEL_PATH, LIST_CHANNELS_PATH, OPEN_CHANNEL_PATH, SPLICE_IN_PATH, SPLICE_OUT_PATH,
@@ -12,6 +12,7 @@ use crate::actions;
 use crate::format::{format_sats, format_usd, unit_label};
 use crate::health::{has_stable_position, settle_threshold_usd, settlement, stable_drift, Drift, Settlement};
 use crate::state::{permission_for, AppCtx, ChannelSortColumn, ChannelStatusFilter, Dialog, Drawer, Op};
+use crate::ui::queued_splices::splice_in_live;
 use crate::ui::widgets::{
 	Amount, Bubble, Card, Check, CopyBtn, Empty, Field, Gate, Hover, Icon, IdCopy, Kv, LiquidityBar, Modal, NoAccess, Peer,
 	Pill, RefreshBtn, SidePanel, SortTh, Spinner, Stat, TextInput, Th,
@@ -57,10 +58,11 @@ const HELP_CLTV_EXPIRY_DELTA: &str =
 	"Extra blocks this channel requires on forwarded HTLCs so there is time to resolve them on-chain if needed.";
 const HELP_CLOSE_CHANNEL: &str =
 	"Cooperatively close the channel when possible and return funds on-chain after confirmation.";
-const HELP_SPLICE_IN: &str = "Add on-chain funds to an existing channel without closing and reopening it.";
+const HELP_SPLICE_IN: &str = "Add on-chain funds to an existing channel without closing and reopening it. The daemon queues it, wakes the phone by push, and runs the splice once the channel is usable; the Queued splice-ins page under On-chain shows where it got to.";
 const HELP_SPLICE_OUT: &str = "Move funds from a channel to an on-chain address without fully closing the channel.";
 const HELP_ONCHAIN_ADDRESS: &str =
 	"The Bitcoin address for the current network. Verify it belongs to the intended recipient and network before sending.";
+const SPLICE_IN_DOT: &str = "LSP splice-in in progress";
 
 // Per-row snapshot extracted from state.channels.
 #[derive(Clone, PartialEq)]
@@ -76,6 +78,8 @@ struct ChannelRow {
 	is_usable: bool,
 	shutdown_state: Option<i32>,
 	splicing: bool,
+	/// A queued LSP splice-in is live on this channel: the Peer cell leads with an orange dot.
+	splice_in: bool,
 	stable: Option<StableSummary>,
 }
 
@@ -197,6 +201,11 @@ pub fn Channels() -> Element {
 		})
 		.unwrap_or_default();
 	let splicing = splicing_channels(&data);
+	let splice_ins: HashSet<String> = data
+		.queued_splices
+		.as_ref()
+		.map(|q| q.splices.iter().filter(|row| splice_in_live(row)).map(|row| row.user_channel_id.clone()).collect())
+		.unwrap_or_default();
 	let rows: Option<Vec<ChannelRow>> = data.channels.as_ref().map(|resp| {
 		resp.channels
 			.iter()
@@ -212,6 +221,7 @@ pub fn Channels() -> Element {
 				is_usable: ch.is_usable,
 				shutdown_state: ch.channel_shutdown_state,
 				splicing: splicing.contains(&ch.user_channel_id),
+				splice_in: splice_ins.contains(&ch.user_channel_id),
 				stable: stable_by_id.get(&ch.user_channel_id).cloned(),
 			})
 			.collect()
@@ -313,7 +323,7 @@ pub fn Channels() -> Element {
 				}
 				span { class: "count", "{shown} of {total} channel(s)" }
 				div { class: "row", style: "margin-left: auto;",
-					RefreshBtn { busy: loading, onclick: move |_| actions::fetch_channels(ctx), op: Op::Channels }
+					RefreshBtn { busy: loading, onclick: move |_| { actions::fetch_channels(ctx); actions::fetch_queued_splices(ctx); }, op: Op::Channels }
 					if can_open {
 						button { class: "btn sm accent", onclick: move |_| open_dialog(ctx, Dialog::OpenChannel), Icon { name: "plus", size: 14 } "Open channel" }
 					}
@@ -359,7 +369,12 @@ fn ChannelRowView(row: ChannelRow) -> Element {
 	let uid = row.user_channel_id.clone();
 	rsx! {
 		tr { onclick: move |_| open_drawer(ctx, Drawer::Channel(uid.clone())),
-			td { Peer { node_id: row.counterparty_node_id.clone() } }
+			td {
+				if row.splice_in {
+					Hover { tip: SPLICE_IN_DOT.to_string(), span { class: "dot splice", role: "img", "aria-label": SPLICE_IN_DOT } }
+				}
+				Peer { node_id: row.counterparty_node_id.clone() }
+			}
 			td { class: "right", Amount { msat: row.channel_value_sats * 1000 } }
 			td { class: "right", Amount { msat: row.outbound_capacity_msat } }
 			td { class: "right", Amount { msat: row.inbound_capacity_msat } }
@@ -863,14 +878,14 @@ pub fn SpliceInDialog() -> Element {
 	rsx! {
 		Modal {
 			title: "Splice in",
-			sub: "Add funds to an existing channel",
+			sub: "Queue funds to add to a channel; the phone is woken by push",
 			icon: rsx! { Bubble { icon: "merge", tone: "green" } },
 			onclose: move |_| cancel(),
 			footer: rsx! {
 				button { class: "btn ghost", onclick: move |_| cancel(), "Cancel" }
 				button { class: "btn primary", disabled: pending, onclick: move |_| actions::splice_in(ctx),
 					if pending { Spinner {} }
-					"Splice in"
+					"Queue splice-in"
 				}
 			},
 			div { class: "notice", Icon { name: "info", size: 16 } "{HELP_SPLICE_IN}" }
@@ -967,6 +982,7 @@ pub fn UpdateConfigDialog() -> Element {
 mod tests {
 	use super::*;
 	use crate::health::drift;
+	use sc_rest_client::sc_protos::stable::QueuedSpliceInfo;
 
 	#[component]
 	fn PanelHarness(sc: sc_rest_client::sc_protos::stable::StableChannelInfo) -> Element {
@@ -1116,5 +1132,91 @@ mod tests {
 		assert!(above.contains("user&#39;s wallet sends ≈ 400 sats"), "above target the user pays (SSR escapes the apostrophe)");
 		let calm = panel_html(49_900);
 		assert!(calm.contains("No stability payment yet · $0.15 more drift before one"));
+	}
+
+	/// A queue row on channel `uid`, updated just now.
+	fn queued_row(uid: &str, status: &str, pending_on_node: bool) -> QueuedSpliceInfo {
+		QueuedSpliceInfo {
+			user_channel_id: uid.into(),
+			counterparty_node_id: format!("02a{uid}"),
+			amount_sats: 50_000,
+			status: status.into(),
+			pending_on_node,
+			updated_at: crate::format::now_secs() as i64,
+			..Default::default()
+		}
+	}
+
+	/// The Channels page with channels on `uids` (None: the list has not loaded) and the given queue rows.
+	#[component]
+	fn ChannelsHarness(uids: Option<Vec<String>>, rows: Vec<QueuedSpliceInfo>) -> Element {
+		use crate::state::{Connection, Forms, Nav, Prefs};
+		use sc_rest_client::ldk_server_grpc::api::ListChannelsResponse;
+		use sc_rest_client::ldk_server_grpc::types::Channel;
+		use sc_rest_client::sc_protos::stable::ListQueuedSplicesResponse;
+		let ctx = use_context_provider(|| {
+			AppCtx::new(Connection::signed_in("ops", &["admin"]), Forms::default(), Nav::default(), Prefs::default(), false)
+		});
+		use_hook(move || {
+			let channel = |uid: &String| Channel {
+				user_channel_id: uid.clone(),
+				channel_id: format!("c{uid}"),
+				counterparty_node_id: format!("02a{uid}"),
+				channel_value_sats: 1_000_000,
+				is_channel_ready: true,
+				is_usable: true,
+				..Default::default()
+			};
+			let mut data = ctx.data;
+			let mut d = data.write();
+			d.channels = uids.as_ref().map(|uids| ListChannelsResponse { channels: uids.iter().map(channel).collect() });
+			d.queued_splices = Some(ListQueuedSplicesResponse { splices: rows.clone() });
+		});
+		rsx! { Channels {} }
+	}
+
+	fn channels_html(uids: Option<&[&str]>, rows: Vec<QueuedSpliceInfo>) -> String {
+		let uids = uids.map(|uids| uids.iter().map(|uid| uid.to_string()).collect());
+		let mut dom = VirtualDom::new_with_props(ChannelsHarness, ChannelsHarnessProps { uids, rows });
+		dom.rebuild_in_place();
+		dioxus_ssr::render(&dom)
+	}
+
+	#[test]
+	fn the_queue_card_has_moved_off_the_channels_page() {
+		let rows = vec![queued_row("1", "splicing", true), queued_row("2", "queued", false)];
+		for uids in [Some(&["1", "2"][..]), None] {
+			let html = channels_html(uids, rows.clone());
+			assert!(!html.contains("Queued splice-ins") && !html.contains(">Release<"), "no queue card (channels loaded: {})", uids.is_some());
+		}
+		let unloaded = channels_html(None, rows);
+		assert!(unloaded.contains("Loading channels...") || unloaded.contains("No channel data available"), "the channel card still says why it is empty");
+	}
+
+	/// The table row of the channel whose peer is `peer`.
+	fn row_with<'a>(html: &'a str, peer: &str) -> &'a str {
+		html.split("<tr").find(|row| row.contains(&format!(">{peer}<"))).unwrap_or_else(|| panic!("no row for {peer}"))
+	}
+
+	#[test]
+	fn only_a_channel_with_a_live_splice_in_gets_the_orange_dot() {
+		let rows = vec![
+			queued_row("1", "splicing", false),
+			queued_row("2", "locked", false),
+			queued_row("3", "cancelled", false),
+			queued_row("4", "cancelled", true),
+			queued_row("5", "failed", false),
+		];
+		let html = channels_html(Some(&["1", "2", "3", "4", "5", "6"]), rows);
+		let dotted: Vec<&str> = ["02a1", "02a2", "02a3", "02a4", "02a5", "02a6"]
+			.into_iter()
+			.filter(|peer| row_with(&html, peer).contains("dot splice"))
+			.collect();
+		assert_eq!(dotted, ["02a1", "02a4", "02a5"], "open or pending on the node; not locked, cancelled, or never queued");
+		let dotted_row = row_with(&html, "02a1");
+		assert!(dotted_row.contains("aria-label=\"LSP splice-in in progress\""));
+		let (dot, peer) = (dotted_row.find("dot splice").unwrap(), dotted_row.find("class=\"peer\"").unwrap());
+		assert!(dot < peer, "the dot leads the Peer cell");
+		assert_eq!(html.matches("dot splice").count(), 3);
 	}
 }

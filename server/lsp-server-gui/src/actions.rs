@@ -14,9 +14,8 @@ use sc_rest_client::ldk_server_grpc::api::{
 	GraphGetChannelRequest, GraphGetNodeRequest, GraphListChannelsRequest, GraphListNodesRequest,
 	ListChannelsRequest, ListForwardedPaymentsRequest, ListPaymentsRequest, ListPaymentsResponse,
 	ListPeersRequest, OnchainReceiveRequest, OnchainSendRequest, OnchainSendResponse, OpenChannelRequest,
-	SignMessageRequest, SpliceInRequest, SpliceOutRequest, SpliceOutResponse, SpontaneousSendRequest,
+	SignMessageRequest, SpliceOutRequest, SpliceOutResponse, SpontaneousSendRequest,
 	UpdateChannelConfigRequest, VerifySignatureRequest, AllFunds, onchain_send_request, open_channel_request,
-	splice_in_request,
 };
 use sc_rest_client::ldk_server_grpc::endpoints::{
 	GET_BALANCES_PATH, GET_NODE_INFO_PATH, GET_PAYMENT_DETAILS_PATH,
@@ -34,16 +33,18 @@ use sc_rest_client::sc_protos::access::{
 };
 use sc_rest_client::sc_protos::revenue::{GetRevenueRequest, RefundTradeFeeRequest, GET_REVENUE_PATH};
 use sc_rest_client::sc_protos::stable::{
-	EditStableChannelRequest, GetPriceRequest, ListChannelLedgerEventsRequest,
-	ListChannelLedgerEventsResponse, ListSettlementPaymentsRequest, ListStableChannelsRequest,
-	LogRequest, ReleaseStabilityPaymentRequest, ReleaseStabilityPaymentResponse, AUDIT_LOG_PATH, GET_PRICE_PATH, LDK_LOG_PATH,
-	LIST_CHANNEL_LEDGER_EVENTS_PATH, LIST_SETTLEMENT_PAYMENTS_PATH, LIST_STABLE_CHANNELS_PATH,
+	CancelQueuedSpliceRequest, CancelQueuedSpliceResponse, EditStableChannelRequest, GetPriceRequest,
+	ListChannelLedgerEventsRequest, ListChannelLedgerEventsResponse, ListQueuedSplicesRequest,
+	ListQueuedSplicesResponse, ListSettlementPaymentsRequest, ListStableChannelsRequest, LogRequest,
+	QueueSpliceInRequest, ReleaseStabilityPaymentRequest, ReleaseStabilityPaymentResponse, AUDIT_LOG_PATH,
+	GET_PRICE_PATH, LDK_LOG_PATH, LIST_CHANNEL_LEDGER_EVENTS_PATH, LIST_QUEUED_SPLICES_PATH,
+	LIST_SETTLEMENT_PAYMENTS_PATH, LIST_STABLE_CHANNELS_PATH,
 };
 
 use crate::ledger::{checked_next_cursor, merge_ledger_events};
 use crate::state::{
 	AccessForm, ActiveTab, AppCtx, ChannelLedgerForm, ChannelLedgerRequestKey, ConnectionStatus, CreatedToken, Data, Dialog,
-	Drawer, LogsTab, Op, RevokeTokenForm, SendKind, SettlementKind,
+	Drawer, LogsTab, Op, QueuedRelease, RevokeTokenForm, SendKind, SettlementKind,
 };
 
 /// A failed request as the operator sees it.
@@ -116,6 +117,9 @@ fn clear_data(ctx: AppCtx) {
 	forms.write().access = AccessForm::default();
 	let mut data = ctx.data;
 	*data.write() = Data::default();
+	// A Release ticked for one session's call must not carry over to the next.
+	let mut view = ctx.view;
+	view.write().close_release();
 }
 
 /// The daemon refused the token: drop the session and land on Settings with its reason.
@@ -313,6 +317,7 @@ pub async fn connect_now(ctx: AppCtx) -> bool {
 	fetch_channels(ctx);
 	fetch_price(ctx);
 	fetch_stable_channels(ctx);
+	fetch_queued_splices(ctx);
 	fetch_payments(ctx, false);
 	fetch_forwarded_payments(ctx);
 	fetch_peers(ctx);
@@ -1181,26 +1186,136 @@ pub fn splice_in(ctx: AppCtx) {
 		ctx.error(CHANNEL_IDS_REQUIRED);
 		return;
 	};
-	run(
+	// The daemon queues the splice, wakes the phone by push and runs it once the channel is usable.
+	run_with(
 		ctx,
 		Op::SpliceIn,
 		async move {
 			client
-				.splice_in(SpliceInRequest {
+				.queue_splice_in(QueueSpliceInRequest {
 					user_channel_id,
 					counterparty_node_id,
-					amount: Some(splice_in_request::Amount::SpliceAmountSats(splice_amount_sats)),
+					amount_sats: splice_amount_sats,
 				})
 				.await
 		},
-		|ctx, _v| {
-			ctx.success("Splice-in started");
-			let mut forms = ctx.forms;
-			forms.write().splice_in = Default::default();
-			close_dialog(ctx);
+		|ctx, v, _| {
+			if v.ok {
+				ctx.success(v.status);
+				let mut forms = ctx.forms;
+				forms.write().splice_in = Default::default();
+				close_dialog(ctx);
+			} else {
+				ctx.error(v.status);
+			}
+			fetch_queued_splices(ctx);
 			fetch_channels(ctx);
 		},
+		|ctx, e| ctx.error(splice_in_error(e)),
 	);
+}
+
+/// Every channel's queued splice-in. An older daemon without the route leaves the list as it was; any other failure is reported like the other fetches.
+pub fn fetch_queued_splices(ctx: AppCtx) {
+	let Some(client) = client_for(ctx, LIST_QUEUED_SPLICES_PATH) else { return };
+	run_with(
+		ctx,
+		Op::ListQueuedSplices,
+		async move { client.list_queued_splices(ListQueuedSplicesRequest {}).await },
+		|ctx, list, _| queued_splices_listed(ctx, list),
+		queued_splices_failed,
+	);
+}
+
+/// A new queue list. An open Release confirmation closes once its call is no longer pending on the node, so its tick cannot carry over to a later call.
+pub fn queued_splices_listed(ctx: AppCtx, list: ListQueuedSplicesResponse) {
+	let mut view = ctx.view;
+	if view.peek().release_outlived(&list.splices) {
+		view.write().close_release();
+	}
+	let mut data = ctx.data;
+	data.write().queued_splices = Some(list);
+}
+
+/// A failed queue list: reported like the other fetches, except from an older daemon that has no such route.
+pub fn queued_splices_failed(ctx: AppCtx, error: String) {
+	if !crate::dashboard::needs_newer_daemon(&error) {
+		ctx.error(error);
+	}
+}
+
+/// What Splice+ shows when the daemon refused the request outright. An older daemon has no queue route, and an unknown route answers 404 with no body.
+fn splice_in_error(error: String) -> String {
+	if error.contains("HTTP 404") {
+		"Splice+ needs the updated daemon: this one has no splice-in queue, so nothing was spliced".to_owned()
+	} else {
+		error
+	}
+}
+
+/// What Release says when the daemon no longer lists the checked call as pending on the node.
+const RELEASE_CALL_CHANGED: &str =
+	"Not released: the call you checked is no longer the one pending on the node. Check the node again before releasing.";
+
+/// Cancel a channel's queued splice-in. A call the node has not answered stays pending, so no new request goes out until it answers or is released.
+pub fn cancel_queued_splice(ctx: AppCtx, user_channel_id: String) {
+	if busy(ctx, Op::CancelQueuedSplice) {
+		return;
+	}
+	let Some(client) = client(ctx) else { return };
+	run(
+		ctx,
+		Op::CancelQueuedSplice,
+		async move { client.cancel_queued_splice(CancelQueuedSpliceRequest { user_channel_id, force: false, ..Default::default() }).await.map(Some) },
+		cancel_answered,
+	);
+}
+
+/// Release the call a ticked confirmation is for: the forced cancel, which drops the queue's guard against a second splice on the channel. Right before sending, the daemon's list is read again, and nothing is sent unless that same call is still pending on the node.
+pub fn release_queued_splice(ctx: AppCtx) {
+	if busy(ctx, Op::CancelQueuedSplice) {
+		return;
+	}
+	let mut view = ctx.view;
+	let Some(release) = view.peek().queued_release.clone().filter(|release| release.confirmed) else { return };
+	view.write().close_release();
+	let Some(client) = client(ctx) else { return };
+	run(
+		ctx,
+		Op::CancelQueuedSplice,
+		async move {
+			let listed = client.list_queued_splices(ListQueuedSplicesRequest {}).await?;
+			let Some(request) = queued_release_request(&release, &listed) else { return Ok(None) };
+			client.cancel_queued_splice(request).await.map(Some)
+		},
+		cancel_answered,
+	);
+}
+
+/// The forced cancel for a ticked confirmation, naming the call that was checked, or None when the daemon's fresh list no longer has that call pending on the node.
+pub fn queued_release_request(release: &QueuedRelease, listed: &ListQueuedSplicesResponse) -> Option<CancelQueuedSpliceRequest> {
+	listed
+		.splices
+		.iter()
+		.any(|row| release.is_for(row))
+		.then(|| CancelQueuedSpliceRequest {
+			user_channel_id: release.user_channel_id.clone(),
+			force: true,
+			// The daemon releases only this call, so one that changes after this list is left pending.
+			created_at: release.created_at,
+			last_attempt_at: release.last_attempt_at,
+			funding_txo: release.funding_txo.clone(),
+		})
+}
+
+/// The daemon's answer to a Cancel or Release; None when Release found the checked call no longer pending.
+fn cancel_answered(ctx: AppCtx, answer: Option<CancelQueuedSpliceResponse>) {
+	match answer {
+		None => ctx.error(RELEASE_CALL_CHANGED),
+		Some(v) if v.ok => ctx.success(v.status),
+		Some(v) => ctx.error(v.status),
+	}
+	fetch_queued_splices(ctx);
 }
 
 pub fn splice_out(ctx: AppCtx) {
@@ -1771,6 +1886,8 @@ pub fn resolve_aliases(ctx: AppCtx, node_ids: impl IntoIterator<Item = String>) 
 
 /// Background refresh of whatever the visible page shows.
 pub fn refresh_visible(ctx: AppCtx) {
+	// On every page: the sidebar lists Queued splice-ins only while one is live, and the Channels list dots its channel.
+	fetch_queued_splices(ctx);
 	let nav = *ctx.nav.peek();
 	match nav.active_tab {
 		ActiveTab::Overview => {
@@ -1994,6 +2111,12 @@ mod tests {
 			payments: ids.iter().map(|id| Payment { payment_id: id.to_string(), ..Default::default() }).collect(),
 			next_page_token: next.map(|index| format!("t{index}")),
 		}
+	}
+
+	#[test]
+	fn splice_in_against_an_older_daemon_says_to_upgrade_and_other_errors_pass_through() {
+		assert!(splice_in_error("HTTP 404 Not Found".into()).starts_with("Splice+ needs the updated daemon"));
+		assert_eq!(splice_in_error("connection refused".into()), "connection refused");
 	}
 
 	#[test]

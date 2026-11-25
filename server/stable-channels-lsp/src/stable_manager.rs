@@ -4802,6 +4802,10 @@ pub(crate) mod tests {
         pub spendable_onchain_sats: std::sync::atomic::AtomicU64,
         /// Runs once inside the next balance read: something that happens while a caller is away from its tables.
         pub balances_hook: StdMutex<Option<Box<dyn FnOnce() + Send>>>,
+        /// When the node last synced its on-chain wallet; by default later than any test's clock.
+        pub onchain_synced_at: StdMutex<Option<u64>>,
+        /// Whether reading the node's info fails.
+        pub node_info_fails: std::sync::atomic::AtomicBool,
     }
 
     /// Use up one of a counter's remaining failures; false once none are left.
@@ -4847,6 +4851,8 @@ pub(crate) mod tests {
                 splice_in_error: StdMutex::new(None),
                 spendable_onchain_sats: std::sync::atomic::AtomicU64::new(0),
                 balances_hook: StdMutex::new(None),
+                onchain_synced_at: StdMutex::new(Some(i64::MAX as u64)),
+                node_info_fails: std::sync::atomic::AtomicBool::new(false),
             }
         }
         pub fn like_ldk_node(mut self) -> Self {
@@ -4897,6 +4903,15 @@ pub(crate) mod tests {
             }
             self.splice_ins.lock().unwrap().push(req);
             Ok(SpliceInResponse {})
+        }
+        async fn get_node_info(&self, _req: GetNodeInfoRequest) -> Result<GetNodeInfoResponse, LdkServerError> {
+            if self.node_info_fails.load(Ordering::SeqCst) {
+                return Err(LdkServerError::new(LdkServerErrorCode::InternalServerError, "node unavailable"));
+            }
+            Ok(GetNodeInfoResponse {
+                latest_onchain_wallet_sync_timestamp: *self.onchain_synced_at.lock().unwrap(),
+                ..Default::default()
+            })
         }
         async fn spontaneous_send(
             &self,

@@ -12,7 +12,8 @@ use sc_rest_client::ldk_server_grpc::api::{
 use sc_rest_client::sc_protos::access::{allows, required, ListTokensResponse, Requirement};
 use sc_rest_client::sc_protos::revenue::{GetRevenueResponse, RevenueItem};
 use sc_rest_client::sc_protos::stable::{
-	GetPriceResponse, ListChannelLedgerEventsResponse, ListStableChannelsResponse, LogResponse,
+	GetPriceResponse, ListChannelLedgerEventsResponse, ListQueuedSplicesResponse,
+	ListStableChannelsResponse, LogResponse, QueuedSpliceInfo,
 };
 
 use crate::config::{ChainSourceConfig, ChainSourceType};
@@ -38,6 +39,7 @@ pub enum ActiveTab {
 	ForwardedPayments,
 	Lightning,
 	Onchain,
+	QueuedSplices,
 	StableChannels,
 	Tools,
 	NetworkGraph,
@@ -61,7 +63,7 @@ impl ActiveTab {
 				ActiveTab::ForwardedPayments,
 			],
 		),
-		("On-chain", &[ActiveTab::Onchain]),
+		("On-chain", &[ActiveTab::Onchain, ActiveTab::QueuedSplices]),
 		("Network", &[ActiveTab::NetworkGraph]),
 		("System", &[ActiveTab::Tools, ActiveTab::Logs, ActiveTab::Settings, ActiveTab::Access]),
 	];
@@ -78,6 +80,7 @@ impl ActiveTab {
 			ActiveTab::ForwardedPayments => "Forwarded",
 			ActiveTab::Lightning => "Lightning",
 			ActiveTab::Onchain => "On-chain",
+			ActiveTab::QueuedSplices => "Queued splice-ins",
 			ActiveTab::StableChannels => "Stable",
 			ActiveTab::Tools => "Tools",
 			ActiveTab::NetworkGraph => "Graph",
@@ -111,6 +114,7 @@ impl ActiveTab {
 			ActiveTab::ForwardedPayments => "Payments routed through this node and the fees earned",
 			ActiveTab::Lightning => "Send and receive over Lightning",
 			ActiveTab::Onchain => "Send, receive and review on-chain funds",
+			ActiveTab::QueuedSplices => "LSP splice-ins queued for the phone and where each got to",
 			ActiveTab::StableChannels => "USD-stabilized channels and their targets",
 			ActiveTab::Tools => "Message signing and router utilities",
 			ActiveTab::NetworkGraph => "Public channels and nodes known from gossip",
@@ -132,6 +136,7 @@ impl ActiveTab {
 			ActiveTab::ForwardedPayments => "forward",
 			ActiveTab::Lightning => "zap",
 			ActiveTab::Onchain => "cube",
+			ActiveTab::QueuedSplices => "merge",
 			ActiveTab::StableChannels => "shield",
 			ActiveTab::Tools => "wrench",
 			ActiveTab::NetworkGraph => "graph",
@@ -139,6 +144,11 @@ impl ActiveTab {
 			ActiveTab::Settings => "sliders",
 			ActiveTab::Access => "key",
 		}
+	}
+
+	/// Whether the sidebar lists this tab: Queued splice-ins only while a splice-in is live, or while it is open so it never vanishes under the operator.
+	pub fn in_sidebar(self, active: ActiveTab, splice_in_live: bool) -> bool {
+		self != ActiveTab::QueuedSplices || splice_in_live || active == self
 	}
 }
 
@@ -678,6 +688,8 @@ pub struct Data {
 	pub forwarded_payments_page_token: Option<String>,
 	pub payment_details: Option<GetPaymentDetailsResponse>,
 	pub stable_channels: Option<ListStableChannelsResponse>,
+	/// Every channel's queued LSP splice-in and where it got to; None until the daemon answered.
+	pub queued_splices: Option<ListQueuedSplicesResponse>,
 	/// payment_id (hex) -> settlement classification, fetched alongside payments.
 	pub settlement_kinds: Option<HashMap<String, SettlementKind>>,
 	pub ldk_log: Option<LogResponse>,
@@ -789,6 +801,38 @@ impl Default for LogViewState {
 	}
 }
 
+/// An open Release confirmation on the Queued splice-ins card. It belongs to one call as the operator saw it: the channel, the request (`created_at`, which a re-queue changes), the call (`last_attempt_at`, which a new call or the node's answer changes) and the splice the node reported signed for it (`funding_txo`), so a tick cannot arm another row, a later call on the same channel, or a call the node signed after the operator checked it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct QueuedRelease {
+	pub user_channel_id: String,
+	pub created_at: i64,
+	pub last_attempt_at: i64,
+	pub funding_txo: String,
+	pub confirmed: bool,
+}
+
+impl QueuedRelease {
+	/// The confirmation for the call `row` has pending on the node, with its tick.
+	pub fn for_call(row: &QueuedSpliceInfo, confirmed: bool) -> Self {
+		Self {
+			user_channel_id: row.user_channel_id.clone(),
+			created_at: row.created_at,
+			last_attempt_at: row.last_attempt_at,
+			funding_txo: row.funding_txo.clone(),
+			confirmed,
+		}
+	}
+
+	/// Whether `row` still has this confirmation's call pending on the node. A status change or a repeat push is still the same call.
+	pub fn is_for(&self, row: &QueuedSpliceInfo) -> bool {
+		row.pending_on_node
+			&& row.user_channel_id == self.user_channel_id
+			&& row.created_at == self.created_at
+			&& row.last_attempt_at == self.last_attempt_at
+			&& row.funding_txo == self.funding_txo
+	}
+}
+
 /// Session-only UI state that must survive tab switches (filters, sorts, confirmations).
 #[derive(Clone, PartialEq)]
 pub struct ViewState {
@@ -808,6 +852,8 @@ pub struct ViewState {
 	pub force_close_confirm: bool,
 	pub splice_out_confirm: bool,
 	pub send_all_confirm: bool,
+	/// The queued splice-in whose Release confirmation is open, if any.
+	pub queued_release: Option<QueuedRelease>,
 	pub config_paste_text: String,
 	/// Payment type filter ("" = all).
 	pub payment_type: String,
@@ -818,6 +864,28 @@ pub struct ViewState {
 	pub stable_show_unpositioned: bool,
 	/// Overview activity widened from 24 h to 7 days by "Show more".
 	pub activity_extended: bool,
+}
+
+impl ViewState {
+	/// The row's Release: opens the confirmation for its pending call, unticked. Nothing is sent from here.
+	pub fn open_release(&mut self, row: &QueuedSpliceInfo) {
+		self.queued_release = Some(QueuedRelease::for_call(row, false));
+	}
+
+	/// The confirmation's tick, for the call `row` has pending now.
+	pub fn tick_release(&mut self, row: &QueuedSpliceInfo, confirmed: bool) {
+		self.queued_release = Some(QueuedRelease::for_call(row, confirmed));
+	}
+
+	/// "Keep waiting": closes the confirmation.
+	pub fn close_release(&mut self) {
+		self.queued_release = None;
+	}
+
+	/// Whether the open confirmation's call is no longer pending on the node in `rows`.
+	pub fn release_outlived(&self, rows: &[QueuedSpliceInfo]) -> bool {
+		self.queued_release.as_ref().is_some_and(|release| !rows.iter().any(|row| release.is_for(row)))
+	}
 }
 
 impl Default for ViewState {
@@ -837,6 +905,7 @@ impl Default for ViewState {
 			force_close_confirm: false,
 			splice_out_confirm: false,
 			send_all_confirm: false,
+			queued_release: None,
 			config_paste_text: String::new(),
 			payment_type: String::new(),
 			revenue_window: RevenueWindow::default(),
@@ -881,6 +950,8 @@ pub enum Op {
 	ExportPathfindingScores,
 	GetPrice,
 	ListStableChannels,
+	ListQueuedSplices,
+	CancelQueuedSplice,
 	EditStableChannel,
 	ReleaseStabilityPayment,
 	ListSettlementPayments,
@@ -919,6 +990,7 @@ impl Op {
 			| Op::CloseChannel
 			| Op::ForceCloseChannel
 			| Op::SpliceIn
+			| Op::CancelQueuedSplice
 			| Op::SpliceOut
 			| Op::UpdateChannelConfig
 			| Op::EditStableChannel
@@ -947,6 +1019,7 @@ impl Op {
 			| Op::ExportPathfindingScores
 			| Op::GetPrice
 			| Op::ListStableChannels
+			| Op::ListQueuedSplices
 			| Op::ListSettlementPayments
 			| Op::GetRevenue
 			| Op::LdkLog
