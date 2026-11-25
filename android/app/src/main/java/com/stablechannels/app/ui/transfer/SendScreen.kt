@@ -327,6 +327,12 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
             val importId = ++photoImportId
             isExtractingQR = true
             scope.launch {
+                // An import replaced while it ran shows no message.
+                fun showToast(message: String) {
+                    if (importId == photoImportId) {
+                        Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                    }
+                }
                 try {
                     val bitmap =
                         withContext(Dispatchers.IO) {
@@ -334,12 +340,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                         }
                     if (bitmap == null) {
                         Log.w(TAG, "Could not decode a bitmap from picked image URI: $uri")
-                        Toast.makeText(
-                                context,
-                                "Could not read the selected image",
-                                Toast.LENGTH_LONG,
-                            )
-                            .show()
+                        showToast("Could not read the selected image")
                         return@launch
                     }
 
@@ -355,45 +356,33 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                             scanner.process(inputImage).await()
                         } catch (e: Exception) {
                             Log.w(TAG, "QR barcode scan failed: ${e.message}", e)
-                            Toast.makeText(
-                                    context,
-                                    "No QR code was found in that image",
-                                    Toast.LENGTH_LONG,
-                                )
-                                .show()
+                            showToast("No QR code was found in that image")
                             return@launch
                         }
                     // The user typed, scanned or picked another photo while this one was decoding.
                     if (importId != photoImportId) return@launch
 
+                    val rawValues = barcodes.mapNotNull { it.rawValue }.filter { it.isNotBlank() }
                     // Find first valid payment string
                     val validPayload =
-                        barcodes
-                            .mapNotNull { it.rawValue }
+                        rawValues
                             .map { QRCodeUtils.stripUriPrefix(it) }
                             .firstOrNull { QRCodeUtils.isValidPaymentString(it) }
 
                     when {
                         validPayload != null -> input = validPayload
+                        // A bitcoin: URI with a req- condition the wallet can't meet.
+                        rawValues.any { QRCodeUtils.stripUriPrefix(it).isEmpty() } ->
+                            showToast("This wallet can't pay this QR code")
                         barcodes.isNotEmpty() ->
-                            Toast.makeText(
-                                    context,
-                                    "QR code found, but it's not a Lightning invoice or Bitcoin address",
-                                    Toast.LENGTH_LONG,
-                                )
-                                .show()
-                        else ->
-                            Toast.makeText(
-                                    context,
-                                    "No QR code was found in that image",
-                                    Toast.LENGTH_LONG,
-                                )
-                                .show()
+                            showToast(
+                                "QR code found, but it's not a Lightning invoice or Bitcoin address"
+                            )
+                        else -> showToast("No QR code was found in that image")
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "Failed to read image for QR extraction: ${e.message}", e)
-                    Toast.makeText(context, "Could not read the selected image", Toast.LENGTH_LONG)
-                        .show()
+                    showToast("Could not read the selected image")
                 } finally {
                     if (importId == photoImportId) isExtractingQR = false
                 }
