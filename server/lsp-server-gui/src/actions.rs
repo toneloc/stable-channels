@@ -1266,7 +1266,7 @@ pub fn cancel_queued_splice(ctx: AppCtx, user_channel_id: String) {
 	run(
 		ctx,
 		Op::CancelQueuedSplice,
-		async move { client.cancel_queued_splice(CancelQueuedSpliceRequest { user_channel_id, force: false }).await.map(Some) },
+		async move { client.cancel_queued_splice(CancelQueuedSpliceRequest { user_channel_id, force: false, ..Default::default() }).await.map(Some) },
 		cancel_answered,
 	);
 }
@@ -1292,13 +1292,20 @@ pub fn release_queued_splice(ctx: AppCtx) {
 	);
 }
 
-/// The forced cancel for a ticked confirmation, or None when the daemon's fresh list no longer has that call pending on the node.
+/// The forced cancel for a ticked confirmation, naming the call that was checked, or None when the daemon's fresh list no longer has that call pending on the node.
 pub fn queued_release_request(release: &QueuedRelease, listed: &ListQueuedSplicesResponse) -> Option<CancelQueuedSpliceRequest> {
 	listed
 		.splices
 		.iter()
 		.any(|row| release.is_for(row))
-		.then(|| CancelQueuedSpliceRequest { user_channel_id: release.user_channel_id.clone(), force: true })
+		.then(|| CancelQueuedSpliceRequest {
+			user_channel_id: release.user_channel_id.clone(),
+			force: true,
+			// The daemon releases only this call, so one that changes after this list is left pending.
+			created_at: release.created_at,
+			last_attempt_at: release.last_attempt_at,
+			funding_txo: release.funding_txo.clone(),
+		})
 }
 
 /// The daemon's answer to a Cancel or Release; None when Release found the checked call no longer pending.

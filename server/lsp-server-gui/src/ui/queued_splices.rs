@@ -543,6 +543,11 @@ mod tests {
 		let list = |row: QueuedSpliceInfo| ListQueuedSplicesResponse { splices: vec![row] };
 		let request = actions::queued_release_request(&release, &list(queued_row("stalled", true, 9_000))).expect("same call, still pending");
 		assert_eq!((request.user_channel_id.as_str(), request.force), ("7", true), "a release is the forced cancel for that channel");
+		assert_eq!(
+			(request.created_at, request.last_attempt_at, request.funding_txo.as_str()),
+			(release.created_at, release.last_attempt_at, release.funding_txo.as_str()),
+			"it names the call that was checked, so the daemon releases no other"
+		);
 		let retried = QueuedSpliceInfo { last_attempt_at: 2_130, ..queued_row("splicing", true, 9_000) };
 		assert_eq!(actions::queued_release_request(&release, &list(retried)), None, "the daemon made a new call since the check");
 		let answered = QueuedSpliceInfo { last_attempt_at: 2_050, ..queued_row("failed", false, 9_000) };

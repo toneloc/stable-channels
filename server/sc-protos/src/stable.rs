@@ -390,6 +390,13 @@ pub struct CancelQueuedSpliceRequest {
 	/// True when the operator has checked that the node holds no splice for the channel: the row's last call is no longer treated as pending, so a new request may go out.
 	#[prost(bool, tag = "2")]
 	pub force: bool,
+	/// With `force`: the call the operator checked, as the list showed it: the row's `created_at`, `last_attempt_at` and `funding_txo`. A call still pending on the node is released only while it is still that call.
+	#[prost(int64, tag = "3")]
+	pub created_at: i64,
+	#[prost(int64, tag = "4")]
+	pub last_attempt_at: i64,
+	#[prost(string, tag = "5")]
+	pub funding_txo: ::prost::alloc::string::String,
 }
 
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -469,7 +476,7 @@ mod tests {
 		assert_eq!(decoded, list);
 		assert!(decoded.splices[0].pending_on_node);
 		assert_eq!(ListQueuedSplicesRequest::decode(ListQueuedSplicesRequest {}.encode_to_vec().as_slice()).unwrap(), ListQueuedSplicesRequest {});
-		let cancel = CancelQueuedSpliceRequest { user_channel_id: "42".into(), force: true };
+		let cancel = CancelQueuedSpliceRequest { user_channel_id: "42".into(), force: true, created_at: 1, last_attempt_at: 4, funding_txo: "bb:1".into() };
 		assert_eq!(CancelQueuedSpliceRequest::decode(cancel.encode_to_vec().as_slice()).unwrap(), cancel);
 		let cancelled = CancelQueuedSpliceResponse { ok: false, status: "nothing to cancel".into() };
 		assert_eq!(CancelQueuedSpliceResponse::decode(cancelled.encode_to_vec().as_slice()).unwrap(), cancelled);

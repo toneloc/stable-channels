@@ -318,6 +318,34 @@ pub(crate) async fn queue(
         Ok(_) => {}
         Err(error) => return (false, format!("could not read the queued splice: {error}")),
     }
+    // A call the operator released had a signed splice, and the channel is on that splice's outpoint now: if the node's wallet funded it, the released call landed after all, and a new request on top of it would fund the channel twice.
+    match db.load_queued_splice(&key) {
+        Ok(Some(existing))
+            if released_for_good(&existing) && existing.funding_txo.is_some() && existing.funding_txo == channel_funding_txo(channel) =>
+        {
+            match lock_if_shown(db, ldk, &existing, channel, now).await {
+                LockCheck::Locked => {
+                    return (
+                        false,
+                        format!(
+                            "nothing queued: the splice-in call of {} sats that was released for this channel landed after all ({}), so that request is now locked. Queue again only if the channel should get more",
+                            existing.amount_sats,
+                            existing.funding_txo.as_deref().unwrap_or_default()
+                        ),
+                    )
+                }
+                LockCheck::Unknown => {
+                    return (
+                        false,
+                        "the node could not say whether the released splice-in call for this channel landed; try again once it answers".into(),
+                    )
+                }
+                LockCheck::NotOurs => {}
+            }
+        }
+        Ok(_) => {}
+        Err(error) => return (false, format!("could not read the queued splice: {error}")),
+    }
     // A failure event may have released the last call by mistake, and its signing can still revive the row inside the backoff; a replacement could not take that signing, so none goes out before then.
     match db.load_queued_splice(&key) {
         Ok(Some(existing)) if released_by_a_failure_event(&existing, now) => return (false, revivable_refusal(&existing, now)),
@@ -376,41 +404,113 @@ pub(crate) async fn queue(
     }
 }
 
-/// Cancel a channel's queued splice for the operator: whether a row was cancelled, and a message for them. With `force` the operator has checked that the node holds no splice for the channel, so a call still counted as pending is released.
-pub(crate) fn cancel(db: &Database, user_channel_id: &str, force: bool, now: i64) -> (bool, String) {
+/// Cancel a channel's queued splice for the operator: whether a row was cancelled, and a message for them. A call still counted as pending stays so; only [`release`] ends that.
+pub(crate) fn cancel(db: &Database, user_channel_id: &str, now: i64) -> (bool, String) {
     let Some(key) = row_key(user_channel_id) else {
         return (false, format!("{user_channel_id:?} is not a channel id"));
     };
-    let reason = if force { "cancelled and released by the operator" } else { "cancelled by the operator" };
-    // The operator's word that the node holds no splice covers one made by hand too.
-    let manual_released = force
-        && match db.clear_manual_splice(&key) {
-            Ok(cleared) => cleared,
-            Err(error) => {
-                let message = format!("could not release the splice made by hand: {error}");
-                db_failed("clear_manual_splice", &key, error);
-                return (false, message);
-            }
-        };
-    match db.cancel_queued_splice(&key, Some(reason), force, NEGOTIATION_FAILED_ERROR, now) {
+    match db.cancel_queued_splice(&key, Some("cancelled by the operator"), false, NEGOTIATION_FAILED_ERROR, now) {
         Ok(Some(row)) => {
-            audit("QUEUED_SPLICE_CANCELLED", &row, &[("forced", json!(force)), ("dedup_key", dedup_key("cancelled", &row, force))]);
+            audit("QUEUED_SPLICE_CANCELLED", &row, &[("forced", json!(false)), ("dedup_key", dedup_key("cancelled", &row, false))]);
             let status = if row.pending_on_node {
                 "cancelled; the splice-in call already made cannot be taken back: if the node completes it the row will show it locked, and a new request for this channel waits until then, or until you cancel with force after checking that the node holds no splice for it"
-            } else if force {
-                "cancelled and released; a new request for this channel may go out"
             } else {
                 "cancelled"
             };
             (true, status.into())
         }
-        Ok(None) if manual_released => (true, "released the splice-in made by hand on this channel; a new request may go out".into()),
         Ok(None) => (false, "this channel has no queued splice that can be cancelled".into()),
         Err(error) => {
             let message = format!("could not cancel the queued splice: {error}");
             db_failed("cancel_queued_splice", &key, error);
             (false, message)
         }
+    }
+}
+
+/// The call the operator checked on the node before releasing it, as the list showed it: the row's `created_at`, its `last_attempt_at` (0 when none) and its `funding_txo` (empty when none).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct CheckedCall {
+    pub created_at: i64,
+    pub last_attempt_at: i64,
+    pub funding_txo: String,
+}
+
+impl CheckedCall {
+    /// The call `row` shows now.
+    pub(crate) fn of(row: &QueuedSplice) -> Self {
+        Self {
+            created_at: row.created_at,
+            last_attempt_at: row.last_attempt_at.unwrap_or(0),
+            funding_txo: row.funding_txo.clone().unwrap_or_default(),
+        }
+    }
+}
+
+/// What the operator is told when the call pending on the node is not the one they checked.
+const RELEASE_CALL_CHANGED: &str = "not released: the call pending on the node is not the one you checked (a new request or call went out, or the node signed a splice for it, since the list you saw). Refresh, check the node again, and release the call the list shows now";
+
+/// Release a channel's queued splice for the operator, the forced cancel: they have checked that the node holds no splice for the channel, so a call still counted as pending is released and a new request may go out. Their check was of one call, so a pending call is released only while it is still `checked`, in the write itself; and the channel is looked at first, so a call whose splice has landed is locked, not released.
+pub(crate) async fn release(db: &Database, ldk: &dyn LdkServerCalls, user_channel_id: &str, checked: &CheckedCall, now: i64) -> (bool, String) {
+    let Some(key) = row_key(user_channel_id) else {
+        return (false, format!("{user_channel_id:?} is not a channel id"));
+    };
+    if let Some(refusal) = release_refusal(db, ldk, &key, checked, now).await {
+        return (false, refusal);
+    }
+    // The operator's word that the node holds no splice covers one made by hand too.
+    let manual_released = match db.clear_manual_splice(&key) {
+        Ok(cleared) => cleared,
+        Err(error) => {
+            let message = format!("could not release the splice made by hand: {error}");
+            db_failed("clear_manual_splice", &key, error);
+            return (false, message);
+        }
+    };
+    let call = (checked.created_at, checked.last_attempt_at, checked.funding_txo.as_str());
+    match db.release_queued_splice(&key, Some("cancelled and released by the operator"), call, NEGOTIATION_FAILED_ERROR, now) {
+        Ok(Some(row)) => {
+            audit("QUEUED_SPLICE_CANCELLED", &row, &[("forced", json!(true)), ("dedup_key", dedup_key("cancelled", &row, true))]);
+            (true, "cancelled and released; a new request for this channel may go out".into())
+        }
+        Ok(None) => match db.load_queued_splice(&key) {
+            // The call changed between the check above and the write.
+            Ok(Some(row)) if row.pending_on_node && row.status != "locked" => (false, RELEASE_CALL_CHANGED.into()),
+            _ if manual_released => (true, "released the splice-in made by hand on this channel; a new request may go out".into()),
+            _ => (false, "this channel has no queued splice that can be cancelled".into()),
+        },
+        Err(error) => {
+            let message = format!("could not cancel the queued splice: {error}");
+            db_failed("release_queued_splice", &key, error);
+            (false, message)
+        }
+    }
+}
+
+/// Why the operator's release must not go out, if it must not. The call pending on the node must be the one they checked. And the call's splice may be on the channel already: then the request is locked instead, and while the node cannot say, nothing is released.
+async fn release_refusal(db: &Database, ldk: &dyn LdkServerCalls, key: &str, checked: &CheckedCall, now: i64) -> Option<String> {
+    let row = match db.load_queued_splice(key) {
+        Ok(Some(row)) if row.status != "locked" => row,
+        Ok(_) => return None,
+        Err(error) => return Some(format!("could not read the queued splice: {error}")),
+    };
+    if !row.pending_on_node {
+        return None;
+    }
+    if CheckedCall::of(&row) != *checked {
+        return Some(RELEASE_CALL_CHANGED.into());
+    }
+    let channels = match timeout(rpc_timeout(), ldk.list_channels(ListChannelsRequest {})).await {
+        Ok(Ok(response)) => response.channels,
+        Ok(Err(error)) => return Some(format!("not released: could not check the channel for the call's splice first: list_channels failed: {error}")),
+        Err(_) => return Some("not released: could not check the channel for the call's splice first: list_channels timed out".into()),
+    };
+    // A channel the node no longer lists has nothing to check.
+    let channel = channels.iter().find(|c| row_key(&c.user_channel_id).as_deref() == Some(key) && c.counterparty_node_id == row.counterparty)?;
+    match lock_if_shown(db, ldk, &row, channel, now).await {
+        LockCheck::Locked => Some("not released: the call's splice is on the channel, so the request is locked and there is nothing to release".into()),
+        LockCheck::Unknown => Some("not released: the node could not say whether the call's splice landed; release once it answers".into()),
+        LockCheck::NotOurs => None,
     }
 }
 
@@ -1270,6 +1370,12 @@ mod tests {
         db.load_queued_splice(USER_CHANNEL_ID_DECIMAL).unwrap().expect("row")
     }
 
+    /// The operator's release of the call the list shows now, if it shows one.
+    async fn release_shown(db: &Database, ldk: &FakeLdkServer, now: i64) -> (bool, String) {
+        let checked = db.load_queued_splice(USER_CHANNEL_ID_DECIMAL).unwrap().map(|row| CheckedCall::of(&row)).unwrap_or_default();
+        release(db, ldk, USER_CHANNEL_ID_DECIMAL, &checked, now).await
+    }
+
     /// When the row's next try is due on the retry schedule.
     fn next_try_at(row: &QueuedSplice) -> i64 {
         row.last_attempt_at.expect("a failed try") + retry_gap_secs(row.request_id, row.attempts)
@@ -1872,12 +1978,12 @@ mod tests {
         *ldk.splice_in_error.lock().unwrap() = None;
         stable_channels::audit::enable_test_capture();
 
-        let (ok, status) = cancel(&db, USER_CHANNEL_ID_DECIMAL, false, 101);
+        let (ok, status) = cancel(&db, USER_CHANNEL_ID_DECIMAL, 101);
         assert!(ok && status.contains("cannot be taken back"), "{status}");
         assert_eq!((row(&db).status.as_str(), row(&db).pending_on_node), ("cancelled", true));
         let (ok, status) = queue(&db, &ldk, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 1, 102).await;
         assert!(!ok && status.contains("cancelled it with force"), "{status}");
-        let (ok, status) = cancel(&db, USER_CHANNEL_ID_DECIMAL, true, 103);
+        let (ok, status) = release_shown(&db, &ldk, 103).await;
         assert!(ok && status.contains("released"), "{status}");
         assert_eq!((row(&db).status.as_str(), row(&db).pending_on_node), ("cancelled", false));
         assert!(db.list_open_queued_splices().unwrap().is_empty());
@@ -1887,6 +1993,101 @@ mod tests {
         assert_eq!(names(&events), ["QUEUED_SPLICE_CANCELLED", "QUEUED_SPLICE_CANCELLED", "QUEUED_SPLICE_CREATED"]);
         assert_eq!((events[0].1["forced"].as_bool(), events[1].1["forced"].as_bool()), (Some(false), Some(true)));
         assert_ne!(events[0].1["dedup_key"], events[1].1["dedup_key"]);
+    }
+
+    #[tokio::test]
+    async fn a_release_is_only_for_the_call_the_operator_checked() {
+        let _guard = guard();
+        let db = database();
+        let ldk = node(true);
+        let dir = tempfile::tempdir().unwrap();
+        let push = service(FakeSender::new(true), dir.path(), &[]);
+        called(&db, &ldk, &push, 100).await;
+        let checked = CheckedCall::of(&row(&db));
+        // A release that names no call, as a GUI from before this check sends, releases nothing that is pending.
+        let (ok, status) = release(&db, &ldk, USER_CHANNEL_ID_DECIMAL, &CheckedCall::default(), 101).await;
+        assert!(!ok && status.contains("not the one you checked"), "{status}");
+        // The node signs the call's splice after the operator looked: the call they checked is not the one pending now.
+        on_splice_negotiated(&db, USER_CHANNEL_ID_DECIMAL, &txo(TX_B, 1), 102);
+        let (ok, status) = release(&db, &ldk, USER_CHANNEL_ID_DECIMAL, &checked, 103).await;
+        assert!(!ok && status.contains("not the one you checked"), "{status}");
+        assert_eq!((row(&db).pending_on_node, row(&db).funding_txo), (true, Some(txo(TX_B, 1))), "nothing was released");
+        // So is a later request's call, on the same channel.
+        let stale = CheckedCall { created_at: checked.created_at - 1, ..CheckedCall::of(&row(&db)) };
+        let (ok, _) = release(&db, &ldk, USER_CHANNEL_ID_DECIMAL, &stale, 104).await;
+        assert!(!ok);
+        // The write itself is for that call too, whatever was read before it.
+        let call = (checked.created_at, checked.last_attempt_at, checked.funding_txo.as_str());
+        assert!(db.release_queued_splice(USER_CHANNEL_ID_DECIMAL, None, call, NEGOTIATION_FAILED_ERROR, 105).unwrap().is_none());
+        assert!(row(&db).pending_on_node);
+        // The call as the list shows it now is released.
+        let (ok, status) = release_shown(&db, &ldk, 106).await;
+        assert!(ok && status.contains("released"), "{status}");
+        assert_eq!((row(&db).status.as_str(), row(&db).pending_on_node), ("cancelled", false));
+    }
+
+    #[tokio::test]
+    async fn a_release_locks_a_call_whose_splice_is_already_on_the_channel() {
+        let _guard = guard();
+        let db = database();
+        let ldk = node(true);
+        let dir = tempfile::tempdir().unwrap();
+        let push = service(FakeSender::new(true), dir.path(), &[]);
+        called(&db, &ldk, &push, 100).await;
+        on_splice_negotiated(&db, USER_CHANNEL_ID_DECIMAL, &txo(TX_B, 1), 101);
+        // The splice confirmed since the job last looked, and the operator releases the call.
+        *ldk.channels.lock().unwrap() = vec![channel_with(true, TX_B, 1, LSP_SATS + AMOUNT_SATS)];
+        // While the node cannot say who funded it, nothing is released.
+        ldk.payment_lookup_failures.store(1_000, Ordering::SeqCst);
+        let (ok, status) = release_shown(&db, &ldk, 102).await;
+        assert!(!ok && status.contains("could not say"), "{status}");
+        assert!(row(&db).pending_on_node);
+        ldk.payment_lookup_failures.store(0, Ordering::SeqCst);
+        wallet_funded_tx(&ldk, TX_B);
+        let (ok, status) = release_shown(&db, &ldk, 103).await;
+        assert!(!ok && status.contains("locked"), "{status}");
+        assert_eq!((row(&db).status.as_str(), row(&db).pending_on_node), ("locked", false));
+    }
+
+    #[tokio::test]
+    async fn a_released_call_whose_signed_splice_lands_later_is_locked_before_a_new_request_can_fund_the_channel_again() {
+        let _guard = guard();
+        let db = database();
+        let ldk = node(true);
+        let dir = tempfile::tempdir().unwrap();
+        let push = service(FakeSender::new(true), dir.path(), &[]);
+        called(&db, &ldk, &push, 100).await;
+        on_splice_negotiated(&db, USER_CHANNEL_ID_DECIMAL, &txo(TX_B, 1), 101);
+        // The operator releases the signed call while its transaction is unconfirmed; then it confirms.
+        let (ok, status) = release_shown(&db, &ldk, 102).await;
+        assert!(ok, "{status}");
+        *ldk.channels.lock().unwrap() = vec![channel_with(true, TX_B, 1, LSP_SATS + AMOUNT_SATS)];
+        wallet_funded_tx(&ldk, TX_B);
+        // The next request finds the released call's own splice on the channel: that request is locked, and nothing new is queued.
+        let (ok, status) = queue(&db, &ldk, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, AMOUNT_SATS, 103).await;
+        assert!(!ok && status.contains("landed after all"), "{status}");
+        assert_eq!((row(&db).status.as_str(), row(&db).funding_txo), ("locked", Some(txo(TX_B, 1))));
+        // Asked again, the operator means to add more.
+        let (ok, status) = queue(&db, &ldk, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, AMOUNT_SATS, 104).await;
+        assert!(ok, "{status}");
+    }
+
+    #[tokio::test]
+    async fn a_released_call_is_not_locked_by_a_later_splice_on_another_outpoint() {
+        let _guard = guard();
+        let db = database();
+        let ldk = node(true);
+        let dir = tempfile::tempdir().unwrap();
+        let push = service(FakeSender::new(true), dir.path(), &[]);
+        called(&db, &ldk, &push, 100).await;
+        on_splice_negotiated(&db, USER_CHANNEL_ID_DECIMAL, &txo(TX_B, 1), 101);
+        let (ok, _) = release_shown(&db, &ldk, 102).await;
+        assert!(ok);
+        // The signed splice never confirmed; the operator splices by hand instead, on another transaction.
+        *ldk.channels.lock().unwrap() = vec![channel_with(true, TX_C, 0, LSP_SATS + AMOUNT_SATS)];
+        wallet_funded_tx(&ldk, TX_C);
+        let (ok, status) = queue(&db, &ldk, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, AMOUNT_SATS, 103).await;
+        assert!(ok, "{status}");
     }
 
     #[tokio::test]
@@ -1900,7 +2101,7 @@ mod tests {
         called(&db, &ldk, &push, 100).await;
         let attempt = row(&db);
         // The operator cancels while the call is out; then the node's refusal arrives.
-        cancel(&db, USER_CHANNEL_ID_DECIMAL, false, 101);
+        cancel(&db, USER_CHANNEL_ID_DECIMAL, 101);
         assert_eq!((row(&db).status.as_str(), row(&db).pending_on_node), ("cancelled", true));
         stable_channels::audit::enable_test_capture();
         record_refusal(&db, &attempt, "splice_in: no such peer", 102);
@@ -2084,7 +2285,7 @@ mod tests {
         let push = service(FakeSender::new(true), dir.path(), &[]);
         called(&db, &ldk, &push, 100).await;
         stable_channels::audit::enable_test_capture();
-        let (ok, status) = cancel(&db, USER_CHANNEL_ID_DECIMAL, false, 101);
+        let (ok, status) = cancel(&db, USER_CHANNEL_ID_DECIMAL, 101);
         assert!(ok && status.contains("cannot be taken back"), "{status}");
         assert_eq!((row(&db).status.as_str(), row(&db).pending_on_node), ("cancelled", true));
         let (ok, status) = queue(&db, &ldk, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 1, 102).await;
@@ -2363,7 +2564,7 @@ mod tests {
         let ldk = node(true);
         let stale = queued(&db, 100);
         // The operator cancels and queues a different amount while a pass holds the old row.
-        cancel(&db, USER_CHANNEL_ID_DECIMAL, false, 101);
+        cancel(&db, USER_CHANNEL_ID_DECIMAL, 101);
         db.queue_splice_in(USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, AMOUNT_SATS * 3, 102, REVIVE_WINDOW_SECS, NEGOTIATION_FAILED_ERROR, None).unwrap();
         stable_channels::audit::enable_test_capture();
 
@@ -2478,10 +2679,10 @@ mod tests {
         assert!(!ok && status.contains("already queued"), "{status}");
         assert_eq!(row(&db).amount_sats, AMOUNT_SATS);
 
-        let (ok, status) = cancel(&db, USER_CHANNEL_ID_DECIMAL, false, 102);
+        let (ok, status) = cancel(&db, USER_CHANNEL_ID_DECIMAL, 102);
         assert_eq!((ok, status.as_str()), (true, "cancelled"));
         assert_eq!(row(&db).status, "cancelled");
-        let (ok, _) = cancel(&db, USER_CHANNEL_ID_DECIMAL, false, 103);
+        let (ok, _) = cancel(&db, USER_CHANNEL_ID_DECIMAL, 103);
         assert!(!ok, "nothing left to cancel");
         let (ok, status) = queue(&db, &ldk, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, AMOUNT_SATS * 2, 102).await;
         assert!(ok, "{status}");
@@ -2856,7 +3057,7 @@ mod tests {
         on_splice_negotiated(&db, USER_CHANNEL_ID_DECIMAL, &txo(TX_B, 1), 131);
         assert_eq!((row(&db).request_id, row(&db).status.as_str(), row(&db).pending_on_node), (first.request_id, "negotiated", true));
         // After the backoff, a row the event released for good is replaced as before.
-        let (ok, _) = cancel(&db, USER_CHANNEL_ID_DECIMAL, true, 132);
+        let (ok, _) = release_shown(&db, &ldk, 132).await;
         assert!(ok);
         on_splice_negotiation_failed(&db, USER_CHANNEL_ID_DECIMAL, 133);
         let (ok, status) = queue(&db, &ldk, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, AMOUNT_SATS * 2, 134).await;
@@ -2872,7 +3073,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let push = service(FakeSender::new(true), dir.path(), &[]);
         called(&db, &ldk, &push, 100).await;
-        let (ok, _) = cancel(&db, USER_CHANNEL_ID_DECIMAL, false, 101);
+        let (ok, _) = cancel(&db, USER_CHANNEL_ID_DECIMAL, 101);
         assert!(ok);
         on_splice_negotiation_failed(&db, USER_CHANNEL_ID_DECIMAL, 102);
         let released = row(&db);
@@ -2987,7 +3188,7 @@ mod tests {
         called(&db, &ldk, &push, 100).await;
         on_splice_negotiation_failed(&db, USER_CHANNEL_ID_DECIMAL, 101);
         // The operator reads "failed" and cancels, without force: the window stays, so no request replaces the row yet.
-        let (ok, _) = cancel(&db, USER_CHANNEL_ID_DECIMAL, false, 110);
+        let (ok, _) = cancel(&db, USER_CHANNEL_ID_DECIMAL, 110);
         assert!(ok);
         let cancelled = row(&db);
         assert_eq!((cancelled.status.as_str(), cancelled.pending_on_node, cancelled.last_error.as_deref()), ("cancelled", false, Some(NEGOTIATION_FAILED_ERROR)));
@@ -3005,7 +3206,7 @@ mod tests {
         queued(&db, 200);
         pass(&db, &ldk, &push, 200).await;
         on_splice_negotiation_failed(&db, USER_CHANNEL_ID_DECIMAL, 201);
-        let (ok, _) = cancel(&db, USER_CHANNEL_ID_DECIMAL, false, 201 + REVIVE_WINDOW_SECS);
+        let (ok, _) = cancel(&db, USER_CHANNEL_ID_DECIMAL, 201 + REVIVE_WINDOW_SECS);
         assert!(ok);
         assert_eq!((row(&db).status.as_str(), row(&db).pending_on_node), ("cancelled", false));
         // The row still carries the node's answer, so its splice is still looked for: the manual route stays shut until a forced cancel.
@@ -3023,7 +3224,7 @@ mod tests {
         let push = service(FakeSender::new(true), dir.path(), &[]);
         // The operator releases the call with force, then splices by hand for most of the amount before queueing again.
         called(&db, &ldk, &push, 100).await;
-        let (ok, _) = cancel(&db, USER_CHANNEL_ID_DECIMAL, true, 101);
+        let (ok, _) = release_shown(&db, &ldk, 101).await;
         assert!(ok);
         let dead = row(&db);
         assert!(open_row(&db, USER_CHANNEL_ID_DECIMAL, 102).unwrap().is_none(), "the manual route is open");
@@ -3038,7 +3239,7 @@ mod tests {
         *ldk.splice_in_error.lock().unwrap() = Some((LdkServerErrorCode::LightningError, "no such peer".into()));
         pass(&db, &ldk, &push, 104).await;
         assert_eq!((row(&db).status.as_str(), row(&db).pending_on_node, row(&db).channel_funding_txo.as_deref()), ("failed", false, Some(txo(TX_B, 1).as_str())));
-        let (ok, _) = cancel(&db, USER_CHANNEL_ID_DECIMAL, false, 105);
+        let (ok, _) = cancel(&db, USER_CHANNEL_ID_DECIMAL, 105);
         assert!(ok);
         assert_eq!(row(&db).last_error.as_deref(), Some("cancelled by the operator"));
         assert!(open_row(&db, USER_CHANNEL_ID_DECIMAL, 106).unwrap().is_none());
@@ -3071,7 +3272,7 @@ mod tests {
         assert_eq!(names(&capture()), ["QUEUED_SPLICE_CREATED"]);
         assert!(db.load_manual_splice(USER_CHANNEL_ID_DECIMAL).unwrap().is_none());
         assert_eq!(row(&db).channel_funding_txo, None, "no call yet");
-        let (ok, _) = cancel(&db, USER_CHANNEL_ID_DECIMAL, true, 103);
+        let (ok, _) = release_shown(&db, &ldk, 103).await;
         assert!(ok);
         // A hand-made call whose answer is lost may be on the node: its note stays.
         let lost = LdkServerError::new(LdkServerErrorCode::InternalError, "gRPC request failed");
@@ -3094,13 +3295,13 @@ mod tests {
         assert_eq!(before_manual_splice(&db, &ldk, USER_CHANNEL_ID_DECIMAL, 105).await, Ok(false));
         let (ok, status) = queue(&db, &ldk, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, AMOUNT_SATS, 106).await;
         assert!(!ok && status.contains("made by hand"), "{status}");
-        let (ok, status) = cancel(&db, USER_CHANNEL_ID_DECIMAL, true, 107);
+        let (ok, status) = release_shown(&db, &ldk, 107).await;
         assert!(ok && status.contains("made by hand"), "{status}");
         let (ok, status) = queue(&db, &ldk, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, AMOUNT_SATS, 108).await;
         assert!(ok, "{status}");
         assert!(before_manual_splice(&db, &ldk, "not a channel", 109).await.is_err());
         // The channel closing takes the note with it.
-        let (ok, _) = cancel(&db, USER_CHANNEL_ID_DECIMAL, true, 110);
+        let (ok, _) = release_shown(&db, &ldk, 110).await;
         assert!(ok);
         assert_eq!(before_manual_splice(&db, &ldk, USER_CHANNEL_ID_DECIMAL, 111).await, Ok(false));
         on_channel_closed(&db, USER_CHANNEL_ID_DECIMAL, 112);
@@ -3117,7 +3318,7 @@ mod tests {
         let held = before_manual_splice(&db, &ldk, USER_CHANNEL_ID_DECIMAL, 101).await;
         assert!(held.as_ref().is_err_and(|message| message.contains("queued splice-in (queued)")), "{held:?}");
         assert!(db.load_manual_splice(USER_CHANNEL_ID_DECIMAL).unwrap().is_none());
-        let (ok, _) = cancel(&db, USER_CHANNEL_ID_DECIMAL, true, 102);
+        let (ok, _) = release_shown(&db, &ldk, 102).await;
         assert!(ok);
         // A splice by hand noted while a request reads the wallet is seen when the request is saved.
         let noted = Arc::clone(&db);
@@ -3144,7 +3345,7 @@ mod tests {
         let (ok, status) = queue(&db, &ldk, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, AMOUNT_SATS, 102).await;
         assert!(!ok && status.contains("could not say"), "{status}");
         ldk.payment_lookup_failures.store(0, Ordering::SeqCst);
-        let (ok, _) = cancel(&db, USER_CHANNEL_ID_DECIMAL, true, 103);
+        let (ok, _) = release_shown(&db, &ldk, 103).await;
         assert!(ok);
         pass(&db, &ldk, &push, 104).await;
         // An hour later a new request's call fails and the lookup fails once: held, not stalled, since no outage has run for 600 s.

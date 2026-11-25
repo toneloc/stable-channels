@@ -1680,6 +1680,30 @@ impl Database {
         )
     }
 
+    /// The operator's release, a forced cancel, of the call they checked: as [`Self::cancel_queued_splice`] with `release`, except that a row whose call is still pending on the node is released only while it is still the call that was checked, in the same write. `checked` is that call as the list showed it: the row's `created_at`, its `last_attempt_at` (0 when none) and its `funding_txo` (empty when none). A new request, a new call or a signing since then changes one of them, and the row is then left alone.
+    pub fn release_queued_splice(
+        &self,
+        user_channel_id: &str,
+        reason: Option<&str>,
+        checked: (i64, i64, &str),
+        failure_event_error: &str,
+        now: i64,
+    ) -> SqliteResult<Option<QueuedSplice>> {
+        let (created_at, last_attempt_at, funding_txo) = checked;
+        self.update_queued_splice(
+            "UPDATE queued_splices
+             SET status = 'cancelled', wake_note = NULL, updated_at = ?3,
+                 last_error = COALESCE(?2, 'released by the operator'),
+                 pending_on_node = 0
+             WHERE user_channel_id = ?1 AND status != 'locked'
+               AND (status != 'cancelled' OR pending_on_node = 1 OR last_error = ?4)
+               AND (pending_on_node = 0
+                    OR (created_at = ?5 AND COALESCE(last_attempt_at, 0) = ?6 AND COALESCE(funding_txo, '') = ?7))",
+            params![user_channel_id, reason, now, failure_event_error, created_at, last_attempt_at, funding_txo],
+            user_channel_id,
+        )
+    }
+
     /// The channel is gone, so the row is cancelled. The node's own closed event says nothing on it can be pending or lock, and `release` then clears the pending call, on a row already cancelled as well; a listing that merely omits the channel is not that, so without `release` a call keeps pending until it locks or the operator releases it, and an already cancelled row is left alone. Returns the row when it changed.
     pub fn close_queued_splice_channel(&self, user_channel_id: &str, reason: &str, release: bool, now: i64) -> SqliteResult<Option<QueuedSplice>> {
         self.update_queued_splice(
@@ -9187,6 +9211,39 @@ mod tests {
         assert_eq!((cancelled.status.as_str(), cancelled.last_error.as_deref(), cancelled.wake_note), ("cancelled", Some("channel closed"), None));
         // Nothing of it may still lock, so the job stops looking at it.
         assert!(db.list_open_queued_splices().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_release_clears_a_pending_call_only_while_it_is_the_call_that_was_checked() {
+        let db = Database::open_in_memory().unwrap();
+        let QueueSpliceOutcome::Queued(row) = db.queue_splice_in("7", "peer", 50_000, 100, 0, "", None).unwrap() else { panic!("queued") };
+        db.mark_queued_splice_splicing("7", row.request_id, Some("aa:0"), 500_000, 400_000, 101).unwrap();
+        let failure = "the splice negotiation failed";
+        // Another request, another call, or a call with another signing: left pending.
+        for stale in [(99, 101, ""), (100, 0, ""), (100, 101, "bb:1")] {
+            assert!(db.release_queued_splice("7", None, stale, failure, 102).unwrap().is_none(), "{stale:?}");
+        }
+        assert!(db.load_queued_splice("7").unwrap().unwrap().pending_on_node);
+        // Signed since the operator looked: the call they checked had no signing.
+        db.note_queued_splice_negotiated("7", row.request_id, "bb:1", 103).unwrap();
+        assert!(db.release_queued_splice("7", None, (100, 101, ""), failure, 104).unwrap().is_none());
+        let released = db.release_queued_splice("7", None, (100, 101, "bb:1"), failure, 105).unwrap().unwrap();
+        assert_eq!(
+            (released.status.as_str(), released.pending_on_node, released.last_error.as_deref(), released.funding_txo.as_deref()),
+            ("cancelled", false, Some("released by the operator"), Some("bb:1")),
+            "the signing stays on the row, so its splice is still known if it lands"
+        );
+        assert!(db.release_queued_splice("7", None, (100, 101, "bb:1"), failure, 106).unwrap().is_none(), "nothing left to release");
+
+        // A row with no call pending has no call to check: it is cancelled whatever the request names.
+        let QueueSpliceOutcome::Queued(_) = db.queue_splice_in("8", "peer", 1, 110, 0, "", None).unwrap() else { panic!("queued") };
+        let cancelled = db.release_queued_splice("8", Some("by the operator"), (0, 0, ""), failure, 111).unwrap().unwrap();
+        assert_eq!((cancelled.status.as_str(), cancelled.last_error.as_deref()), ("cancelled", Some("by the operator")));
+        // A locked row stays locked.
+        let QueueSpliceOutcome::Queued(row) = db.queue_splice_in("9", "peer", 1, 120, 0, "", None).unwrap() else { panic!("queued") };
+        db.mark_queued_splice_splicing("9", row.request_id, Some("aa:0"), 500_000, 400_000, 121).unwrap();
+        db.mark_queued_splice_locked("9", row.request_id, "cc:0", 122).unwrap();
+        assert!(db.release_queued_splice("9", None, (120, 121, "cc:0"), failure, 123).unwrap().is_none());
     }
 
     #[test]
