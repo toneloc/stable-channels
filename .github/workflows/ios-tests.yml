@@ -80,3 +80,12 @@ jobs:
             -destination-timeout 180 \
             -retry-tests-on-failure \
             -parallel-testing-enabled NO
+
+      - name: Build App Store configuration
+        shell: bash
+        run: |
+          xcodebuild build \
+            -project ios/StableChannels/StableChannels.xcodeproj \
+            -scheme "StableChannels AppStore" \
+            -configuration AppStore \
+            -destination 'generic/platform=iOS Simulator'
