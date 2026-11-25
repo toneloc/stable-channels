@@ -12885,17 +12885,6 @@
         }
       }
     },
-    "info_notifications_needed_no_stability" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Notifications are required to receive payments while the app is closed."
-          }
-        }
-      }
-    },
     "info_pending_trade" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -13041,10 +13030,70 @@
     "info_push_connectivity_no_stability" : {
       "extractionState" : "manual",
       "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "يحافظ جهازك على اتصال دائم لتلقي المدفوعات الواردة."
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "আপনার ডিভাইসটি ইনকামিং পেমেন্ট গ্রহণ করতে একটি অবিচ্ছিন্ন সংযোগ বজায় রাখে।"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ihr Gerät behält eine ständige Verbindung bei, um Zahlungen zu erhalten."
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "Your device maintains a persistent connection to receive incoming payments."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tu dispositivo mantiene una conexión constante para recibir pagos."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Votre appareil maintient une connexion persistante pour recevoir les paiements."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "आपका डिवाइस आने वाले भुगतान प्राप्त करने के लिए कनेक्शन बनाए रखता है।"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "お使いのデバイスは、支払いを受信するために永続的な接続を維持します。"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Seu dispositivo mantém uma conexão persistente para receber pagamentos."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ваше устройство поддерживает постоянное соединение для получения платежей."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "您的设备保持持久连接，以接收付款。"
           }
         }
       }
@@ -13123,10 +13172,70 @@
     "info_push_description_no_stability" : {
       "extractionState" : "manual",
       "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "المدفوعات في الخلفية"
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ব্যাকগ্রাউন্ড পেমেন্ট"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hintergrundzahlungen"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "Background payments"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pagos en segundo plano"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Paiements en arrière-plan"
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "बैकग्राउंड भुगतान"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "バックグラウンドでの支払い"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pagamentos em segundo plano"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Фоновые платежи"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "后台付款"
           }
         }
       }
@@ -20497,17 +20606,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "启用通知以接收付款提醒"
-          }
-        }
-      }
-    },
-    "notifications_disabled_subtitle_no_stability" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Enable notifications to receive payments while the app is closed"
           }
         }
       }

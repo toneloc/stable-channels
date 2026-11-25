@@ -11,8 +11,6 @@ struct StabilitySurface: Equatable {
     let showsStablePosition: Bool
     let showsOrders: Bool
     let initialHistorySegment: HistorySegment
-    let notificationBanner: String
-    let notificationsRequired: String
     let pushTitle: String
     let pushDetail: String
 
@@ -23,14 +21,6 @@ struct StabilitySurface: Equatable {
         showsOrders = stabilityEnabled
         initialHistorySegment = stabilityEnabled ? .orders : .payments
         if stabilityEnabled {
-            notificationBanner = String(
-                localized: "notifications_disabled_subtitle",
-                defaultValue: "Enable notifications for stability payments"
-            )
-            notificationsRequired = String(
-                localized: "info_notifications_needed",
-                defaultValue: "Notifications are required to receive stability payments while the app is closed."
-            )
             pushTitle = String(
                 localized: "info_push_description",
                 defaultValue: "Background payments and stability updates"
@@ -40,14 +30,6 @@ struct StabilitySurface: Equatable {
                 defaultValue: "Your device maintains a persistent connection to receive incoming payments and stability updates."
             )
         } else {
-            notificationBanner = String(
-                localized: "notifications_disabled_subtitle_no_stability",
-                defaultValue: "Enable notifications to receive payments while the app is closed"
-            )
-            notificationsRequired = String(
-                localized: "info_notifications_needed_no_stability",
-                defaultValue: "Notifications are required to receive payments while the app is closed."
-            )
             pushTitle = String(
                 localized: "info_push_description_no_stability",
                 defaultValue: "Background payments"

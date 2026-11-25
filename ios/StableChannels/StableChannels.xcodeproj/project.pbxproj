@@ -126,6 +126,12 @@
 		4991278F2FFEC05D00D9C81F /* Constants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4991278D2FFEC05D00D9C81F /* Constants.swift */; };
 		499127902FFEC05D00D9C81F /* StableControlParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4991278E2FFEC05D00D9C81F /* StableControlParser.swift */; };
 		499127922FFEC7B700D9C81F /* NotificationContentMutator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499127912FFEC7B700D9C81F /* NotificationContentMutator.swift */; };
+		4991305A30B75C840092EEA7 /* StabilityNotificationCopy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4991305930B75C840092EEA7 /* StabilityNotificationCopy.swift */; };
+		4991305B30B75C840092EEA7 /* StabilityNotificationCopy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4991305930B75C840092EEA7 /* StabilityNotificationCopy.swift */; };
+		4991305D30B75CBF0092EEA7 /* PaymentTypeLabel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4991305C30B75CBF0092EEA7 /* PaymentTypeLabel.swift */; };
+		4991306030B75CD30092EEA7 /* StabilityNotificationCopyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4991305F30B75CD30092EEA7 /* StabilityNotificationCopyTests.swift */; };
+		4991306130B75CD30092EEA7 /* PaymentTypeLabelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4991305E30B75CD30092EEA7 /* PaymentTypeLabelTests.swift */; };
+		4991306230B75D370092EEA7 /* BuildFeatures.swift in Sources */ = {isa = PBXBuildFile; fileRef = 498CE37E30B6F9E6009D89F5 /* BuildFeatures.swift */; };
 		4993590C307003E600D6B50E /* BalanceBarHeaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49935905307003E600D6B50E /* BalanceBarHeaderView.swift */; };
 		4993590D307003E600D6B50E /* BalanceBarAnimationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49935904307003E600D6B50E /* BalanceBarAnimationCoordinator.swift */; };
 		4993590E307003E600D6B50E /* BalanceBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4993590A307003E600D6B50E /* BalanceBarView.swift */; };
@@ -490,6 +496,10 @@
 		4991278D2FFEC05D00D9C81F /* Constants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Constants.swift; sourceTree = "<group>"; };
 		4991278E2FFEC05D00D9C81F /* StableControlParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StableControlParser.swift; sourceTree = "<group>"; };
 		499127912FFEC7B700D9C81F /* NotificationContentMutator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationContentMutator.swift; sourceTree = "<group>"; };
+		4991305930B75C840092EEA7 /* StabilityNotificationCopy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StabilityNotificationCopy.swift; sourceTree = "<group>"; };
+		4991305C30B75CBF0092EEA7 /* PaymentTypeLabel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentTypeLabel.swift; sourceTree = "<group>"; };
+		4991305E30B75CD30092EEA7 /* PaymentTypeLabelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentTypeLabelTests.swift; sourceTree = "<group>"; };
+		4991305F30B75CD30092EEA7 /* StabilityNotificationCopyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StabilityNotificationCopyTests.swift; sourceTree = "<group>"; };
 		49935904307003E600D6B50E /* BalanceBarAnimationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BalanceBarAnimationCoordinator.swift; sourceTree = "<group>"; };
 		49935905307003E600D6B50E /* BalanceBarHeaderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BalanceBarHeaderView.swift; sourceTree = "<group>"; };
 		49935906307003E600D6B50E /* BalanceBarModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BalanceBarModels.swift; sourceTree = "<group>"; };
@@ -763,6 +773,7 @@
 				49D8450D308CF99000882583 /* OnchainAmount.swift */,
 				499F1E563009F03E00936944 /* PaymentProgress.swift */,
 				F147B3819ACA1C8E11C59C72 /* PaymentResultControls.swift */,
+				4991305C30B75CBF0092EEA7 /* PaymentTypeLabel.swift */,
 				49DDD0033054000100B5A146 /* PriceHistoryProviding.swift */,
 				49B22AA83098837C00447D17 /* SeedAccessPolicy.swift */,
 				8CB09BEF8197120AA1080190 /* SpliceCompletionPolicy.swift */,
@@ -896,14 +907,15 @@
 				49305EA430AACE1500537257 /* LdkDbMaintenance.swift */,
 				BB9FA0AF6BCBF33B350E316C /* LightningPaymentRecovery.swift */,
 				4991277A2FFEB50B00D9C81F /* Logger.swift */,
-				4991277B2FFEB50B00D9C81F /* LSPToUserHandler.swift */,
 				861685AA8D77ADBA9D77D399 /* LSPSpliceInHandler.swift */,
+				4991277B2FFEB50B00D9C81F /* LSPToUserHandler.swift */,
 				4991277C2FFEB50B00D9C81F /* NodeStarter.swift */,
 				499127912FFEC7B700D9C81F /* NotificationContentMutator.swift */,
 				D57E67E4DF7526619CFA2395 /* SharedPaymentSQL.swift */,
 				1BFB106CCF56DFD45F8E3AC5 /* SpliceEventRecorder.swift */,
 				4CA0D23CEA05C64B7326A0BC /* SpliceEvents.swift */,
 				4991277E2FFEB50B00D9C81F /* SQLitePaymentDatabase.swift */,
+				4991305930B75C840092EEA7 /* StabilityNotificationCopy.swift */,
 				4991278E2FFEC05D00D9C81F /* StableControlParser.swift */,
 				A20400000000000000000001 /* TradeProtocol.swift */,
 				4991277F2FFEB50B00D9C81F /* UserToLSPHandler.swift */,
@@ -1338,6 +1350,7 @@
 				4993591630712D1500D6B50E /* PaymentDestinationClassifierTests.swift */,
 				D2000000000000000000004C /* PaymentFeeEstimatorTests.swift */,
 				6FA41502F36EBA3E200AFAFB /* PaymentResultControlsTests.swift */,
+				4991305E30B75CD30092EEA7 /* PaymentTypeLabelTests.swift */,
 				499B40AB2F9D46C70004CB73 /* PendingPushPaymentTests.swift */,
 				4944457F3053DB5000B5A146 /* PriceChartAlgorithmsTests.swift */,
 				490224CB302F90A500DF84AA /* PriceServiceTests.swift */,
@@ -1359,6 +1372,7 @@
 				5C279A012FEA00010074ACD2 /* SpliceRepositoryTests.swift */,
 				D1A60F120000000000000004 /* SPVHeaderChainServiceTests.swift */,
 				4993591730712D1500D6B50E /* SQLitePaymentDatabaseTests.swift */,
+				4991305F30B75CD30092EEA7 /* StabilityNotificationCopyTests.swift */,
 				8ABF9700FAF2E4B9C85D8CB7 /* StabilityServiceTests.swift */,
 				5C279A032FEA00030074ACD2 /* StabilitySettlementTests.swift */,
 				49DDD01B3054000100B5A146 /* StabilityStatusAdaptersTests.swift */,
@@ -1516,6 +1530,8 @@
 				49FEF36D30124CEE0089850F /* MempoolWebSocketServiceTests.swift in Sources */,
 				49D7BFE930795E8C0089BF1C /* SendChannelSpendPolicyTests.swift in Sources */,
 				495895DD3051824D002CF62A /* QRCodeExtractorTests.swift in Sources */,
+				4991306030B75CD30092EEA7 /* StabilityNotificationCopyTests.swift in Sources */,
+				4991306130B75CD30092EEA7 /* PaymentTypeLabelTests.swift in Sources */,
 				D2000000000000000000004D /* PaymentFeeEstimatorTests.swift in Sources */,
 				49D4DB092FD02F4E0074ACD2 /* CloseTxidResolverTests.swift in Sources */,
 				490A1339304F147D005CDA39 /* SpliceBroadcastCheckerTests.swift in Sources */,
@@ -1753,6 +1769,7 @@
 				49B22AA330983AF200447D17 /* PaymentQueries.swift in Sources */,
 				49206E183073C27600217838 /* SendLoadingView.swift in Sources */,
 				49206E193073C27600217838 /* SendSuccessStepView.swift in Sources */,
+				4991305A30B75C840092EEA7 /* StabilityNotificationCopy.swift in Sources */,
 				49206E1A3073C27600217838 /* NetworkFeeSelectorView.swift in Sources */,
 				496A44432FCD4F75005AF12F /* QRInputToolbar.swift in Sources */,
 				496A44442FCD4F75005AF12F /* QRCodeExtractor.swift in Sources */,
@@ -1768,6 +1785,7 @@
 				49E4D8A32FED84B7002AF338 /* BackupServiceProtocol.swift in Sources */,
 				55681ED47BE9198B5635346A /* TradeDetailView.swift in Sources */,
 				499F1E573009F03E00936944 /* PaymentProgress.swift in Sources */,
+				4991305D30B75CBF0092EEA7 /* PaymentTypeLabel.swift in Sources */,
 				6929CC2C37EEDC6219317621 /* TradeService.swift in Sources */,
 				A20400000000000000000002 /* TradeProtocol.swift in Sources */,
 				2C4A664F5F0343319A539889 /* BackupModels.swift in Sources */,
@@ -1827,6 +1845,7 @@
 				4991278A2FFEB51600D9C81F /* PaymentHandler.swift in Sources */,
 				4991278F2FFEC05D00D9C81F /* Constants.swift in Sources */,
 				499127902FFEC05D00D9C81F /* StableControlParser.swift in Sources */,
+				4991306230B75D370092EEA7 /* BuildFeatures.swift in Sources */,
 				4981EF17309A7432000A1062 /* SharedDefaultsKey.swift in Sources */,
 				A20400000000000000000003 /* TradeProtocol.swift in Sources */,
 				4991278B2FFEB51600D9C81F /* PriceFetcher.swift in Sources */,
@@ -1834,6 +1853,7 @@
 				49305EA530AACE1500537257 /* LdkDbMaintenance.swift in Sources */,
 				49A0F0033029000000000001 /* PriceOracle.swift in Sources */,
 				4991278C2FFEB51600D9C81F /* PaymentDatabase.swift in Sources */,
+				4991305B30B75C840092EEA7 /* StabilityNotificationCopy.swift in Sources */,
 				499127922FFEC7B700D9C81F /* NotificationContentMutator.swift in Sources */,
 				6CC27037A08B1EC6BC4E3B4F /* NotificationService.swift in Sources */,
 				499127802FFEB50B00D9C81F /* IncomingPaymentHandler.swift in Sources */,

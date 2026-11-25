@@ -31,12 +31,8 @@ final class StabilitySurfaceTests: XCTestCase {
         XCTAssertNil(StabilitySurface(stabilityEnabled: false).tradeAction { calls += 1 })
     }
 
-    func testWithStabilityTheCopyIsUnchanged() {
+    func testWithStabilityThePushCopyIsUnchanged() {
         let surface = StabilitySurface(stabilityEnabled: true)
-
-        // Existing `en` entries in Localizable.xcstrings override the Swift defaultValue for these two keys.
-        XCTAssertEqual(surface.notificationBanner, "Enable notifications to receive payment alerts")
-        XCTAssertEqual(surface.notificationsRequired, "Enable notifications to receive payment alerts")
         XCTAssertEqual(surface.pushTitle, "Background payments and stability updates")
         XCTAssertEqual(
             surface.pushDetail,
@@ -44,31 +40,24 @@ final class StabilitySurfaceTests: XCTestCase {
         )
     }
 
-    func testWithoutStabilityNoCopyMentionsIt() {
+    func testWithoutStabilityThePushCopyNeverMentionsIt() {
         let surface = StabilitySurface(stabilityEnabled: false)
-        let strings = [
-            surface.notificationBanner,
-            surface.notificationsRequired,
-            surface.pushTitle,
-            surface.pushDetail
-        ]
-
-        XCTAssertEqual(
-            surface.notificationBanner,
-            "Enable notifications to receive payments while the app is closed"
-        )
-        XCTAssertEqual(
-            surface.notificationsRequired,
-            "Notifications are required to receive payments while the app is closed."
-        )
         XCTAssertEqual(surface.pushTitle, "Background payments")
         XCTAssertEqual(
             surface.pushDetail,
             "Your device maintains a persistent connection to receive incoming payments."
         )
-        for text in strings {
-            XCTAssertFalse(text.localizedCaseInsensitiveContains("stabil"), "Unexpected 'stabil' in: \(text)")
+        for text in [surface.pushTitle, surface.pushDetail] {
+            XCTAssertFalse(text.localizedCaseInsensitiveContains("stabil"), "Unexpected stability wording: \(text)")
         }
+    }
+
+    func testTheNotificationPromptsAreNeutralInEveryBuild() {
+        // Both keys already read the same, with no stability wording, in all 11 catalog languages.
+        let banner = String(localized: "notifications_disabled_subtitle")
+        let required = String(localized: "info_notifications_needed")
+        XCTAssertEqual(banner, "Enable notifications to receive payment alerts")
+        XCTAssertEqual(required, "Enable notifications to receive payment alerts")
     }
 
     func testWithoutStabilityHistoryHasNoOrders() {

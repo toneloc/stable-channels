@@ -15,9 +15,12 @@ struct HomeNotificationBannerView: View {
                         .font(.subheadline)
                         .fontWeight(.semibold)
                         .foregroundStyle(.white)
-                    Text(StabilitySurface.current.notificationBanner)
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.9))
+                    Text(String(
+                        localized: "notifications_disabled_subtitle",
+                        defaultValue: "Enable notifications to receive payment alerts"
+                    ))
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.9))
                 }
                 Spacer()
                 Image(systemName: "chevron.right")

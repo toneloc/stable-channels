@@ -39,7 +39,10 @@ struct NotificationsSettingsView: View {
                         }
                     }
                 } footer: {
-                    Text(StabilitySurface.current.notificationsRequired)
+                    Text(String(
+                        localized: "info_notifications_needed",
+                        defaultValue: "Enable notifications to receive payment alerts"
+                    ))
                 }
             }
         }

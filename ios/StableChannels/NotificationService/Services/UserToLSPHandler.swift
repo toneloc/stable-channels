@@ -42,7 +42,7 @@ final class UserToLSPHandler: PaymentHandler {
                 mutator.buildPending(
                     base: baseContent,
                     title: "Payment Sent",
-                    body: "Open app to finish syncing the stability payment"
+                    body: StabilityNotificationCopy.current.finishSyncInApp
                 ),
                 true
             )
@@ -54,7 +54,7 @@ final class UserToLSPHandler: PaymentHandler {
         shared?.synchronize()
         let lastSent = shared?.double(forKey: "nse_last_stability_sent") ?? 0
         if lastSent > 0 && Date().timeIntervalSince1970 - lastSent < 120 {
-            completion(mutator.buildStablePosition(base: baseContent, body: "Position is stable"), nil)
+            completion(mutator.buildStablePosition(base: baseContent), nil)
             return
         }
 
@@ -64,7 +64,7 @@ final class UserToLSPHandler: PaymentHandler {
                 mutator.buildPending(
                     base: baseContent,
                     title: "Payment Pending",
-                    body: "Open app to process stability payment"
+                    body: StabilityNotificationCopy.current.processInApp
                 ),
                 true
             )
@@ -75,7 +75,7 @@ final class UserToLSPHandler: PaymentHandler {
         // A sub-cent target with backing is an unsettled LSP surplus (#322), not "no position":
         // fall through so the surplus settles as a normal above-par payment.
         guard channelState.expectedUSD >= StabilizationPolicy.minimumStableUSD || backingSats > 0 else {
-            completion(mutator.buildStablePosition(base: baseContent, body: "Position is stable"), nil)
+            completion(mutator.buildStablePosition(base: baseContent), nil)
             return
         }
 
@@ -86,7 +86,7 @@ final class UserToLSPHandler: PaymentHandler {
                 mutator.buildPending(
                     base: baseContent,
                     title: "Payment Pending",
-                    body: "Open app to process stability payment"
+                    body: StabilityNotificationCopy.current.processInApp
                 ),
                 true
             )
@@ -102,13 +102,13 @@ final class UserToLSPHandler: PaymentHandler {
         // Within threshold - no payment needed
         guard percentFromPar >= StabilizationPolicy.thresholdPercent
             && abs(dollarsFromPar) >= StabilizationPolicy.thresholdUSD else {
-            completion(mutator.buildStablePosition(base: baseContent, body: "Position is stable"), nil)
+            completion(mutator.buildStablePosition(base: baseContent), nil)
             return
         }
 
         // User is above expected (price rose) - should pay LSP
         guard stableUSDValue > targetUSD else {
-            completion(mutator.buildStablePosition(base: baseContent, body: "Position is stable"), nil)
+            completion(mutator.buildStablePosition(base: baseContent), nil)
             return
         }
 
@@ -119,7 +119,7 @@ final class UserToLSPHandler: PaymentHandler {
         let amountMsat = UInt64(btcAmount * BitcoinUnits.satsPerBTC * 1000) / 1000 * 1000
         let amountSats = amountMsat / 1000
         guard amountSats > 0 else {
-            completion(mutator.buildStablePosition(base: baseContent, body: "Position is stable"), nil)
+            completion(mutator.buildStablePosition(base: baseContent), nil)
             return
         }
 
@@ -179,7 +179,7 @@ final class UserToLSPHandler: PaymentHandler {
                 mutator.buildPending(
                     base: baseContent,
                     title: "Payment Pending",
-                    body: "Open app to process stability payment"
+                    body: StabilityNotificationCopy.current.processInApp
                 ),
                 true
             )
@@ -216,7 +216,7 @@ final class UserToLSPHandler: PaymentHandler {
                     mutator.buildPending(
                         base: baseContent,
                         title: "Payment Pending",
-                        body: "Open app to process stability payment"
+                        body: StabilityNotificationCopy.current.processInApp
                     ),
                     true
                 )
@@ -246,7 +246,7 @@ final class UserToLSPHandler: PaymentHandler {
                     mutator.buildPending(
                         base: baseContent,
                         title: "Payment Sent",
-                        body: "Open app to finish syncing the stability payment"
+                        body: StabilityNotificationCopy.current.finishSyncInApp
                     ),
                     true
                 )
@@ -276,7 +276,7 @@ final class UserToLSPHandler: PaymentHandler {
                         .buildPending(
                             base: baseContent,
                             title: "Payment Sent",
-                            body: "Open app to finish syncing the stability payment"
+                            body: StabilityNotificationCopy.current.finishSyncInApp
                         ),
                     true
                 )
@@ -287,7 +287,7 @@ final class UserToLSPHandler: PaymentHandler {
                 mutator.buildPending(
                     base: baseContent,
                     title: "Payment Pending",
-                    body: "Open app to process stability payment"
+                    body: StabilityNotificationCopy.current.processInApp
                 ),
                 true
             )
@@ -306,7 +306,7 @@ final class UserToLSPHandler: PaymentHandler {
             mutator.buildPending(
                 base: baseContent,
                 title: "Payment Pending",
-                body: "Open app to process stability payment"
+                body: StabilityNotificationCopy.current.processInApp
             ),
             true
         )
