@@ -1,9 +1,16 @@
 import Foundation
 
+/// The two lists on the History screen.
+enum HistorySegment: Hashable {
+    case orders, payments
+}
+
 struct StabilitySurface: Equatable {
     let showsBalanceBar: Bool
     let showsTradeButtons: Bool
     let showsStablePosition: Bool
+    let showsOrders: Bool
+    let initialHistorySegment: HistorySegment
     let notificationBanner: String
     let notificationsRequired: String
     let pushTitle: String
@@ -13,6 +20,8 @@ struct StabilitySurface: Equatable {
         showsBalanceBar = stabilityEnabled
         showsTradeButtons = stabilityEnabled
         showsStablePosition = stabilityEnabled
+        showsOrders = stabilityEnabled
+        initialHistorySegment = stabilityEnabled ? .orders : .payments
         if stabilityEnabled {
             notificationBanner = String(
                 localized: "notifications_disabled_subtitle",

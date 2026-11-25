@@ -64,4 +64,14 @@ final class StabilitySurfaceTests: XCTestCase {
             XCTAssertFalse(text.localizedCaseInsensitiveContains("stabil"), "Unexpected 'stabil' in: \(text)")
         }
     }
+
+    func testWithoutStabilityHistoryHasNoOrders() {
+        XCTAssertFalse(StabilitySurface(stabilityEnabled: false).showsOrders)
+        XCTAssertTrue(StabilitySurface(stabilityEnabled: true).showsOrders)
+    }
+
+    func testHistoryOpensOnPaymentsWithoutStability() {
+        XCTAssertEqual(StabilitySurface(stabilityEnabled: false).initialHistorySegment, .payments)
+        XCTAssertEqual(StabilitySurface(stabilityEnabled: true).initialHistorySegment, .orders)
+    }
 }
