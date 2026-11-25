@@ -1,5 +1,7 @@
 package com.stablechannels.app.util
 
+import com.stablechannels.app.domain.send.Bip21Parser
+
 /**
  * Utility functions for processing QR code payloads containing Lightning invoices, Bolt12 offers,
  * and Bitcoin addresses.
@@ -14,11 +16,13 @@ object QRCodeUtils {
      * (everything after '?') from a raw QR code string.
      *
      * @param raw The raw decoded QR code string
-     * @return The cleaned payment payload
+     * @return The cleaned payment payload, or an empty string for a bitcoin: URI with a req-
+     *   parameter the wallet can't honour, so that it is never paid as a bare address.
      */
     fun stripUriPrefix(raw: String): String {
         var s = raw.lines().firstOrNull { it.isNotBlank() }?.replace("\u00A0", " ")?.trim() ?: ""
         if (s.isEmpty()) return ""
+        if (Bip21Parser.parse(s)?.unhandledRequiredParameter != null) return ""
 
         if (s.startsWith("bitcoin://", ignoreCase = true)) {
             s = s.substring(10)

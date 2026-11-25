@@ -164,6 +164,37 @@ class QRCodeUtilsTest {
     }
 
     @Test
+    fun `rejects a bitcoin URI with a req- parameter the wallet can't honour`() {
+        val address = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+        for (uri in
+            listOf(
+                "bitcoin:$address?amount=0.001&req-pop=checkoutapp%3A",
+                "BITCOIN:$address?req-custom-feature=true",
+                "bitcoin://$address?amount=0.001&REQ-POP=https%3A%2F%2Fexample.com",
+            )) {
+            assertEquals(uri, "", QRCodeUtils.stripUriPrefix(uri))
+        }
+    }
+
+    @Test
+    fun `keeps a bitcoin URI whose parameters are all optional`() {
+        val address = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+        assertEquals(
+            address,
+            QRCodeUtils.stripUriPrefix("bitcoin:$address?amount=0.001&label=shop&message=hi"),
+        )
+    }
+
+    @Test
+    fun `req- text inside a parameter value does not block the payment`() {
+        val address = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+        assertEquals(
+            address,
+            QRCodeUtils.stripUriPrefix("bitcoin:$address?label=req-foo&message=a%26req-x%3D1"),
+        )
+    }
+
+    @Test
     fun `handles NBSP in input`() {
         val input = "bitcoin:\u00A0bc1qtest"
         // NBSP is replaced with space, then trimmed after prefix strip
