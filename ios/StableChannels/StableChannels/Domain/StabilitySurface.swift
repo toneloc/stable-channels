@@ -60,4 +60,9 @@ struct StabilitySurface: Equatable {
     }
 
     static let current = StabilitySurface(stabilityEnabled: BuildFeatures.stability)
+
+    /// A trade button's action, or nil so the button is not shown when the build has no stability.
+    func tradeAction(_ action: @escaping () -> Void) -> (() -> Void)? {
+        showsTradeButtons ? action : nil
+    }
 }

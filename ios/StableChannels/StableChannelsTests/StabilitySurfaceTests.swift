@@ -18,11 +18,17 @@ final class StabilitySurfaceTests: XCTestCase {
         XCTAssertTrue(surface.showsStablePosition)
     }
 
-    func testCurrentFollowsTheBuild() {
-        XCTAssertEqual(
-            StabilitySurface.current,
-            StabilitySurface(stabilityEnabled: BuildFeatures.stability)
-        )
+    func testTheNormalBuildShowsEveryStabilitySurface() {
+        XCTAssertEqual(StabilitySurface.current, StabilitySurface(stabilityEnabled: true))
+    }
+
+    func testTradeActionsExistOnlyWithStability() {
+        var calls = 0
+        let action = StabilitySurface(stabilityEnabled: true).tradeAction { calls += 1 }
+        XCTAssertNotNil(action)
+        action?()
+        XCTAssertEqual(calls, 1)
+        XCTAssertNil(StabilitySurface(stabilityEnabled: false).tradeAction { calls += 1 })
     }
 
     func testWithStabilityTheCopyIsUnchanged() {

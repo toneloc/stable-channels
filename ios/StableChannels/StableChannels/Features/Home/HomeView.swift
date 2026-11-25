@@ -72,8 +72,8 @@ struct HomeView: View {
                         isOffline: !appState.isOnline,
                         onSend: { showSendSheet = true },
                         onReceive: { showReceiveSheet = true },
-                        onBuy: StabilitySurface.current.showsTradeButtons ? { showBuySheet = true } : nil,
-                        onSell: StabilitySurface.current.showsTradeButtons ? { showSellSheet = true } : nil
+                        onBuy: StabilitySurface.current.tradeAction { showBuySheet = true },
+                        onSell: StabilitySurface.current.tradeAction { showSellSheet = true }
                     )
 
                     HomeSyncStatusSectionView(onOpenPaymentDetail: { openPaymentDetail() })

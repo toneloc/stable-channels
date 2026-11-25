@@ -72,4 +72,22 @@ final class TradeServiceAvailabilityTests: XCTestCase {
     func testNormalBuildKeepsStability() {
         XCTAssertTrue(BuildFeatures.stability)
     }
+
+    func testMaxSellIsZeroWhenStabilityIsNotInTheBuild() throws {
+        let suite = "TradeServiceAvailabilityTests-\(UUID().uuidString)"
+        let cache = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { cache.removePersistentDomain(forName: suite) }
+        cache.set(Int64(50_000), forKey: AppState.BalanceCacheKey.lightning)
+        cache.set(true, forKey: AppState.BalanceCacheKey.hasReadyChannel)
+        func service(stabilityEnabled: Bool) -> TradeService {
+            TradeService(
+                nodeService: nodeService,
+                databaseService: databaseService,
+                balanceCache: cache,
+                stabilityEnabled: stabilityEnabled
+            )
+        }
+        XCTAssertGreaterThan(service(stabilityEnabled: true).maxSellCents(sc: StableChannel.default, price: 60_000), 0)
+        XCTAssertEqual(service(stabilityEnabled: false).maxSellCents(sc: StableChannel.default, price: 60_000), 0)
+    }
 }
