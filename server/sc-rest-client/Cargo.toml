@@ -14,7 +14,7 @@ sc-protos = { path = "../sc-protos" }
 # the wasm (lsp-server-gui web) build doesn't drag in the native hyper/tokio
 # stack that ldk-server-client carries. Same rev as stable-channels-lsp, so the
 # types unify.
-ldk-server-grpc = { git = "https://github.com/lightningdevkit/ldk-server", rev = "aa2d60f51ebacc7edd5dbdfb90b53a9c73ee0bd3", features = ["serde"], default-features = false }
+ldk-server-grpc = { git = "https://github.com/lightningdevkit/ldk-server", rev = "d7e7a2e708664af922c53c786ad6a5df622f5dd8", features = ["serde"], default-features = false }
 prost = { version = "0.11.6", default-features = false, features = ["std", "prost-derive"] }
 getrandom = "0.2"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }

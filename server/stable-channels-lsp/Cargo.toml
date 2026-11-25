@@ -7,7 +7,7 @@ edition = "2021"
 # Workspace crates
 stable-channels   = { path = "../..", default-features = false }
 sc-protos         = { path = "../sc-protos" }
-ldk-server-client = { git = "https://github.com/lightningdevkit/ldk-server", rev = "aa2d60f51ebacc7edd5dbdfb90b53a9c73ee0bd3", features = ["serde"], default-features = false }
+ldk-server-client = { git = "https://github.com/lightningdevkit/ldk-server", rev = "d7e7a2e708664af922c53c786ad6a5df622f5dd8", features = ["serde"], default-features = false }
 # ldk-node is pulled transitively by stable-channels but we need it as a direct
 # dep so we can name `ldk_node::lightning::ln::types::ChannelId` etc. in our
 # module path. The rev must match the root Cargo.toml.
@@ -42,9 +42,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 
 # HMAC + TLS
 bitcoin_hashes   = "0.14"
-# NOTE: ldk-server-client pulls in rustls 0.21; we only declare tokio-rustls
-# here (which bundles rustls 0.23 via the post-0.26 API) and rely on Cargo
-# to unify. Do NOT add a direct `rustls` dep to avoid the 0.21/0.23 split.
+# rustls for our own REST TLS; the root crate turns on reqwest's default-tls, so ldk-server-client's link to LDK Server runs on native-tls (OpenSSL) and trusts the OS roots as well as LDK Server's cert.
 tokio-rustls     = { version = "0.26", features = ["ring"] }
 ring             = "0.17"
 base64           = "0.22"
