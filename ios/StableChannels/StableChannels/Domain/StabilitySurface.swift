@@ -13,6 +13,8 @@ struct StabilitySurface: Equatable {
     let initialHistorySegment: HistorySegment
     let pushTitle: String
     let pushDetail: String
+    let syncingPaymentStatus: String
+    private let settlingPaymentNoun: String
 
     init(stabilityEnabled: Bool) {
         showsBalanceBar = stabilityEnabled
@@ -20,6 +22,10 @@ struct StabilitySurface: Equatable {
         showsStablePosition = stabilityEnabled
         showsOrders = stabilityEnabled
         initialHistorySegment = stabilityEnabled ? .orders : .payments
+        syncingPaymentStatus = stabilityEnabled
+            ? "Payment confirmed; syncing stability payment"
+            : "Payment confirmed; syncing payment"
+        settlingPaymentNoun = stabilityEnabled ? "A stability payment" : "A payment"
         if stabilityEnabled {
             pushTitle = String(
                 localized: "info_push_description",
@@ -42,6 +48,12 @@ struct StabilitySurface: Equatable {
     }
 
     static let current = StabilitySurface(stabilityEnabled: BuildFeatures.stability)
+
+    /// Why a send waits: part of the balance is still owed to the LSP.
+    func surplusSettlingMessage(owedUSD: Double) -> String {
+        let owed = owedUSD.formatted(.currency(code: "USD"))
+        return "\(settlingPaymentNoun) of \(owed) to the LSP is still settling -- retry this payment shortly."
+    }
 
     /// A trade button's action, or nil so the button is not shown when the build has no stability.
     func tradeAction(_ action: @escaping () -> Void) -> (() -> Void)? {

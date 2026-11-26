@@ -69,4 +69,30 @@ final class StabilitySurfaceTests: XCTestCase {
         XCTAssertEqual(StabilitySurface(stabilityEnabled: false).initialHistorySegment, .payments)
         XCTAssertEqual(StabilitySurface(stabilityEnabled: true).initialHistorySegment, .orders)
     }
+
+    func testWithStabilityThePaymentStatusTextIsUnchanged() {
+        let surface = StabilitySurface(stabilityEnabled: true)
+        XCTAssertEqual(surface.syncingPaymentStatus, "Payment confirmed; syncing stability payment")
+        XCTAssertEqual(
+            surface.surplusSettlingMessage(owedUSD: 1.5),
+            "A stability payment of $1.50 to the LSP is still settling -- retry this payment shortly."
+        )
+    }
+
+    func testWithoutStabilityThePaymentStatusTextNeverMentionsIt() {
+        let surface = StabilitySurface(stabilityEnabled: false)
+        let settling = surface.surplusSettlingMessage(owedUSD: 1.5)
+        XCTAssertEqual(surface.syncingPaymentStatus, "Payment confirmed; syncing payment")
+        XCTAssertEqual(settling, "A payment of $1.50 to the LSP is still settling -- retry this payment shortly.")
+        for text in [surface.syncingPaymentStatus, settling] {
+            XCTAssertFalse(text.localizedCaseInsensitiveContains("stabil"), "Unexpected stability wording: \(text)")
+        }
+    }
+
+    func testTheSpendErrorUsesTheSurfaceWording() {
+        XCTAssertEqual(
+            StabilitySpendError.surplusSettling(owedUSD: 1.5).errorDescription,
+            StabilitySurface.current.surplusSettlingMessage(owedUSD: 1.5)
+        )
+    }
 }

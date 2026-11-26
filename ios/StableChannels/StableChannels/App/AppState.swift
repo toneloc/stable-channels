@@ -2687,7 +2687,7 @@ class AppState {
                         )
                     }
                     saveChannelToDB(preserveBacking: true)
-                    statusMessage = "Payment confirmed; syncing stability payment"
+                    statusMessage = StabilitySurface.current.syncingPaymentStatus
                     return true
                 }
             }
@@ -2712,7 +2712,7 @@ class AppState {
                     UserDefaults(suiteName: Constants.appGroupIdentifier)?
                         .set(true, forKey: "pending_push_payment")
                     saveChannelToDB(preserveBacking: true)
-                    statusMessage = "Payment confirmed; syncing stability payment"
+                    statusMessage = StabilitySurface.current.syncingPaymentStatus
                 }
                 return true
             }
@@ -2726,7 +2726,7 @@ class AppState {
                     )
                 }
                 saveChannelToDB(preserveBacking: true)
-                statusMessage = "Payment confirmed; syncing stability payment"
+                statusMessage = StabilitySurface.current.syncingPaymentStatus
                 return true
             }
         }
