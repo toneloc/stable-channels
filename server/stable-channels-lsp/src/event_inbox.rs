@@ -1,6 +1,6 @@
 //! The daemon's durable event inbox: each event read from LDK Server is saved here before it is handled and deleted once handled, in its own SQLite file so saving never waits on the main database.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use ldk_server_client::ldk_server_grpc::events::EventEnvelope;
@@ -31,6 +31,27 @@ pub(crate) struct Row {
     pub(crate) started: bool,
 }
 
+/// The file itself is damaged or isn't a database: the one failure that setting it aside cures.
+pub(crate) fn is_unreadable(error: &rusqlite::Error) -> bool {
+    matches!(error.sqlite_error_code(), Some(rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt))
+}
+
+/// Rename the inbox and its journal files to `<name>.unreadable-<now_ms>`; returns the database file's new path.
+/// The database goes first, made durable before the journal follows: a stop in between leaves a journal with no database, which SQLite deletes when it creates the new one, whereas a database left without its journal would lose committed deletes and bring handled rows back.
+pub(crate) fn set_aside(dir: &Path, now_ms: u128) -> std::io::Result<PathBuf> {
+    let aside = |suffix: &str| dir.join(format!("{INBOX_FILENAME}.unreadable-{now_ms}{suffix}"));
+    std::fs::rename(dir.join(INBOX_FILENAME), aside(""))?;
+    std::fs::File::open(dir)?.sync_all()?;
+    for suffix in ["-wal", "-shm"] {
+        match std::fs::rename(dir.join(format!("{INBOX_FILENAME}{suffix}")), aside(suffix)) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+            _ => {},
+        }
+    }
+    std::fs::File::open(dir)?.sync_all()?;
+    Ok(aside(""))
+}
+
 /// Encoded size an entry counts against the inbox limit; markers count nothing.
 pub(crate) fn payload_size(entry: &Entry) -> usize {
     match entry {
@@ -44,8 +65,14 @@ pub(crate) struct Inbox {
 }
 
 impl Inbox {
+    /// Open the inbox, checking its pages too, so a damaged file fails here, where startup can set it aside, rather than on every later read.
     pub(crate) fn open(dir: &Path) -> rusqlite::Result<Inbox> {
-        Self::init(Connection::open(dir.join(INBOX_FILENAME))?)
+        let inbox = Self::init(Connection::open(dir.join(INBOX_FILENAME))?)?;
+        let check: String = inbox.lock().query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
+        if check != "ok" {
+            return Err(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT), Some(check)));
+        }
+        Ok(inbox)
     }
 
     #[cfg(test)]
@@ -67,7 +94,8 @@ impl Inbox {
                  dropped INTEGER,
                  received_ms INTEGER NOT NULL,
                  started INTEGER NOT NULL DEFAULT 0
-             );",
+             );
+             CREATE TABLE IF NOT EXISTS reruns (id INTEGER PRIMARY KEY);",
         )?;
         Ok(Inbox { conn: Mutex::new(conn) })
     }
@@ -127,6 +155,20 @@ impl Inbox {
         Ok(())
     }
 
+    /// Queue an interrupted row to be handled again, remembering in the same commit that it was, so it is handled again only once.
+    pub(crate) fn requeue(&self, id: i64) -> rusqlite::Result<()> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        tx.execute("INSERT OR IGNORE INTO reruns (id) VALUES (?1)", [id])?;
+        tx.execute("UPDATE events SET started = 0 WHERE id = ?1", [id])?;
+        tx.commit()
+    }
+
+    /// Whether this row was already queued again after an interruption.
+    pub(crate) fn requeued_before(&self, id: i64) -> rusqlite::Result<bool> {
+        self.lock().query_row("SELECT EXISTS (SELECT 1 FROM reruns WHERE id = ?1)", [id], |row| row.get(0))
+    }
+
     /// Delete a handled row, returning the events and payload bytes it held, and give the disk back once nothing is left.
     pub(crate) fn finish(&self, id: i64) -> rusqlite::Result<(usize, usize)> {
         let mut conn = self.lock();
@@ -140,6 +182,7 @@ impl Inbox {
             )
             .optional()?
             .unwrap_or((0, 0));
+        tx.execute("DELETE FROM reruns WHERE id = ?1", [id])?;
         tx.commit()?;
         // The row is gone whatever happens here, so a failure only delays giving the disk back.
         if let Err(error) = give_back_if_empty(&conn) {
@@ -152,17 +195,12 @@ impl Inbox {
         self.lock().query_row("SELECT NOT EXISTS (SELECT 1 FROM events)", [], |row| row.get(0))
     }
 
-    /// Take the rows whose handler was running when the daemon stopped; they are deleted, not replayed.
-    pub(crate) fn take_interrupted(&self) -> rusqlite::Result<Vec<Row>> {
-        let mut conn = self.lock();
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let rows = tx
+    /// The rows whose handler was running when the daemon stopped, left in place until each is recorded.
+    pub(crate) fn interrupted(&self) -> rusqlite::Result<Vec<Row>> {
+        self.lock()
             .prepare("SELECT id, kind, payload, dropped, received_ms, started FROM events WHERE started != 0 ORDER BY id")?
             .query_map([], read_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        tx.execute("DELETE FROM events WHERE started != 0", [])?;
-        tx.commit()?;
-        Ok(rows)
+            .collect()
     }
 
     /// Saved events and their payload bytes, markers excluded.
@@ -264,15 +302,17 @@ mod tests {
         let first = inbox.oldest().unwrap().unwrap();
         let second = first.id + 1;
         inbox.set_started(second, true).unwrap();
-        let interrupted = inbox.take_interrupted().unwrap();
+        let interrupted = inbox.interrupted().unwrap();
         assert_eq!(interrupted.len(), 1);
         assert_eq!(interrupted[0].id, second);
         assert_eq!(interrupted[0].entry, event("pay-1"));
         assert!(interrupted[0].started);
+        assert_eq!(inbox.interrupted().unwrap(), interrupted, "listing leaves it in place until it is recorded");
         assert_eq!(inbox.oldest().unwrap().unwrap(), first);
         inbox.finish(first.id).unwrap();
+        inbox.finish(second).unwrap();
         assert_eq!(inbox.oldest().unwrap().unwrap().entry, event("pay-2"));
-        assert!(inbox.take_interrupted().unwrap().is_empty());
+        assert!(inbox.interrupted().unwrap().is_empty());
     }
 
     #[test]
@@ -283,7 +323,7 @@ mod tests {
         inbox.set_started(id, true).unwrap();
         assert!(inbox.oldest().unwrap().unwrap().started);
         inbox.set_started(id, false).unwrap();
-        assert!(inbox.take_interrupted().unwrap().is_empty());
+        assert!(inbox.interrupted().unwrap().is_empty());
         let row = inbox.oldest().unwrap().unwrap();
         assert_eq!((row.id, row.started), (id, false));
     }
@@ -365,5 +405,103 @@ mod tests {
         conn.execute("UPDATE events SET payload = x'ff' WHERE id = ?1", [id]).unwrap();
         let row = inbox.oldest().unwrap().unwrap();
         assert_eq!((row.id, row.entry, row.received_ms), (id, Entry::Unreadable, 7));
+    }
+
+    #[test]
+    fn damaged_pages_fail_the_open_as_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let inbox = Inbox::open(dir.path()).unwrap();
+        let id = "x".repeat(1_000);
+        let batch: Vec<(Entry, i64)> = (0..200).map(|n| (event(&format!("{id}{n}")), n)).collect();
+        inbox.save(&batch).unwrap();
+        let page_size: usize = inbox.lock_for_test().query_row("PRAGMA page_size", [], |row| row.get(0)).unwrap();
+        drop(inbox);
+        // The schema page still reads, so only a check of the other pages finds the damage.
+        let path = dir.path().join(INBOX_FILENAME);
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[page_size..].fill(0xaa);
+        std::fs::write(&path, bytes).unwrap();
+        let error = Inbox::open(dir.path()).err().expect("the damage is found at open");
+        assert!(is_unreadable(&error), "{error}");
+    }
+
+    /// An inbox holding `pay-1` only, whose delete of `pay-0` is committed in the journal but not yet in the database file.
+    fn inbox_with_a_delete_in_its_journal(dir: &Path) {
+        let inbox = Inbox::open(dir).unwrap();
+        inbox.save(&[(event("pay-0"), 0), (event("pay-1"), 1)]).unwrap();
+        drop(inbox);
+        let inbox = Inbox::open(dir).unwrap();
+        inbox.finish(inbox.oldest().unwrap().unwrap().id).unwrap();
+        let (db, wal) = (dir.join(INBOX_FILENAME), dir.join(format!("{INBOX_FILENAME}-wal")));
+        let (db_bytes, wal_bytes) = (std::fs::read(&db).unwrap(), std::fs::read(&wal).unwrap());
+        drop(inbox);
+        std::fs::write(&db, db_bytes).unwrap();
+        std::fs::write(&wal, wal_bytes).unwrap();
+        let _ = std::fs::remove_file(dir.join(format!("{INBOX_FILENAME}-shm")));
+    }
+
+    #[test]
+    fn a_journal_left_without_its_database_is_deleted_not_replayed() {
+        let dir = tempfile::tempdir().unwrap();
+        inbox_with_a_delete_in_its_journal(dir.path());
+        // A stop after the database was moved and before its journal followed.
+        std::fs::rename(dir.path().join(INBOX_FILENAME), dir.path().join("moved")).unwrap();
+        let inbox = Inbox::open(dir.path()).unwrap();
+        assert_eq!(inbox.oldest().unwrap(), None, "a new inbox, with nothing of the old one");
+    }
+
+    #[test]
+    fn a_set_aside_that_fails_part_way_never_leaves_a_database_without_its_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        inbox_with_a_delete_in_its_journal(dir.path());
+        // Moving the database fails: something already has its new name.
+        let taken = dir.path().join(format!("{INBOX_FILENAME}.unreadable-7"));
+        std::fs::create_dir(&taken).unwrap();
+        std::fs::write(taken.join("x"), "x").unwrap();
+        assert!(set_aside(dir.path(), 7).is_err());
+        let inbox = Inbox::open(dir.path()).unwrap();
+        let first = inbox.oldest().unwrap().unwrap();
+        assert_eq!(first.entry, event("pay-1"), "the committed delete still holds, so a handled row doesn't come back");
+    }
+
+    #[test]
+    fn a_requeued_row_is_remembered_until_it_is_finished() {
+        let inbox = Inbox::in_memory();
+        inbox.save(&[(event("pay-0"), 0)]).unwrap();
+        let id = inbox.oldest().unwrap().unwrap().id;
+        inbox.set_started(id, true).unwrap();
+        assert!(!inbox.requeued_before(id).unwrap());
+        inbox.requeue(id).unwrap();
+        assert!(!inbox.oldest().unwrap().unwrap().started);
+        assert!(inbox.requeued_before(id).unwrap());
+        inbox.finish(id).unwrap();
+        assert!(!inbox.requeued_before(id).unwrap());
+    }
+
+    #[test]
+    fn an_inbox_from_before_requeues_gains_their_table() {
+        let dir = tempfile::tempdir().unwrap();
+        rusqlite::Connection::open(dir.path().join(INBOX_FILENAME)).unwrap().execute_batch(
+            "CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, payload BLOB, dropped INTEGER, received_ms INTEGER NOT NULL, started INTEGER NOT NULL DEFAULT 0);",
+        ).unwrap();
+        let inbox = Inbox::open(dir.path()).unwrap();
+        inbox.save(&[(event("pay-0"), 0)]).unwrap();
+        let id = inbox.oldest().unwrap().unwrap().id;
+        inbox.requeue(id).unwrap();
+        assert!(inbox.requeued_before(id).unwrap());
+    }
+
+    #[test]
+    fn setting_aside_moves_the_journal_with_the_database() {
+        let dir = tempfile::tempdir().unwrap();
+        for suffix in ["", "-wal", "-shm"] {
+            std::fs::write(dir.path().join(format!("{INBOX_FILENAME}{suffix}")), suffix).unwrap();
+        }
+        let moved = set_aside(dir.path(), 7).unwrap();
+        assert_eq!(moved, dir.path().join(format!("{INBOX_FILENAME}.unreadable-7")));
+        for suffix in ["", "-wal", "-shm"] {
+            assert!(!dir.path().join(format!("{INBOX_FILENAME}{suffix}")).exists(), "no old {suffix:?} file is left for a new inbox");
+            assert_eq!(std::fs::read_to_string(dir.path().join(format!("{INBOX_FILENAME}.unreadable-7{suffix}"))).unwrap(), suffix);
+        }
     }
 }

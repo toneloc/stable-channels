@@ -139,23 +139,35 @@ impl Shared {
 pub(crate) struct EventBuffer {
     inbox: Arc<Inbox>,
     shared: Arc<Shared>,
+    /// After a failed read, the next wait and when the next read may run; kept here because `serve` drops a waiting `recv` at each heartbeat.
+    read_retry: Duration,
+    read_again_at: Option<tokio::time::Instant>,
 }
 
 impl EventBuffer {
     /// The oldest saved row, left in place until `finish`; None once the reader has ended, even with rows left, so a reconnect doesn't wait for them.
     pub(crate) async fn recv(&mut self) -> Option<Row> {
-        let mut backoff = Duration::from_secs(1);
         loop {
             if self.shared.finished.load(Ordering::SeqCst) {
                 return None;
             }
+            if let Some(at) = self.read_again_at {
+                tokio::time::sleep_until(at).await;
+            }
             match self.inbox.oldest() {
-                Ok(Some(row)) => return Some(row),
-                Ok(None) => self.shared.saved.notified().await,
+                Ok(row) => {
+                    self.read_retry = Duration::from_secs(1);
+                    self.read_again_at = None;
+                    match row {
+                        Some(row) => return Some(row),
+                        None => self.shared.saved.notified().await,
+                    }
+                },
                 Err(error) => {
-                    warn!("[event_loop] couldn't read the event inbox: {}; trying again in {:?}", error, backoff);
-                    tokio::time::sleep(backoff).await;
-                    backoff = std::cmp::min(backoff * 2, MAX_RETRY_WAIT);
+                    let wait = self.read_retry;
+                    self.read_retry = std::cmp::min(wait * 2, MAX_RETRY_WAIT);
+                    self.read_again_at = Some(tokio::time::Instant::now() + wait);
+                    inbox_unavailable("read", &error, wait);
                 },
             }
         }
@@ -201,7 +213,7 @@ impl EventBuffer {
     /// A second handle on the same rows, for a test to watch while serve holds this one.
     #[cfg(test)]
     pub(crate) fn watcher(&self) -> EventBuffer {
-        EventBuffer { inbox: Arc::clone(&self.inbox), shared: Arc::clone(&self.shared) }
+        EventBuffer { inbox: Arc::clone(&self.inbox), shared: Arc::clone(&self.shared), read_retry: Duration::from_secs(1), read_again_at: None }
     }
 
     #[cfg(test)]
@@ -212,11 +224,12 @@ impl EventBuffer {
     }
 }
 
+/// Logged at each try; recorded once a day per kind, since the writes are retried as long as they fail.
 fn inbox_write_failed(op: &str, row_id: Option<i64>, error: &rusqlite::Error) {
     warn!("[event_loop] {} failed: {}", op, error);
     stable_channels::audit::audit_event(
         "DB_WRITE_FAILED",
-        serde_json::json!({ "op": op, "row_id": row_id, "error": error.to_string(), "scope": "event_inbox" }),
+        serde_json::json!({ "op": op, "row_id": row_id, "error": error.to_string(), "scope": "event_inbox", "dedup_key": format!("lsp:event-inbox-write-failed:{op}:{}", utc_day()) }),
     );
 }
 
@@ -443,7 +456,7 @@ fn start_reader(
             }
         }
     });
-    (reader, EventBuffer { inbox, shared }, active)
+    (reader, EventBuffer { inbox, shared, read_retry: Duration::from_secs(1), read_again_at: None }, active)
 }
 
 fn now_millis() -> u128 {
@@ -615,47 +628,153 @@ async fn start_inbox(dir: &std::path::Path) -> Arc<Inbox> {
     Arc::new(inbox)
 }
 
+/// Opens in a row that find the file damaged before it is set aside: one bad read is tried again, a file that stays bad is not waited on.
+const SET_ASIDE_AFTER: u32 = 3;
+
+/// Open the inbox, retrying a failure that may pass; a file that stays damaged is set aside and a new one started, since nothing would ever be handled otherwise.
 async fn open_inbox_with_retry(dir: &std::path::Path) -> Inbox {
     let mut backoff = Duration::from_secs(1);
+    let mut damaged = 0;
     loop {
         match Inbox::open(dir) {
             Ok(inbox) => return inbox,
-            Err(error) => warn!("[event_loop] couldn't open the event inbox: {}; trying again in {:?}", error, backoff),
+            Err(error) => {
+                inbox_unavailable("open", &error, backoff);
+                damaged = if crate::event_inbox::is_unreadable(&error) { damaged + 1 } else { 0 };
+                if damaged >= SET_ASIDE_AFTER {
+                    set_inbox_aside(dir, &error);
+                    damaged = 0;
+                }
+            },
         }
         tokio::time::sleep(backoff).await;
         backoff = std::cmp::min(backoff * 2, MAX_RETRY_WAIT);
     }
 }
 
-/// A row still marked started was being handled when the daemon stopped; its effects may be partly applied, so it is recorded and dropped, not replayed.
+/// Its rows are not handled; the reconcile after the next subscription covers payments and forwards from the last checkpoint, which never passes a row still saved.
+fn set_inbox_aside(dir: &std::path::Path, error: &rusqlite::Error) {
+    match crate::event_inbox::set_aside(dir, now_millis()) {
+        Ok(moved) => {
+            warn!("[event_loop] the event inbox can't be read ({}); moved it to {} and starting a new one", error, moved.display());
+            stable_channels::audit::audit_event(
+                "EVENT_INBOX_SET_ASIDE",
+                serde_json::json!({ "error": error.to_string(), "moved_to": moved.display().to_string() }),
+            );
+        },
+        Err(move_error) => {
+            warn!("[event_loop] couldn't move the unreadable event inbox aside: {}", move_error);
+            stable_channels::audit::audit_event(
+                "EVENT_INBOX_UNAVAILABLE",
+                serde_json::json!({ "op": "set_aside", "error": move_error.to_string(), "dedup_key": format!("lsp:event-inbox-unavailable:set_aside:{}", utc_day()) }),
+            );
+        },
+    }
+}
+
+/// Event handling waits on the inbox, so a failure is recorded, not just logged: once a day per kind, while the log keeps each try.
+fn inbox_unavailable(op: &str, error: &rusqlite::Error, retry: Duration) {
+    warn!("[event_loop] couldn't {} the event inbox: {}; trying again in {:?}", op, error, retry);
+    stable_channels::audit::audit_event(
+        "EVENT_INBOX_UNAVAILABLE",
+        serde_json::json!({ "op": op, "error": error.to_string(), "retry_ms": retry.as_millis(), "dedup_key": format!("lsp:event-inbox-unavailable:{op}:{}", utc_day()) }),
+    );
+}
+
+/// Days since the epoch, so an alarm that repeats while a failure lasts is recorded once a day.
+fn utc_day() -> u128 {
+    now_millis() / 86_400_000
+}
+
+/// A row still marked started was being handled when the daemon stopped. Each is recorded before it changes, so a stop in between records it again instead of losing it. A correlated trade request is then handled again; anything else may be partly applied, so it is dropped.
 async fn report_interrupted(inbox: &Inbox) {
     let mut backoff = Duration::from_secs(1);
     let rows = loop {
-        match inbox.take_interrupted() {
+        match inbox.interrupted() {
             Ok(rows) => break rows,
-            Err(error) => inbox_write_failed("take_interrupted_events", None, &error),
+            Err(error) => inbox_unavailable("read", &error, backoff),
         }
         tokio::time::sleep(backoff).await;
         backoff = std::cmp::min(backoff * 2, MAX_RETRY_WAIT);
     };
     for row in &rows {
-        record_interrupted(row);
+        let requeued_before = handled_again(row) && requeued_before(inbox, row.id).await;
+        let again = handled_again(row) && !requeued_before;
+        record_interrupted(row, again, requeued_before).await;
+        if again {
+            until_done("requeue_interrupted_event", row.id, || inbox.requeue(row.id)).await;
+        } else {
+            until_done("drop_interrupted_event", row.id, || inbox.finish(row.id)).await;
+        }
     }
 }
 
-/// Record a row whose handler started and may have partly applied, which is not handled again.
-fn record_interrupted(row: &Row) {
+/// A row interrupted again after it was queued again is dropped, so a handler that stops the daemon can't do so at every start.
+async fn requeued_before(inbox: &Inbox, id: i64) -> bool {
+    let mut backoff = Duration::from_secs(1);
+    loop {
+        match inbox.requeued_before(id) {
+            Ok(requeued) => return requeued,
+            Err(error) => inbox_unavailable("read", &error, backoff),
+        }
+        tokio::time::sleep(backoff).await;
+        backoff = std::cmp::min(backoff * 2, MAX_RETRY_WAIT);
+    }
+}
+
+/// Before its decision, a correlated trade request's handler writes only audit rows and the idempotent settlement marker, and it looks for a saved decision first, so handling it again decides it once and answers the wallet, which otherwise waits for an answer forever.
+fn handled_again(row: &Row) -> bool {
+    match &row.entry {
+        Entry::Event(EventEnvelope { event: Some(EventVariant::PaymentReceived(received)) }) => {
+            crate::stable_manager::carries_correlated_trade_request(&received.custom_records)
+        },
+        _ => false,
+    }
+}
+
+/// Try an inbox write until it takes effect, backing off; nothing is handled before it does.
+async fn until_done<T>(op: &str, row_id: i64, mut write: impl FnMut() -> rusqlite::Result<T>) {
+    let mut backoff = Duration::from_secs(1);
+    while let Err(error) = write() {
+        inbox_write_failed(op, Some(row_id), &error);
+        tokio::time::sleep(backoff).await;
+        backoff = std::cmp::min(backoff * 2, MAX_RETRY_WAIT);
+    }
+}
+
+/// Save the ledger record of a row whose handler started, trying until it is written; keyed by the row, so recording it again after a stop adds nothing.
+async fn record_interrupted(row: &Row, handled_again: bool, requeued_before: bool) {
     let (event, payment_id) = match &row.entry {
         Entry::Event(envelope) => (event_name(envelope), payment_of(envelope)),
         Entry::Connected => ("connected", None),
         Entry::Dropped(_) => ("dropped", None),
         Entry::Unreadable => ("unreadable", None),
     };
-    warn!("[event_loop] saved event {} ({}) was being handled when it stopped; not handling it again", row.id, event);
-    stable_channels::audit::audit_event(
-        "EVENT_INTERRUPTED",
-        serde_json::json!({ "row_id": row.id, "event": event, "payment_id": payment_id, "received_ms": row.received_ms }),
-    );
+    if handled_again {
+        warn!("[event_loop] saved event {} ({}) was being handled when it stopped; handling it again", row.id, event);
+    } else {
+        warn!("[event_loop] saved event {} ({}) was being handled when it stopped; not handling it again", row.id, event);
+    }
+    let record = serde_json::json!({
+        "row_id": row.id,
+        "event": event,
+        "payment_id": payment_id,
+        "received_ms": row.received_ms,
+        "handled_again": handled_again,
+        "requeued_before": requeued_before,
+        "dedup_key": format!("lsp:event-interrupted:{}:{}{}", row.id, row.received_ms, if requeued_before { ":again" } else { "" }),
+    });
+    until_recorded(row.id, || stable_channels::audit::record_event("EVENT_INTERRUPTED", record.clone())).await;
+}
+
+/// Try a ledger record about a saved row until it is written, before the row changes; its dedup key makes writing it again after a stop add nothing.
+async fn until_recorded<T>(row_id: i64, mut record: impl FnMut() -> rusqlite::Result<T>) {
+    let mut backoff = Duration::from_secs(1);
+    while let Err(error) = record() {
+        warn!("[event_loop] couldn't record saved event {}: {}; trying again in {:?}", row_id, error, backoff);
+        tokio::time::sleep(backoff).await;
+        backoff = std::cmp::min(backoff * 2, MAX_RETRY_WAIT);
+    }
 }
 
 /// Longest the first rows wait at startup for a price, so a trade saved before a restart isn't rejected for want of one.
@@ -788,7 +907,7 @@ async fn serve(
                 let Some(row) = row else { return };
                 // Within one run only a delete that didn't take effect leaves a row marked, and its handler already ran.
                 if row.started {
-                    record_interrupted(&row);
+                    record_interrupted(&row, false, false).await;
                     events.finish(row.id).await;
                     continue;
                 }
@@ -801,10 +920,12 @@ async fn serve(
                     Entry::Dropped(_) => reconcile_in_place(manager, db, ldk, health, "events_dropped").await,
                     Entry::Unreadable => {
                         warn!("[event_loop] saved event {} can't be read; skipping it", row.id);
-                        stable_channels::audit::audit_event(
-                            "EVENT_UNREADABLE",
-                            serde_json::json!({ "row_id": row.id, "received_ms": row.received_ms }),
-                        );
+                        let record = serde_json::json!({
+                            "row_id": row.id,
+                            "received_ms": row.received_ms,
+                            "dedup_key": format!("lsp:event-unreadable:{}:{}", row.id, row.received_ms),
+                        });
+                        until_recorded(row.id, || stable_channels::audit::record_event("EVENT_UNREADABLE", record.clone())).await;
                     },
                 }
                 events.finish(row.id).await;
@@ -1074,7 +1195,8 @@ pub(crate) async fn dispatch_event(
         Some(EventVariant::PaymentReceived(e)) => {
             let payment_id = e.payment.as_ref().map(|p| p.payment_id.clone());
             let amount_msat = e.payment.as_ref().and_then(|p| p.amount_msat);
-            let handled = mgr.handle_payment_received(e.custom_records, payment_id, amount_msat, ldk, btc_price).await;
+            let paid_at = e.payment.as_ref().map(|p| p.latest_update_timestamp);
+            let handled = mgr.handle_payment_received_at(e.custom_records, payment_id, amount_msat, paid_at, ldk, btc_price).await;
             if handled == crate::stable_manager::Handled::Retry {
                 return DispatchOutcome::Retry;
             }
@@ -2120,7 +2242,7 @@ mod tests {
         tokio::pin!(handling);
         assert!(tokio::time::timeout(Duration::from_millis(50), &mut handling).await.is_err(), "it waits for the manager");
         assert!(!inbox.oldest().unwrap().unwrap().started, "not marked while it waits");
-        assert!(inbox.take_interrupted().unwrap().is_empty(), "a crash now would replay it");
+        assert!(inbox.interrupted().unwrap().is_empty(), "a crash now would replay it");
         drop(held);
         handling.await;
         let rows = stable_channels::audit::drain_test_capture();
@@ -2197,6 +2319,89 @@ mod tests {
         assert_eq!(unreadable[0].1["received_ms"], 5);
         assert_eq!(claimed(&rows), ["good"], "the queue keeps moving");
         assert_eq!(inbox.oldest().unwrap(), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unreadable_row_stays_until_its_record_is_saved() {
+        let _guard = crate::stable_manager::tests::AUDIT_TEST_GUARD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (manager, db) = serving_fixture();
+        let ledger = rusqlite::Connection::open(manager.lock().await.data_dir().join(stable_channels::db::DB_FILENAME)).unwrap();
+        ledger.execute_batch(
+            "CREATE TRIGGER fail_unreadable BEFORE INSERT ON ledger_events WHEN NEW.event_type = 'EVENT_UNREADABLE'
+             BEGIN SELECT RAISE(FAIL, 'injected ledger failure'); END;",
+        ).unwrap();
+        let ldk = crate::stable_manager::tests::FakeLdkServer::new(vec![]);
+        let mut health = StreamHealth::new(db.begin_event_stream_gap(1_000).unwrap());
+        let (_dir, inbox, conn) = inbox_on_disk();
+        let bad = save_only(&inbox, &claimable("bad"));
+        conn.execute("UPDATE events SET payload = x'ff' WHERE id = ?1", [bad]).unwrap();
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let asks = Arc::new(AtomicUsize::new(0));
+        let (_reader, mut events, active) = buffer_events_with_health(CountingSource(receiver, Arc::clone(&asks)), Arc::clone(&inbox), LIMITS);
+        let served = tokio::time::timeout(Duration::from_secs(120), serve(&mut events, &active, &manager, &db, &ldk, &mut health)).await;
+        assert!(served.is_err(), "still trying to record it");
+        assert_eq!(inbox.oldest().unwrap().unwrap().id, bad, "kept until its record is saved");
+        ledger.execute_batch("DROP TRIGGER fail_unreadable").unwrap();
+        serve_until_handled(&mut events, &active, &asks, 0, sender, &manager, &db, &ldk, &mut health).await;
+        assert_eq!(inbox.oldest().unwrap(), None);
+        let recorded: i64 = ledger.query_row("SELECT COUNT(*) FROM ledger_events WHERE event_type = 'EVENT_UNREADABLE'", [], |row| row.get(0)).unwrap();
+        assert_eq!(recorded, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_reads_back_off_to_a_minute_though_each_heartbeat_restarts_the_read() {
+        let _guard = crate::stable_manager::tests::AUDIT_TEST_GUARD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (manager, db) = serving_fixture();
+        let ldk = crate::stable_manager::tests::FakeLdkServer::new(vec![]);
+        let mut health = StreamHealth::new(db.begin_event_stream_gap(1_000).unwrap());
+        let (_dir, inbox, conn) = inbox_on_disk();
+        conn.execute_batch("ALTER TABLE events RENAME TO events_gone").unwrap();
+        let (_sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let asks = Arc::new(AtomicUsize::new(0));
+        let (_reader, mut events, active) = buffer_events_with_health(CountingSource(receiver, Arc::clone(&asks)), Arc::clone(&inbox), LIMITS);
+        stable_channels::audit::enable_test_capture();
+        let served = tokio::time::timeout(Duration::from_secs(600), serve(&mut events, &active, &manager, &db, &ldk, &mut health)).await;
+        let rows = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        assert!(served.is_err());
+        let reads = rows.iter().filter(|(event, data)| event == "EVENT_INBOX_UNAVAILABLE" && data["op"] == "read").count();
+        // Reads at 0, 1, 3, 7, 15, 31 and 63 s, then once a minute: 15 in ten minutes, not five every 30 s heartbeat.
+        assert_eq!(reads, 15, "{reads} failed reads recorded");
+        let ledger = rusqlite::Connection::open(manager.lock().await.data_dir().join(stable_channels::db::DB_FILENAME)).unwrap();
+        let kept: i64 = ledger.query_row("SELECT COUNT(*) FROM ledger_events WHERE event_type = 'EVENT_INBOX_UNAVAILABLE'", [], |row| row.get(0)).unwrap();
+        assert_eq!(kept, 1, "the ledger keeps one a day; the log keeps each try");
+    }
+
+    #[tokio::test]
+    async fn a_trade_request_interrupted_again_after_being_handled_again_is_dropped() {
+        let _guard = crate::stable_manager::tests::AUDIT_TEST_GUARD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (manager, _db) = serving_fixture();
+        let (_ldk, request, fee) = crate::stable_manager::tests::trade_request(&mut *manager.lock().await);
+        let dir = tempfile::tempdir().unwrap();
+        let inbox = Inbox::open(dir.path()).unwrap();
+        let id = save_only(&inbox, &paid_request(&"c".repeat(64), &request, fee));
+        inbox.set_started(id, true).unwrap();
+        drop(inbox);
+        // A stop after the record and before the requeue still handles it again.
+        let stopped = Inbox::open(dir.path()).unwrap();
+        record_interrupted(&stopped.interrupted().unwrap()[0], true, false).await;
+        drop(stopped);
+        stable_channels::audit::enable_test_capture();
+        let inbox = start_inbox(dir.path()).await;
+        assert!(!inbox.oldest().unwrap().unwrap().started, "queued to be handled again");
+        // Its second run stops the daemon too.
+        inbox.set_started(id, true).unwrap();
+        drop(inbox);
+        let inbox = start_inbox(dir.path()).await;
+        let rows = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        let interrupted: Vec<_> = rows.iter().filter(|(name, _)| name == "EVENT_INTERRUPTED").map(|(_, data)| data).collect();
+        assert_eq!(interrupted.len(), 2, "{rows:?}");
+        assert_eq!(interrupted[0]["handled_again"], true);
+        assert_eq!(interrupted[1]["handled_again"], false);
+        assert_eq!(interrupted[1]["requeued_before"], true);
+        assert_ne!(interrupted[0]["dedup_key"], interrupted[1]["dedup_key"], "the drop gets its own record");
+        assert_eq!(inbox.oldest().unwrap(), None, "dropped, not handled a third time");
     }
 
     #[tokio::test]
@@ -2350,7 +2555,93 @@ mod tests {
         assert_eq!(interrupted[0].1["event"], "payment_forwarded");
         assert_eq!(interrupted[0].1["received_ms"], 41);
         assert!(interrupted[0].1["payment_id"].is_null());
+        assert_eq!(interrupted[0].1["handled_again"], false);
         assert_eq!(inbox.oldest().unwrap().unwrap().entry, Entry::Event(claimable("pay-0")), "the forward isn't replayed, the next row is");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_interrupted_row_stays_until_its_record_is_saved_and_is_recorded_once() {
+        let _guard = crate::stable_manager::tests::AUDIT_TEST_GUARD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (manager, _db) = serving_fixture();
+        let ledger = rusqlite::Connection::open(manager.lock().await.data_dir().join(stable_channels::db::DB_FILENAME)).unwrap();
+        ledger.execute_batch(
+            "CREATE TRIGGER fail_interrupted BEFORE INSERT ON ledger_events WHEN NEW.event_type = 'EVENT_INTERRUPTED'
+             BEGIN SELECT RAISE(FAIL, 'injected ledger failure'); END;",
+        ).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let inbox = Inbox::open(dir.path()).unwrap();
+        inbox.save(&[(Entry::Event(forwarded()), 41)]).unwrap();
+        let id = inbox.oldest().unwrap().unwrap().id;
+        inbox.set_started(id, true).unwrap();
+        drop(inbox);
+        let waited = tokio::time::timeout(Duration::from_secs(600), start_inbox(dir.path())).await;
+        assert!(waited.is_err(), "nothing is handled while the record can't be saved");
+        assert_eq!(Inbox::open(dir.path()).unwrap().interrupted().unwrap().len(), 1, "and the row is kept for it");
+        ledger.execute_batch("DROP TRIGGER fail_interrupted").unwrap();
+        // A stop after the record is saved and before the row is deleted records it again at the next start.
+        let stopped = Inbox::open(dir.path()).unwrap();
+        record_interrupted(&stopped.interrupted().unwrap()[0], false, false).await;
+        drop(stopped);
+        let inbox = start_inbox(dir.path()).await;
+        assert_eq!(inbox.oldest().unwrap(), None, "dropped once recorded");
+        let recorded: i64 = ledger.query_row("SELECT COUNT(*) FROM ledger_events WHERE event_type = 'EVENT_INTERRUPTED'", [], |row| row.get(0)).unwrap();
+        assert_eq!(recorded, 1, "recorded once, though written twice");
+    }
+
+    #[tokio::test]
+    async fn a_trade_request_interrupted_before_its_decision_is_decided_after_a_restart() {
+        let _guard = crate::stable_manager::tests::AUDIT_TEST_GUARD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (manager, db) = serving_fixture();
+        let (ldk, request, fee) = crate::stable_manager::tests::trade_request(&mut *manager.lock().await);
+        let payment_id = "c".repeat(64);
+        let dir = tempfile::tempdir().unwrap();
+        let inbox = Inbox::open(dir.path()).unwrap();
+        let id = save_only(&inbox, &paid_request(&payment_id, &request, fee));
+        // The daemon stops while the request's handler runs, before it decides.
+        inbox.set_started(id, true).unwrap();
+        drop(inbox);
+        stable_channels::audit::enable_test_capture();
+        let inbox = start_inbox(dir.path()).await;
+        let mut health = StreamHealth::new(db.begin_event_stream_gap(1_000).unwrap());
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let asks = Arc::new(AtomicUsize::new(0));
+        let (_reader, mut events, active) = buffer_events_with_health(CountingSource(receiver, Arc::clone(&asks)), Arc::clone(&inbox), LIMITS);
+        serve_until_handled(&mut events, &active, &asks, 0, sender, &manager, &db, &ldk, &mut health).await;
+        let rows = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        let interrupted: Vec<_> = rows.iter().filter(|(name, _)| name == "EVENT_INTERRUPTED").collect();
+        assert_eq!(interrupted.len(), 1, "{rows:?}");
+        assert_eq!(interrupted[0].1["handled_again"], true);
+        assert_eq!(interrupted[0].1["payment_id"], payment_id.as_str());
+        assert!(db.trade_decision_by_payment(&payment_id).unwrap().is_some(), "decided after the restart");
+        StableChannelManager::retry_pending_trade_responses(&db, &ldk).await;
+        assert_eq!(trade_responses(&ldk), 1, "so the wallet gets its answer");
+    }
+
+    #[tokio::test]
+    async fn a_trade_request_interrupted_after_its_decision_is_answered_and_not_decided_again() {
+        let _guard = crate::stable_manager::tests::AUDIT_TEST_GUARD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (manager, db) = serving_fixture();
+        let (ldk, request, fee) = crate::stable_manager::tests::trade_request(&mut *manager.lock().await);
+        let payment_id = "c".repeat(64);
+        let envelope = paid_request(&payment_id, &request, fee);
+        let dir = tempfile::tempdir().unwrap();
+        let inbox = Inbox::open(dir.path()).unwrap();
+        let id = save_only(&inbox, &envelope);
+        let mut health = StreamHealth::new(db.begin_event_stream_gap(1_000).unwrap());
+        handle(id, envelope, &inbox, &manager, &db, &ldk, &mut health).await;
+        let decided = db.trade_decision_summary(&payment_id).unwrap().expect("decided");
+        // The daemon stops after the decision and before the row is deleted.
+        assert!(inbox.oldest().unwrap().unwrap().started);
+        drop(inbox);
+        let inbox = start_inbox(dir.path()).await;
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let asks = Arc::new(AtomicUsize::new(0));
+        let (_reader, mut events, active) = buffer_events_with_health(CountingSource(receiver, Arc::clone(&asks)), Arc::clone(&inbox), LIMITS);
+        serve_until_handled(&mut events, &active, &asks, 0, sender, &manager, &db, &ldk, &mut health).await;
+        assert_eq!(db.trade_decision_summary(&payment_id).unwrap(), Some(decided), "the saved decision stands");
+        StableChannelManager::retry_pending_trade_responses(&db, &ldk).await;
+        assert!(trade_responses(&ldk) >= 1, "and the wallet gets it");
     }
 
     #[tokio::test(start_paused = true)]
@@ -2408,6 +2699,54 @@ mod tests {
         let at = |payment_id: &str| rows.iter().position(|(name, data)| name == "PAYMENT_CLAIMABLE" && data["payment_id"] == payment_id).unwrap();
         let connect = rows.iter().position(|(name, data)| name == "RECONCILIATION_STARTED" && data["trigger"] == "stream_connected").unwrap();
         assert!(at("pay-1") < connect && connect < at("pay-2"), "{names:?}");
+    }
+
+    fn set_aside_files(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir).unwrap().map(|entry| entry.unwrap().file_name().into_string().unwrap()).filter(|name| name.contains(".unreadable-")).collect();
+        names.sort();
+        names
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_inbox_that_is_not_a_database_is_set_aside_after_three_tries_and_a_new_one_used() {
+        let _guard = crate::stable_manager::tests::AUDIT_TEST_GUARD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let name = crate::event_inbox::INBOX_FILENAME;
+        std::fs::write(dir.path().join(name), vec![0x5a; 8_192]).unwrap();
+        stable_channels::audit::enable_test_capture();
+        let started = tokio::time::Instant::now();
+        let inbox = tokio::time::timeout(Duration::from_secs(600), start_inbox(dir.path())).await;
+        let rows = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        let inbox = inbox.expect("not waited on forever");
+        assert_eq!(tokio::time::Instant::now() - started, Duration::from_secs(1 + 2 + 4), "set aside on the third failure, opened at the next try");
+        let unavailable: Vec<_> = rows.iter().filter(|(event, data)| event == "EVENT_INBOX_UNAVAILABLE" && data["op"] == "open").collect();
+        assert_eq!(unavailable.len(), 3, "each failed open is recorded: {rows:?}");
+        let set_aside: Vec<_> = rows.iter().filter(|(event, _)| event == "EVENT_INBOX_SET_ASIDE").collect();
+        assert_eq!(set_aside.len(), 1);
+        let aside = set_aside_files(dir.path());
+        assert_eq!(aside.len(), 1, "{aside:?}");
+        assert_eq!(std::fs::read(dir.path().join(&aside[0])).unwrap(), vec![0x5a; 8_192], "kept as it was");
+        assert!(set_aside[0].1["moved_to"].as_str().unwrap().ends_with(&aside[0]));
+        inbox.save(&[(Entry::Event(claimable("pay-0")), 1)]).unwrap();
+        assert_eq!(inbox.oldest().unwrap().unwrap().entry, Entry::Event(claimable("pay-0")), "the new inbox works");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_inbox_that_fails_to_open_for_another_reason_is_left_in_place() {
+        let _guard = crate::stable_manager::tests::AUDIT_TEST_GUARD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        // A directory in the file's place can't be opened, and moving it would cure nothing.
+        std::fs::create_dir(dir.path().join(crate::event_inbox::INBOX_FILENAME)).unwrap();
+        stable_channels::audit::enable_test_capture();
+        let waited = tokio::time::timeout(Duration::from_secs(600), start_inbox(dir.path())).await;
+        let rows = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        assert!(waited.is_err(), "still trying");
+        assert!(set_aside_files(dir.path()).is_empty());
+        assert!(dir.path().join(crate::event_inbox::INBOX_FILENAME).is_dir());
+        assert!(rows.iter().filter(|(event, _)| event == "EVENT_INBOX_UNAVAILABLE").count() >= 5, "{rows:?}");
+        assert!(!rows.iter().any(|(event, _)| event == "EVENT_INBOX_SET_ASIDE"));
     }
 
     /// A paid request as LDK Server reports it, carrying a wallet's signed message.
