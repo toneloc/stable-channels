@@ -146,6 +146,9 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
     var error by remember { mutableStateOf<String?>(null) }
     var showScanner by remember { mutableStateOf(false) }
     var isExtractingQR by remember { mutableStateOf(false) }
+    // Bumped by each photo import and each typed or scanned To value. An import fills the field
+    // only if it is still the latest, so a slow one can't overwrite a newer value.
+    var photoImportId by remember { mutableIntStateOf(0) }
     var feeRateSatVb by remember { mutableStateOf<Long?>(null) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -307,6 +310,13 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
         onDispose { appState.isPickingMedia = false }
     }
 
+    // Typing or scanning drops any photo import that is still running.
+    fun setInputFromUser(value: String) {
+        photoImportId++
+        isExtractingQR = false
+        input = value
+    }
+
     // Photo picker launcher for QR extraction (Task 7.4)
     val photoPickerLauncher =
         rememberLauncherForActivityResult(contract = ActivityResultContracts.PickVisualMedia()) {
@@ -314,8 +324,15 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
             appState.isPickingMedia = false
             if (uri == null) return@rememberLauncherForActivityResult
 
+            val importId = ++photoImportId
             isExtractingQR = true
             scope.launch {
+                // An import replaced while it ran shows no message.
+                fun showToast(message: String) {
+                    if (importId == photoImportId) {
+                        Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                    }
+                }
                 try {
                     val bitmap =
                         withContext(Dispatchers.IO) {
@@ -323,12 +340,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                         }
                     if (bitmap == null) {
                         Log.w(TAG, "Could not decode a bitmap from picked image URI: $uri")
-                        Toast.makeText(
-                                context,
-                                "Could not read the selected image",
-                                Toast.LENGTH_LONG,
-                            )
-                            .show()
+                        showToast("Could not read the selected image")
                         return@launch
                     }
 
@@ -344,45 +356,35 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                             scanner.process(inputImage).await()
                         } catch (e: Exception) {
                             Log.w(TAG, "QR barcode scan failed: ${e.message}", e)
-                            Toast.makeText(
-                                    context,
-                                    "No QR code was found in that image",
-                                    Toast.LENGTH_LONG,
-                                )
-                                .show()
+                            showToast("No QR code was found in that image")
                             return@launch
                         }
+                    // The user typed, scanned or picked another photo while this one was decoding.
+                    if (importId != photoImportId) return@launch
 
+                    val rawValues = barcodes.mapNotNull { it.rawValue }.filter { it.isNotBlank() }
                     // Find first valid payment string
                     val validPayload =
-                        barcodes
-                            .mapNotNull { it.rawValue }
+                        rawValues
                             .map { QRCodeUtils.stripUriPrefix(it) }
                             .firstOrNull { QRCodeUtils.isValidPaymentString(it) }
 
                     when {
                         validPayload != null -> input = validPayload
+                        // A bitcoin: URI with a req- condition the wallet can't meet.
+                        rawValues.any { QRCodeUtils.stripUriPrefix(it).isEmpty() } ->
+                            showToast("This wallet can't pay this QR code")
                         barcodes.isNotEmpty() ->
-                            Toast.makeText(
-                                    context,
-                                    "QR code found, but it's not a Lightning invoice or Bitcoin address",
-                                    Toast.LENGTH_LONG,
-                                )
-                                .show()
-                        else ->
-                            Toast.makeText(
-                                    context,
-                                    "No QR code was found in that image",
-                                    Toast.LENGTH_LONG,
-                                )
-                                .show()
+                            showToast(
+                                "QR code found, but it's not a Lightning invoice or Bitcoin address"
+                            )
+                        else -> showToast("No QR code was found in that image")
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "Failed to read image for QR extraction: ${e.message}", e)
-                    Toast.makeText(context, "Could not read the selected image", Toast.LENGTH_LONG)
-                        .show()
+                    showToast("Could not read the selected image")
                 } finally {
-                    isExtractingQR = false
+                    if (importId == photoImportId) isExtractingQR = false
                 }
             }
         }
@@ -391,7 +393,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
     if (showScanner) {
         QRScannerScreen(
             onResult = { decoded ->
-                input = decoded
+                setInputFromUser(decoded)
                 showScanner = false
             },
             onCancel = {
@@ -579,7 +581,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
 
             OutlinedTextField(
                 value = input,
-                onValueChange = { input = it },
+                onValueChange = { setInputFromUser(it) },
                 label = { Text("To") },
                 placeholder = { Text("Invoice or onchain address") },
                 modifier = Modifier.fillMaxWidth(),
@@ -762,6 +764,9 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                     error = null
                     pendingPaymentId = null
                     attemptStartedAtNanos = System.nanoTime()
+                    // Send what was on screen at the tap, even if it changes during auth.
+                    val destination = input
+                    val sendMax = isSendMax
                     scope.launch {
                         // Auth gate: check if authentication is required
                         val isOnChain = inputType == InputType.ONCHAIN
@@ -792,7 +797,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                         withContext(Dispatchers.IO) {
                             try {
                                 appState.ensureLSPConnected()
-                                val trimmed = QRCodeUtils.stripUriPrefix(input)
+                                val trimmed = QRCodeUtils.stripUriPrefix(destination)
                                 val price = btcPrice
                                 when (inputType) {
                                     InputType.BOLT11 -> {
@@ -884,14 +889,14 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                             result = "Splice-out initiated"
                                         } else {
                                             val txid =
-                                                if (isSendMax) {
+                                                if (sendMax) {
                                                     appState.nodeService.sendAllOnchain(trimmed)
                                                 } else {
                                                     appState.nodeService.sendOnchain(trimmed, sats)
                                                 }
                                             appState.onchainSendBroadcasted(
                                                 sats,
-                                                isSendAll = isSendMax,
+                                                isSendAll = sendMax,
                                                 txid = txid,
                                             )
                                             appState.recordPendingOnchainSend(
@@ -918,7 +923,8 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                         }
                     }
                 },
-                enabled = !isSending && input.isNotBlank() && !needsAmount,
+                // Wait for a photo import, so the field can't change right after the tap.
+                enabled = !isSending && !isExtractingQR && input.isNotBlank() && !needsAmount,
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 if (isSending) CircularProgressIndicator(Modifier.size(20.dp)) else Text("Send")
