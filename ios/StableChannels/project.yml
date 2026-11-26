@@ -35,6 +35,7 @@ targets:
     sources:
       - path: StableChannels
       - path: NotificationService/Services/TradeProtocol.swift
+      - path: NotificationService/Services/StabilityNotificationCopy.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.stablechannels.app
@@ -86,6 +87,7 @@ targets:
     sources:
       - path: NotificationService
       - path: StableChannels/Services/Price/PriceOracle.swift
+      - path: StableChannels/Domain/BuildFeatures.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.stablechannels.app.NotificationService
