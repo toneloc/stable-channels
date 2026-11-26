@@ -42,6 +42,8 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         INFOPLIST_FILE: StableChannels/Info.plist
         CODE_SIGN_STYLE: Automatic
+        # Automatic signing picks the distribution certificate when archiving.
+        CODE_SIGN_IDENTITY: "Apple Development"
         DEVELOPMENT_TEAM: VJF3VBKXV9
         SWIFT_VERSION: "5.9"
         TARGETED_DEVICE_FAMILY: "1,2"
@@ -49,13 +51,9 @@ targets:
         CODE_SIGN_ENTITLEMENTS: StableChannels/StableChannels.entitlements
       configs:
         Debug:
-          CODE_SIGN_IDENTITY: "Apple Development"
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: "DEBUG STABILITY"
         Release:
-          CODE_SIGN_IDENTITY: "Apple Distribution"
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: STABILITY
-        AppStore:
-          CODE_SIGN_IDENTITY: "Apple Distribution"
     dependencies:
       - package: ldk-node
         product: LDKNode
@@ -95,19 +93,17 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         INFOPLIST_FILE: NotificationService/Info.plist
         CODE_SIGN_STYLE: Automatic
+        # Automatic signing picks the distribution certificate when archiving.
+        CODE_SIGN_IDENTITY: "Apple Development"
         DEVELOPMENT_TEAM: VJF3VBKXV9
         SWIFT_VERSION: "5.9"
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_ENTITLEMENTS: NotificationService/NotificationService.entitlements
       configs:
         Debug:
-          CODE_SIGN_IDENTITY: "Apple Development"
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: "DEBUG STABILITY"
         Release:
-          CODE_SIGN_IDENTITY: "Apple Distribution"
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: STABILITY
-        AppStore:
-          CODE_SIGN_IDENTITY: "Apple Distribution"
     dependencies:
       - package: ldk-node
         product: LDKNode
