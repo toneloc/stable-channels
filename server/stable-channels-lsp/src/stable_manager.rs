@@ -361,6 +361,21 @@ fn user_sats_without_received(channel: &Channel, held_msat: u64, received_msat: 
         .saturating_add(channel.counterparty_unspendable_punishment_reserve)
 }
 
+/// Whether `handle_payment_received` would take these records to the correlated trade path: no signed stability record, and a trade request with a trade id within the handler's size limit.
+pub(crate) fn carries_correlated_trade_request(custom_records: &[CustomTlvRecord]) -> bool {
+    if custom_records.iter().any(|record| record.type_num == SIGNED_STABILITY_TLV_TYPE) {
+        return false;
+    }
+    custom_records
+        .iter()
+        .find(|record| record.type_num == stable_channels::constants::STABLE_CHANNEL_TLV_TYPE)
+        .filter(|record| record.value.len() <= crate::messages::MAX_TLV_VALUE_BYTES)
+        .and_then(|record| std::str::from_utf8(record.value.as_ref()).ok())
+        .and_then(crate::messages::parse_envelope)
+        .and_then(|envelope| crate::messages::parse_trade_payload(&envelope.payload))
+        .is_some_and(|payload| payload.kind == stable_channels::constants::TRADE_MESSAGE_TYPE && payload.trade_id.is_some())
+}
+
 /// Ends the spend check on a channel whose balance, without what the user received during it, covers the backing again.
 fn close_spend_check_if_covered(
     checks: &mut std::collections::HashMap<u128, SpendCheck>,
@@ -2183,6 +2198,19 @@ impl StableChannelManager {
         ldk: &dyn LdkServerCalls,
         btc_price: f64,
     ) -> Handled {
+        self.handle_payment_received_at(custom_records, payment_id, amount_msat, None, ldk, btc_price).await
+    }
+
+    /// As `handle_payment_received`, for a payment LDK recorded at `paid_at` (unix seconds), so a request it carries can be judged by its age.
+    pub async fn handle_payment_received_at(
+        &mut self,
+        custom_records: Vec<CustomTlvRecord>,
+        payment_id: Option<String>,
+        amount_msat: Option<u64>,
+        paid_at: Option<u64>,
+        ldk: &dyn LdkServerCalls,
+        btc_price: f64,
+    ) -> Handled {
         if let Some(record) = custom_records
             .iter()
             .find(|record| record.type_num == SIGNED_STABILITY_TLV_TYPE)
@@ -2230,7 +2258,7 @@ impl StableChannelManager {
                 // after the signature verifies — a forged or unsigned envelope from any peer no
                 // longer writes a settlement row before it is authenticated.
                 return self
-                    .handle_trade_payment(&raw, payment_id.as_deref(), amount_msat, ldk, btc_price)
+                    .handle_trade_payment_at(&raw, payment_id.as_deref(), amount_msat, paid_at, ldk, btc_price)
                     .await;
             } else if rec.value.as_ref() == [1u8] {
                 if let Some(pid) = payment_id.as_deref() {
@@ -3901,17 +3929,32 @@ impl StableChannelManager {
         ldk: &dyn LdkServerCalls,
         btc_price: f64,
     ) -> Handled {
+        self.handle_trade_payment_at(raw, inbound_payment_id, amount_msat, None, ldk, btc_price).await
+    }
+
+    /// As `handle_trade_payment`, for a request whose payment LDK recorded at `paid_at` (unix seconds).
+    pub async fn handle_trade_payment_at(
+        &mut self,
+        raw: &str,
+        inbound_payment_id: Option<&str>,
+        amount_msat: Option<u64>,
+        paid_at: Option<u64>,
+        ldk: &dyn LdkServerCalls,
+        btc_price: f64,
+    ) -> Handled {
         let mut handled = Handled::Done;
-        self.decide_trade(raw, inbound_payment_id, amount_msat, ldk, btc_price, &mut handled).await;
+        self.decide_trade(raw, inbound_payment_id, amount_msat, paid_at, ldk, btc_price, &mut handled).await;
         handled
     }
 
     /// Sets `handled` to Retry, deciding nothing, when LDK Server didn't answer a read the decision needs.
+    #[allow(clippy::too_many_arguments)]
     async fn decide_trade(
         &mut self,
         raw: &str,
         inbound_payment_id: Option<&str>,
         amount_msat: Option<u64>,
+        paid_at: Option<u64>,
         ldk: &dyn LdkServerCalls,
         btc_price: f64,
         handled: &mut Handled,
@@ -4339,15 +4382,24 @@ impl StableChannelManager {
 
         // Replay protection: reject a signed trade with a stale `ts`; ts==0 means an un-upgraded wallet (no timestamp yet) — accepted until all wallets sign one.
         const TRADE_SIG_WINDOW_SECS: u64 = 300;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         if payload.ts != 0 {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
             if now.abs_diff(payload.ts) > TRADE_SIG_WINDOW_SECS {
                 stable_channels::audit::audit_event(
                     "TRADE_STALE",
                     serde_json::json!({ "ts": payload.ts, "now": now, "channel_id": chan.channel_id, "user_channel_id": chan.user_channel_id.clone() }),
+                );
+                return;
+            }
+        } else if let Some(paid_at) = paid_at.filter(|paid_at| *paid_at > 0) {
+            // Without a timestamp a request is as old as its payment: one held longer than the wallet waits for an answer, as across a long stop, isn't run at today's price.
+            if now.saturating_sub(paid_at) > stable_channels::constants::TRADE_RESULT_TIMEOUT_SECS {
+                stable_channels::audit::audit_event(
+                    "TRADE_STALE",
+                    serde_json::json!({ "paid_at": paid_at, "now": now, "channel_id": chan.channel_id, "user_channel_id": chan.user_channel_id.clone() }),
                 );
                 return;
             }
@@ -5841,6 +5893,80 @@ pub(crate) mod tests {
             100_000.0,
         ).await;
         assert_eq!(mgr.stable_channels.len(), 1);
+    }
+
+    /// A ts-less request on a seeded channel, paid `age_secs` ago (0 = time unknown); returns the expected USD after it is handled and whether it was called stale.
+    async fn ts_less_request_paid(age_secs: Option<u64>) -> (f64, bool) {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut mgr = make_manager();
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+        )]);
+        seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 0.0, 0, 50_000, 50_000, 100_000.0);
+        let records = vec![CustomTlvRecord {
+            type_num: stable_channels::constants::STABLE_CHANNEL_TLV_TYPE,
+            value: trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 8.0).into_bytes().into(),
+        }];
+        let fee_msat = expected_trade_fee_msat(0.0, 8.0, 100_000.0).unwrap();
+        let paid_at = age_secs.map(|age| if age == 0 { 0 } else { test_unix_now() - age });
+        stable_channels::audit::enable_test_capture();
+        mgr.handle_payment_received_at(records, Some("pay_test_1".to_string()), Some(fee_msat), paid_at, &fake, 100_000.0).await;
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        let stale = events.iter().any(|(name, data)| name == "TRADE_STALE" && data.get("paid_at").is_some());
+        (mgr.stable_channels[0].expected_usd.0, stale)
+    }
+
+    #[test]
+    fn only_a_request_with_a_trade_id_counts_as_correlated() {
+        let tlv = |type_num: u64, value: String| CustomTlvRecord { type_num, value: value.into_bytes().into() };
+        let stable = stable_channels::constants::STABLE_CHANNEL_TLV_TYPE;
+        let correlated = correlated_trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, &"b".repeat(64), 60.0, 100_000.0);
+        assert!(carries_correlated_trade_request(&[tlv(stable, correlated.clone())]));
+        assert!(!carries_correlated_trade_request(&[tlv(stable, trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 60.0))]), "a legacy request");
+        assert!(!carries_correlated_trade_request(&[tlv(SIGNED_STABILITY_TLV_TYPE, "{}".into()), tlv(stable, correlated.clone())]), "a signed stability record is handled first");
+        assert!(!carries_correlated_trade_request(&[]));
+        // Still valid JSON, but past the size the handler accepts, so the handler would refuse it.
+        let oversize = format!("{correlated}{}", " ".repeat(crate::messages::MAX_TLV_VALUE_BYTES));
+        assert!(!carries_correlated_trade_request(&[tlv(stable, oversize)]), "an oversize request");
+    }
+
+    #[tokio::test]
+    async fn a_request_without_a_timestamp_is_not_run_once_its_payment_is_older_than_a_wallet_waits() {
+        let timeout = stable_channels::constants::TRADE_RESULT_TIMEOUT_SECS;
+        assert_eq!(ts_less_request_paid(Some(timeout + 60)).await, (0.0, true), "held past the wallet's wait, as across a long stop");
+        assert_eq!(ts_less_request_paid(Some(60)).await, (8.0, false), "paid a minute ago");
+        assert_eq!(ts_less_request_paid(Some(0)).await, (8.0, false), "an unknown payment time stops nothing");
+        assert_eq!(ts_less_request_paid(None).await, (8.0, false));
+    }
+
+    #[tokio::test]
+    async fn the_event_loop_passes_the_payment_time_to_the_trade_handler() {
+        use ldk_server_client::ldk_server_grpc::events::event_envelope::Event as EventVariant;
+        use ldk_server_client::ldk_server_grpc::events::PaymentReceived;
+        use ldk_server_client::ldk_server_grpc::types::Payment;
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut mgr = make_manager();
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+        )]);
+        seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 0.0, 0, 50_000, 50_000, 100_000.0);
+        let event = EventVariant::PaymentReceived(PaymentReceived {
+            payment: Some(Payment {
+                payment_id: "pay_test_1".to_string(),
+                amount_msat: Some(expected_trade_fee_msat(0.0, 8.0, 100_000.0).unwrap()),
+                latest_update_timestamp: test_unix_now() - stable_channels::constants::TRADE_RESULT_TIMEOUT_SECS - 60,
+                ..Default::default()
+            }),
+            custom_records: vec![CustomTlvRecord {
+                type_num: stable_channels::constants::STABLE_CHANNEL_TLV_TYPE,
+                value: trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 8.0).into_bytes().into(),
+            }],
+            ..Default::default()
+        });
+        let db = mgr.db.clone();
+        crate::event_loop::dispatch_event(Some(event), &mut mgr, &db, &fake, 100_000.0).await;
+        assert_eq!(mgr.stable_channels[0].expected_usd.0, 0.0, "a stale request read from the stream isn't run");
     }
 
     #[tokio::test]
@@ -8753,7 +8879,7 @@ pub(crate) mod tests {
             // Model the server's bounded subscriber queue. More than its 1,024-event
             // broadcast capacity must drain locally even while the database is still failing.
             let (sender, source) = tokio::sync::mpsc::channel(64);
-            let (mut reader, receiver) =
+            let (reader, receiver) =
                 crate::event_loop::buffer_events(BufferedTestSource(source));
             tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 use ldk_server_client::ldk_server_grpc::events::{
@@ -8770,21 +8896,25 @@ pub(crate) mod tests {
                         .await
                         .unwrap();
                 }
-                drop(sender);
-                reader.join_next().await.unwrap().unwrap();
+                while receiver.len() != 2048 {
+                    tokio::task::yield_now().await;
+                }
             })
             .await
             .expect("the subscription reader must keep draining while accounting waits");
             assert_eq!(receiver.len(), 2048);
-            buffered_burst = Some(receiver);
+            buffered_burst = Some((reader, sender, receiver));
             conn.execute_batch("DROP TRIGGER reject_book_save").unwrap();
         }
         tokio::time::timeout(std::time::Duration::from_secs(5), &mut next_event)
             .await
             .expect("the retained event should resume after the database recovers");
-        if let Some(mut receiver) = buffered_burst {
+        if let Some((mut reader, sender, mut receiver)) = buffered_burst {
+            assert_eq!(receiver.take().await, Some(crate::event_inbox::Entry::Connected));
             for n in 0..2048 {
-                let event = receiver.recv().await.unwrap().event().unwrap();
+                let Some(crate::event_inbox::Entry::Event(event)) = receiver.take().await else {
+                    panic!("expected a saved event");
+                };
                 let Some(ldk_server_client::ldk_server_grpc::events::event_envelope::Event::ChannelStateChanged(channel)) = event.event else {
                     panic!("unexpected buffered event");
                 };
@@ -8794,7 +8924,9 @@ pub(crate) mod tests {
                     "events must retain their order"
                 );
             }
-            assert!(receiver.recv().await.is_none());
+            drop(sender);
+            reader.join_next().await.unwrap().unwrap();
+            assert!(receiver.take().await.is_none());
         }
         let mut mgr = shared.lock().await;
         mgr.run_tick(&fake, &push, 100_000.0).await;

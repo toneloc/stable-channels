@@ -17,6 +17,11 @@ network = "regtest"
 #   - tls.crt + tls.key (auto-generated on first start)
 #   - audit_log.txt (append-only)
 #   - stable_channels.db (sqlite)
+#   - event_inbox.db (+ -wal, -shm): events saved until they are handled. Transient:
+#     leave it out of backups and never restore it, since an old copy replays events
+#     already handled; after restoring this directory from a backup, delete event_inbox.db*.
+#   - event_inbox.db.unreadable-<ms>*: a damaged inbox set aside for inspection;
+#     its events are not handled. Delete it once inspected.
 dir_path = "./data/stable-channels-lsp"
 
 # TLS for the SC daemon's own REST endpoint (auto-generated self-signed cert).

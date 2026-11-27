@@ -32,5 +32,7 @@ defaultUsername: ""
 defaultPassword: ""
 backupIgnore:
   - data/ldk-server/*/ldk-server.log*
+  # Transient event inbox: restoring an old copy would replay events already handled.
+  - data/sc-lsp/event_inbox.db*
 submitter: toneloc
 submission: https://github.com/getumbrel/umbrel-apps/pull/TODO

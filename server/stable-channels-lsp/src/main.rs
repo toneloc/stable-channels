@@ -5,6 +5,7 @@ mod channel_audit;
 mod channel_close;
 mod config;
 mod emails;
+mod event_inbox;
 mod event_loop;
 mod fixed_window;
 mod geoip;
