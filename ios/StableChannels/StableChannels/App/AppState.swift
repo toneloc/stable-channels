@@ -791,8 +791,9 @@ class AppState {
     /// files, clear in-memory/app-group cache, then start the node fresh.
     func restoreWalletFromMnemonic(_ mnemonic: String, acknowledgeForceClose: Bool = false) async throws {
         let words = MnemonicUtils.formatForDisplay(mnemonic)
-        guard MnemonicUtils.isValidWordCount(words),
-              MnemonicUtils.hasValidCharacterFormat(words) else {
+        // LDKNode aborts the app on a phrase it rejects, so a bad one must fail here, before the channel check
+        // and the wipe.
+        guard MnemonicUtils.isValidBIP39(words) else {
             throw WalletRestoreError.invalidMnemonic
         }
 
@@ -2687,7 +2688,7 @@ class AppState {
                         )
                     }
                     saveChannelToDB(preserveBacking: true)
-                    statusMessage = "Payment confirmed; syncing stability payment"
+                    statusMessage = StabilitySurface.current.syncingPaymentStatus
                     return true
                 }
             }
@@ -2712,7 +2713,7 @@ class AppState {
                     UserDefaults(suiteName: Constants.appGroupIdentifier)?
                         .set(true, forKey: "pending_push_payment")
                     saveChannelToDB(preserveBacking: true)
-                    statusMessage = "Payment confirmed; syncing stability payment"
+                    statusMessage = StabilitySurface.current.syncingPaymentStatus
                 }
                 return true
             }
@@ -2726,7 +2727,7 @@ class AppState {
                     )
                 }
                 saveChannelToDB(preserveBacking: true)
-                statusMessage = "Payment confirmed; syncing stability payment"
+                statusMessage = StabilitySurface.current.syncingPaymentStatus
                 return true
             }
         }

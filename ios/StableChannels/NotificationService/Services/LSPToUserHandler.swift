@@ -86,7 +86,7 @@ final class LSPToUserHandler: PaymentHandler {
             content = mutator.buildPending(
                 base: baseContent,
                 title: "Payment Pending",
-                body: "Open app to sync stable position"
+                body: StabilityNotificationCopy.current.syncPositionInApp
             )
             shouldPersist = true
         } else if handledStableControl {

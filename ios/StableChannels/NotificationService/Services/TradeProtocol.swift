@@ -143,6 +143,7 @@ enum TradeValidationError: LocalizedError, Equatable {
     /// LDK may fail to persist its payment row after the fee keysend started. The prepared
     /// row stays recoverable and blocks the next order until the outcome is known.
     case sendOutcomeUnknown
+    case unavailableInThisBuild
 
     /// Fixed local copy. Says what happened and, where the user can act, what to do about it.
     var errorDescription: String? {
@@ -158,6 +159,7 @@ enum TradeValidationError: LocalizedError, Equatable {
         case .sendOutcomeUnknown:
             return "The trade may have been sent, but its status could not be saved. "
                 + "Keep the wallet connected and check History. Do not place the order again."
+        case .unavailableInThisBuild: return "Not available in this version."
         }
     }
 }

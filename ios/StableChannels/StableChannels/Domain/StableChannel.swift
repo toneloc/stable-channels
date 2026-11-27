@@ -132,8 +132,7 @@ enum StabilitySpendError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .surplusSettling(let owedUSD):
-            let formatted = owedUSD.formatted(.currency(code: "USD"))
-            return "A stability payment of \(formatted) to the LSP is still settling -- retry this payment shortly."
+            return StabilitySurface.current.surplusSettlingMessage(owedUSD: owedUSD)
         }
     }
 }

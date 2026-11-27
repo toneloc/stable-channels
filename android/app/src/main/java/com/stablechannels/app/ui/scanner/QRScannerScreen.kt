@@ -6,6 +6,7 @@ import android.net.Uri
 import android.provider.Settings
 import android.view.HapticFeedbackConstants
 import android.view.ViewGroup
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
@@ -50,7 +51,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Full-screen QR code scanner using CameraX and ML Kit barcode detection.
  *
  * @param onResult Called with the decoded and cleaned payment string on successful scan
- * @param onCancel Called when the user taps cancel without scanning
+ * @param onCancel Called when the user taps cancel, or after a QR code the wallet can't pay
  */
 @Composable
 fun QRScannerScreen(
@@ -61,7 +62,8 @@ fun QRScannerScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     val view = LocalView.current
 
-    // Single-detection guard
+    // Set by the first result, by Cancel and when the scanner closes. No result is delivered after
+    // it, so a decode still in flight can't fill the form once the user has left the scanner.
     val hasDetected = remember { AtomicBoolean(false) }
 
     // Permission state
@@ -101,6 +103,17 @@ fun QRScannerScreen(
                     onBarcodeDetected = { rawValue ->
                         // Strip URI prefix and query params
                         val cleaned = QRCodeUtils.stripUriPrefix(rawValue)
+                        if (cleaned.isEmpty()) {
+                            // Empty, or a bitcoin: URI with a req- condition the wallet can't meet.
+                            Toast.makeText(
+                                    context,
+                                    "This wallet can't pay this QR code",
+                                    Toast.LENGTH_LONG,
+                                )
+                                .show()
+                            onCancel()
+                            return@CameraPreviewWithAnalysis
+                        }
 
                         // Trigger haptic feedback
                         view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
@@ -250,7 +263,10 @@ fun QRScannerScreen(
 
         // Cancel button - always visible
         IconButton(
-            onClick = onCancel,
+            onClick = {
+                hasDetected.set(true)
+                onCancel()
+            },
             modifier = Modifier.align(Alignment.TopStart).padding(16.dp).statusBarsPadding(),
         ) {
             Icon(
@@ -276,6 +292,20 @@ private fun CameraPreviewWithAnalysis(
         BarcodeScannerOptions.Builder().setBarcodeFormats(Barcode.FORMAT_QR_CODE).build()
     }
     val barcodeScanner = remember { BarcodeScanning.getClient(scannerOptions) }
+    val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            hasDetected.set(true)
+            // The camera is bound to the activity, so release it here or it keeps running after
+            // the scanner closes.
+            cameraProviderFuture.addListener(
+                { runCatching { cameraProviderFuture.get().unbindAll() } },
+                ContextCompat.getMainExecutor(context),
+            )
+            barcodeScanner.close()
+        }
+    }
 
     AndroidView(
         factory = { ctx ->
@@ -289,9 +319,10 @@ private fun CameraPreviewWithAnalysis(
                     scaleType = PreviewView.ScaleType.FILL_CENTER
                 }
 
-            val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
             cameraProviderFuture.addListener(
                 {
+                    // The scanner closed before the camera was ready.
+                    if (hasDetected.get()) return@addListener
                     val cameraProvider = cameraProviderFuture.get()
 
                     val preview =

@@ -6,8 +6,8 @@ struct HomeActionButtonsView: View {
     var isOffline: Bool = false
     let onSend: () -> Void
     let onReceive: () -> Void
-    let onBuy: () -> Void
-    let onSell: () -> Void
+    let onBuy: (() -> Void)?
+    let onSell: (() -> Void)?
 
     // Sophisticated accent tints for the colored circular badges
     private let sendBlue = Color(red: 0.35, green: 0.65, blue: 1.0)
@@ -35,21 +35,27 @@ struct HomeActionButtonsView: View {
                 )
             }
 
-            HStack(spacing: 10) {
-                ActionButton(
-                    title: String(localized: "button_buy_btc", defaultValue: "USD → BTC"),
-                    icon: "arrow.up.right",
-                    color: buyAmber,
-                    textColor: .primary,
-                    action: onBuy
-                )
-                ActionButton(
-                    title: String(localized: "button_sell_btc", defaultValue: "BTC → USD"),
-                    icon: "arrow.down.right",
-                    color: sellPlum,
-                    textColor: .primary,
-                    action: onSell
-                )
+            if onBuy != nil || onSell != nil {
+                HStack(spacing: 10) {
+                    if let onBuy {
+                        ActionButton(
+                            title: String(localized: "button_buy_btc", defaultValue: "USD → BTC"),
+                            icon: "arrow.up.right",
+                            color: buyAmber,
+                            textColor: .primary,
+                            action: onBuy
+                        )
+                    }
+                    if let onSell {
+                        ActionButton(
+                            title: String(localized: "button_sell_btc", defaultValue: "BTC → USD"),
+                            icon: "arrow.down.right",
+                            color: sellPlum,
+                            textColor: .primary,
+                            action: onSell
+                        )
+                    }
+                }
             }
         }
         .opacity(isOffline ? 0.45 : 1.0)

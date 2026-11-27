@@ -17,7 +17,7 @@ struct HomeNotificationBannerView: View {
                         .foregroundStyle(.white)
                     Text(String(
                         localized: "notifications_disabled_subtitle",
-                        defaultValue: "Enable notifications for stability payments"
+                        defaultValue: "Enable notifications to receive payment alerts"
                     ))
                     .font(.caption)
                     .foregroundStyle(.white.opacity(0.9))

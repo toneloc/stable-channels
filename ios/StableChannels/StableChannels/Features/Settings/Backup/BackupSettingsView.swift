@@ -31,9 +31,7 @@ struct BackupSettingsView: View {
     // MARK: - Computed Properties
 
     private var restoreValid: Bool {
-        let filledCount = wordFields.filter { !$0.isEmpty }.count
-        let validCount = (filledCount == SeedConstants.wordCount12 || filledCount == SeedConstants.wordCount24)
-        guard validCount else { return false }
+        guard MnemonicUtils.isValidWordCount(wordFields.filter { !$0.isEmpty }.count) else { return false }
         return MnemonicUtils.hasValidCharacterFormat(restoreMnemonic)
     }
 

@@ -26,14 +26,16 @@ struct SettingsView: View {
                 // MARK: - Wallet
 
                 Section {
-                    NavigationLink {
-                        StablePositionView()
-                    } label: {
-                        rowLabel(
-                            icon: "banknote.fill",
-                            color: .green,
-                            text: String(localized: "link_stable_position", defaultValue: "Stable Position")
-                        )
+                    if StabilitySurface.current.showsStablePosition {
+                        NavigationLink {
+                            StablePositionView()
+                        } label: {
+                            rowLabel(
+                                icon: "banknote.fill",
+                                color: .green,
+                                text: String(localized: "link_stable_position", defaultValue: "Stable Position")
+                            )
+                        }
                     }
                     NavigationLink {
                         ChannelSettingsView()
