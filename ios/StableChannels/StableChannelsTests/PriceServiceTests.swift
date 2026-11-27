@@ -380,4 +380,9 @@ final class ReceiveInvoicePricingTests: XCTestCase {
         XCTAssertEqual(ReceiveView.invoiceSats(usd: 100, accountingPrice: prices.accountingPrice), 100_000)
         XCTAssertNil(ReceiveView.priceNote(accountingPrice: prices.accountingPrice, isOnline: true))
     }
+
+    func testHugeAmountGivesNoInvoiceInsteadOfTrapping() {
+        XCTAssertEqual(ReceiveView.invoiceSats(usd: 1e17, accountingPrice: 100_000), 0)
+        XCTAssertEqual(ReceiveView.invoiceSats(usd: .infinity, accountingPrice: 100_000), 0)
+    }
 }

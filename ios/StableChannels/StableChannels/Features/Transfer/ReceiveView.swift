@@ -32,7 +32,10 @@ struct ReceiveView: View {
     /// price can be an old one kept after failed refreshes. Returns 0 when there is no such price.
     static func invoiceSats(usd: Double, accountingPrice: Double) -> UInt64 {
         guard accountingPrice > 0, usd > 0 else { return 0 }
-        return UInt64(BitcoinUnits.sats(usd: usd, price: accountingPrice))
+        let sats = BitcoinUnits.sats(usd: usd, price: accountingPrice)
+        // A huge amount would trap in UInt64() or in the msat conversion.
+        guard sats.isFinite, sats < Double(UInt64.max / 1000) else { return 0 }
+        return UInt64(sats)
     }
 
     /// Why Generate Invoice is off, or nil when a fresh price is available.

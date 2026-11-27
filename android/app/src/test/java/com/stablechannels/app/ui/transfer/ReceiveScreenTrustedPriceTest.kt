@@ -81,8 +81,8 @@ class ReceiveScreenTrustedPriceTest {
         askForHundredDollars()
 
         compose.onNodeWithText(RECEIVE_WAITING_FOR_PRICE).assertIsDisplayed()
-        compose.onNodeWithText("Generate Invoice").assertIsNotEnabled()
-        verify(node, never()).receivePayment(anyLong(), anyString())
+        compose.onNodeWithText("Generate Invoice").assertIsNotEnabled().performClick()
+        verify(node, after(500).never()).receivePayment(anyLong(), anyString())
     }
 
     @Test
@@ -103,6 +103,29 @@ class ReceiveScreenTrustedPriceTest {
         compose.onNodeWithText("Generate Invoice").assertIsEnabled().performClick()
         // $100 at $100,000/BTC is 100,000 sats.
         verify(node, timeout(2_000)).receivePayment(100_000_000L, "Stable Channels")
+    }
+
+    @Test
+    fun firstPaymentInvoiceUsesTheTrustedPriceToo() {
+        // No ready channel, so the invoice opens one (JIT).
+        `when`(node.channels).thenReturn(emptyList())
+        doAnswer { throw IllegalStateException("node not running") }
+            .`when`(node)
+            .receiveViaJitChannel(anyLong(), anyString())
+        priceRefreshed()
+        compose.setContent { MaterialTheme { ReceiveScreen(state) {} } }
+        compose.onNode(hasSetTextAction()).performTextInput("50")
+
+        // A price that went stale before the tap opens nothing.
+        priceField<Date>("_lastUpdate").value = Date(0)
+        compose.onNodeWithText("Generate Invoice").assertIsEnabled().performClick()
+        compose.onNodeWithText(RECEIVE_PRICE_OUT_OF_DATE).assertIsDisplayed()
+        verify(node, after(500).never()).receiveViaJitChannel(anyLong(), anyString())
+
+        // With a fresh price it does: $50 at $100,000/BTC is 50,000 sats.
+        priceRefreshed()
+        compose.onNodeWithText("Generate Invoice").performClick()
+        verify(node, timeout(2_000)).receiveViaJitChannel(50_000_000L, "Stable Channels")
     }
 
     @Test
