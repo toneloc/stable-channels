@@ -361,7 +361,7 @@ fn user_sats_without_received(channel: &Channel, held_msat: u64, received_msat: 
         .saturating_add(channel.counterparty_unspendable_punishment_reserve)
 }
 
-/// Whether `handle_payment_received` would take these records to the correlated trade path: no signed stability record, and a trade request with a trade id.
+/// Whether `handle_payment_received` would take these records to the correlated trade path: no signed stability record, and a trade request with a trade id within the handler's size limit.
 pub(crate) fn carries_correlated_trade_request(custom_records: &[CustomTlvRecord]) -> bool {
     if custom_records.iter().any(|record| record.type_num == SIGNED_STABILITY_TLV_TYPE) {
         return false;
@@ -369,6 +369,7 @@ pub(crate) fn carries_correlated_trade_request(custom_records: &[CustomTlvRecord
     custom_records
         .iter()
         .find(|record| record.type_num == stable_channels::constants::STABLE_CHANNEL_TLV_TYPE)
+        .filter(|record| record.value.len() <= crate::messages::MAX_TLV_VALUE_BYTES)
         .and_then(|record| std::str::from_utf8(record.value.as_ref()).ok())
         .and_then(crate::messages::parse_envelope)
         .and_then(|envelope| crate::messages::parse_trade_payload(&envelope.payload))
@@ -5908,8 +5909,11 @@ pub(crate) mod tests {
         let correlated = correlated_trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, &"b".repeat(64), 60.0, 100_000.0);
         assert!(carries_correlated_trade_request(&[tlv(stable, correlated.clone())]));
         assert!(!carries_correlated_trade_request(&[tlv(stable, trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 60.0))]), "a legacy request");
-        assert!(!carries_correlated_trade_request(&[tlv(SIGNED_STABILITY_TLV_TYPE, "{}".into()), tlv(stable, correlated)]), "a signed stability record is handled first");
+        assert!(!carries_correlated_trade_request(&[tlv(SIGNED_STABILITY_TLV_TYPE, "{}".into()), tlv(stable, correlated.clone())]), "a signed stability record is handled first");
         assert!(!carries_correlated_trade_request(&[]));
+        // Still valid JSON, but past the size the handler accepts, so the handler would refuse it.
+        let oversize = format!("{correlated}{}", " ".repeat(crate::messages::MAX_TLV_VALUE_BYTES));
+        assert!(!carries_correlated_trade_request(&[tlv(stable, oversize)]), "an oversize request");
     }
 
     #[tokio::test]

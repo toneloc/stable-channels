@@ -926,6 +926,8 @@ async fn serve(
                             "dedup_key": format!("lsp:event-unreadable:{}:{}", row.id, row.received_ms),
                         });
                         until_recorded(row.id, || stable_channels::audit::record_event("EVENT_UNREADABLE", record.clone())).await;
+                        // Its event is lost as a hole's are, so reconcile as for a hole before any checkpoint can pass it.
+                        reconcile_in_place(manager, db, ldk, health, "event_unreadable").await;
                     },
                 }
                 events.finish(row.id).await;
@@ -2349,6 +2351,33 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn an_unreadable_row_is_reconciled_as_a_hole_is() {
+        let _guard = crate::stable_manager::tests::AUDIT_TEST_GUARD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (manager, db) = serving_fixture();
+        let ldk = crate::stable_manager::tests::FakeLdkServer::new(vec![]);
+        let mut health = StreamHealth::new(db.begin_event_stream_gap(1_000).unwrap());
+        let (_dir, inbox, conn) = inbox_on_disk();
+        let bad = save_only(&inbox, &claimable("bad"));
+        conn.execute("UPDATE events SET payload = x'ff' WHERE id = ?1", [bad]).unwrap();
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let asks = Arc::new(AtomicUsize::new(0));
+        let (_reader, mut events, active) = buffer_events_with_health(CountingSource(receiver, Arc::clone(&asks)), Arc::clone(&inbox), LIMITS);
+        stable_channels::audit::enable_test_capture();
+        serve_until_handled(&mut events, &active, &asks, 0, sender, &manager, &db, &ldk, &mut health).await;
+        let rows = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        let names: Vec<&str> = rows.iter().map(|(name, _)| name.as_str()).collect();
+        let recorded = rows.iter().position(|(name, _)| name == "EVENT_UNREADABLE").expect("recorded");
+        let reconciled = rows
+            .iter()
+            .position(|(name, data)| name == "RECONCILIATION_STARTED" && data["trigger"] == "event_unreadable")
+            .expect("reconciled as for a hole");
+        assert!(recorded < reconciled, "{names:?}");
+        assert!(rows[reconciled..].iter().any(|(name, _)| name == "RECONCILIATION_RESULT"), "{names:?}");
+        assert_eq!(inbox.oldest().unwrap(), None);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn failed_reads_back_off_to_a_minute_though_each_heartbeat_restarts_the_read() {
         let _guard = crate::stable_manager::tests::AUDIT_TEST_GUARD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let (manager, db) = serving_fixture();
@@ -2631,6 +2660,13 @@ mod tests {
         let mut health = StreamHealth::new(db.begin_event_stream_gap(1_000).unwrap());
         handle(id, envelope, &inbox, &manager, &db, &ldk, &mut health).await;
         let decided = db.trade_decision_summary(&payment_id).unwrap().expect("decided");
+        // Its answer is sent and reaches the wallet, so only the replay can send it again.
+        StableChannelManager::retry_pending_trade_responses(&db, &ldk).await;
+        for response in db.in_flight_trade_response_payment_ids().unwrap() {
+            assert!(db.mark_trade_response_delivered(&response, StableChannelManager::unix_time_secs()).unwrap());
+        }
+        let answered = trade_responses(&ldk);
+        assert!(answered >= 1, "answered before the stop");
         // The daemon stops after the decision and before the row is deleted.
         assert!(inbox.oldest().unwrap().unwrap().started);
         drop(inbox);
@@ -2641,7 +2677,7 @@ mod tests {
         serve_until_handled(&mut events, &active, &asks, 0, sender, &manager, &db, &ldk, &mut health).await;
         assert_eq!(db.trade_decision_summary(&payment_id).unwrap(), Some(decided), "the saved decision stands");
         StableChannelManager::retry_pending_trade_responses(&db, &ldk).await;
-        assert!(trade_responses(&ldk) >= 1, "and the wallet gets it");
+        assert_eq!(trade_responses(&ldk), answered + 1, "the replay found the saved decision and sent its answer once more");
     }
 
     #[tokio::test(start_paused = true)]

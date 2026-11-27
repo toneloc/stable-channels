@@ -52,6 +52,37 @@ pub(crate) fn set_aside(dir: &Path, now_ms: u128) -> std::io::Result<PathBuf> {
     Ok(aside(""))
 }
 
+/// Keep the inbox and its journal files readable by their owner only: rows hold whole payment events, preimages included.
+/// Best effort: a failure is logged and the inbox still opens, since failing the open would stop event handling and a file that can't be made private isn't damaged.
+fn keep_private(dir: &Path) {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let db = dir.join(INBOX_FILENAME);
+    // A new file starts owner-only, and SQLite gives the journal files it creates the database file's mode.
+    match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&db) {
+        Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => {
+            warn!("[event_inbox] couldn't create {} owner-only: {}", db.display(), error)
+        },
+        _ => {},
+    }
+    // By path, not through a new descriptor: closing one would drop the locks an open SQLite connection holds on that file.
+    for path in [db, dir.join(format!("{INBOX_FILENAME}-wal")), dir.join(format!("{INBOX_FILENAME}-shm"))] {
+        let mode = match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => metadata.permissions().mode() & 0o777,
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                warn!("[event_inbox] couldn't check the mode of {}: {}", path.display(), error);
+                continue;
+            },
+        };
+        if mode & 0o077 != 0 {
+            if let Err(error) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode & 0o700)) {
+                warn!("[event_inbox] couldn't make {} owner-only: {}", path.display(), error);
+            }
+        }
+    }
+}
+
 /// Encoded size an entry counts against the inbox limit; markers count nothing.
 pub(crate) fn payload_size(entry: &Entry) -> usize {
     match entry {
@@ -67,6 +98,7 @@ pub(crate) struct Inbox {
 impl Inbox {
     /// Open the inbox, checking its pages too, so a damaged file fails here, where startup can set it aside, rather than on every later read.
     pub(crate) fn open(dir: &Path) -> rusqlite::Result<Inbox> {
+        keep_private(dir);
         let inbox = Self::init(Connection::open(dir.join(INBOX_FILENAME))?)?;
         let check: String = inbox.lock().query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
         if check != "ok" {
@@ -503,5 +535,47 @@ mod tests {
             assert!(!dir.path().join(format!("{INBOX_FILENAME}{suffix}")).exists(), "no old {suffix:?} file is left for a new inbox");
             assert_eq!(std::fs::read_to_string(dir.path().join(format!("{INBOX_FILENAME}.unreadable-7{suffix}"))).unwrap(), suffix);
         }
+    }
+
+    fn mode_of(dir: &Path, suffix: &str) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(dir.join(format!("{INBOX_FILENAME}{suffix}"))).unwrap().permissions().mode() & 0o777
+    }
+
+    /// A data directory other local accounts can enter, as Umbrel's is.
+    fn traversable_dir() -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_new_inbox_and_its_journal_files_are_readable_by_their_owner_only() {
+        let dir = traversable_dir();
+        let inbox = Inbox::open(dir.path()).unwrap();
+        inbox.save(&[(event("pay-0"), 0)]).unwrap();
+        for suffix in ["", "-wal", "-shm"] {
+            assert_eq!(mode_of(dir.path(), suffix), 0o600, "{suffix:?}");
+        }
+    }
+
+    #[test]
+    fn an_inbox_from_before_is_made_owner_only_when_opened() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = traversable_dir();
+        // Still open while the inbox is opened again, so its journal files exist then.
+        let earlier = Inbox::open(dir.path()).unwrap();
+        earlier.save(&[(event("pay-0"), 0)]).unwrap();
+        for suffix in ["", "-wal", "-shm"] {
+            let path = dir.path().join(format!("{INBOX_FILENAME}{suffix}"));
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let inbox = Inbox::open(dir.path()).unwrap();
+        for suffix in ["", "-wal", "-shm"] {
+            assert_eq!(mode_of(dir.path(), suffix), 0o600, "{suffix:?}");
+        }
+        assert_eq!(inbox.oldest().unwrap().unwrap().entry, event("pay-0"));
+        earlier.save(&[(event("pay-1"), 1)]).unwrap();
     }
 }
