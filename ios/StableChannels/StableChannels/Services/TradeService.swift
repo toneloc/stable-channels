@@ -15,15 +15,18 @@ final class TradeService {
 
     /// The app-group balance cache, read when no live channel is available.
     private let balanceCache: UserDefaults?
+    private let stabilityEnabled: Bool
 
     init(
         nodeService: any AppNodeService,
         databaseService: DatabaseService,
-        balanceCache: UserDefaults? = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        balanceCache: UserDefaults? = UserDefaults(suiteName: Constants.appGroupIdentifier),
+        stabilityEnabled: Bool = BuildFeatures.stability
     ) {
         self.nodeService = nodeService
         self.databaseService = databaseService
         self.balanceCache = balanceCache
+        self.stabilityEnabled = stabilityEnabled
     }
 
     private func liveSnapshot(sc: StableChannel, price: Double) -> StabilizationSnapshot? {
@@ -44,7 +47,8 @@ final class TradeService {
     }
 
     func maxSellCents(sc: StableChannel, price: Double) -> UInt64 {
-        liveSnapshot(sc: sc, price: price)?.maxOrderCents() ?? 0
+        guard stabilityEnabled else { return 0 }
+        return liveSnapshot(sc: sc, price: price)?.maxOrderCents() ?? 0
     }
 
     func executeBuy(
@@ -53,6 +57,7 @@ final class TradeService {
         feeUSD: Double,
         price: Double
     ) throws -> TradeExecutionResult {
+        guard stabilityEnabled else { throw TradeValidationError.unavailableInThisBuild }
         guard price.isFinite, price > 0 else { throw TradeValidationError.invalidPrice }
         guard amountUSD.isFinite, amountUSD > 0 else { throw TradeValidationError.invalidAmount }
         guard amountUSD <= sc.expectedUSD.amount else {
@@ -76,6 +81,7 @@ final class TradeService {
         feeUSD: Double,
         price: Double
     ) throws -> TradeExecutionResult {
+        guard stabilityEnabled else { throw TradeValidationError.unavailableInThisBuild }
         guard price.isFinite, price > 0 else { throw TradeValidationError.invalidPrice }
         guard amountUSD.isFinite, amountUSD > 0 else { throw TradeValidationError.invalidAmount }
         let netAmount = amountUSD - feeUSD

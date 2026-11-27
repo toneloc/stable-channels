@@ -109,7 +109,7 @@ final class LSPSpliceInHandler: PaymentHandler {
     ) -> (content: UNMutableNotificationContent, pending: Bool?) {
         if receipts.deferStableControlToForeground {
             let content = mutator.buildPending(
-                base: base, title: "Payment Pending", body: "Open app to sync stable position"
+                base: base, title: "Payment Pending", body: StabilityNotificationCopy.current.syncPositionInApp
             )
             return (content, true)
         }

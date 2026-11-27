@@ -11,10 +11,16 @@ protocol NotificationContentMutator {
         -> UNMutableNotificationContent
     func buildPending(base: UNMutableNotificationContent, title: String, body: String) -> UNMutableNotificationContent
     func buildEmpty(base: UNMutableNotificationContent) -> UNMutableNotificationContent
-    func buildStablePosition(base: UNMutableNotificationContent, body: String) -> UNMutableNotificationContent
+    func buildStablePosition(base: UNMutableNotificationContent) -> UNMutableNotificationContent
 }
 
 final class DefaultNotificationContentMutator: NotificationContentMutator {
+    private let copy: StabilityNotificationCopy
+
+    init(copy: StabilityNotificationCopy = .current) {
+        self.copy = copy
+    }
+
     func buildForReceived(base: UNMutableNotificationContent, amountSats: UInt64, usd: Double,
                           btcPrice: Double) -> UNMutableNotificationContent {
         base.title = "Payment Received"
@@ -25,7 +31,7 @@ final class DefaultNotificationContentMutator: NotificationContentMutator {
 
     func buildForStabilityReceived(base: UNMutableNotificationContent, amountSats: UInt64, usd: Double,
                                    btcPrice: Double) -> UNMutableNotificationContent {
-        base.title = "Stability Payment Received"
+        base.title = copy.receivedTitle
         base.body = btcPrice > 0 ? String(format: "$%.2f received", usd) : "\(amountSats) sats received"
         base.sound = .default
         return base
@@ -33,8 +39,8 @@ final class DefaultNotificationContentMutator: NotificationContentMutator {
 
     func buildForSent(base: UNMutableNotificationContent, amountSats: UInt64,
                       dollars: Double) -> UNMutableNotificationContent {
-        base.title = "Stability Payment Sent"
-        base.body = String(format: "Sent %d sats ($%.2f) to maintain stable position", amountSats, dollars)
+        base.title = copy.sentTitle
+        base.body = copy.sentBody(sats: amountSats, dollars: dollars)
         base.sound = .default
         return base
     }
@@ -52,9 +58,9 @@ final class DefaultNotificationContentMutator: NotificationContentMutator {
         return base
     }
 
-    func buildStablePosition(base: UNMutableNotificationContent, body: String) -> UNMutableNotificationContent {
-        base.title = "Stability Check"
-        base.body = body
+    func buildStablePosition(base: UNMutableNotificationContent) -> UNMutableNotificationContent {
+        base.title = copy.checkTitle
+        base.body = copy.checkBody
         return base
     }
 }

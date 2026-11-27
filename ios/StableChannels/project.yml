@@ -6,6 +6,12 @@ options:
   xcodeVersion: "16.0"
   generateEmptyDirectories: true
 
+# STABILITY is set in Debug and Release and left out of AppStore (the App Store build has no stability).
+configs:
+  Debug: debug
+  Release: release
+  AppStore: release
+
 packages:
   ldk-node:
     url: https://github.com/toneloc/ldk-node.git
@@ -29,6 +35,7 @@ targets:
     sources:
       - path: StableChannels
       - path: NotificationService/Services/TradeProtocol.swift
+      - path: NotificationService/Services/StabilityNotificationCopy.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.stablechannels.app
@@ -36,6 +43,8 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         INFOPLIST_FILE: StableChannels/Info.plist
         CODE_SIGN_STYLE: Automatic
+        # Automatic signing picks the distribution certificate when archiving.
+        CODE_SIGN_IDENTITY: "Apple Development"
         DEVELOPMENT_TEAM: VJF3VBKXV9
         SWIFT_VERSION: "5.9"
         TARGETED_DEVICE_FAMILY: "1,2"
@@ -43,9 +52,9 @@ targets:
         CODE_SIGN_ENTITLEMENTS: StableChannels/StableChannels.entitlements
       configs:
         Debug:
-          CODE_SIGN_IDENTITY: "Apple Development"
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "DEBUG STABILITY"
         Release:
-          CODE_SIGN_IDENTITY: "Apple Distribution"
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: STABILITY
     dependencies:
       - package: ldk-node
         product: LDKNode
@@ -78,6 +87,7 @@ targets:
     sources:
       - path: NotificationService
       - path: StableChannels/Services/Price/PriceOracle.swift
+      - path: StableChannels/Domain/BuildFeatures.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.stablechannels.app.NotificationService
@@ -85,15 +95,17 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         INFOPLIST_FILE: NotificationService/Info.plist
         CODE_SIGN_STYLE: Automatic
+        # Automatic signing picks the distribution certificate when archiving.
+        CODE_SIGN_IDENTITY: "Apple Development"
         DEVELOPMENT_TEAM: VJF3VBKXV9
         SWIFT_VERSION: "5.9"
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_ENTITLEMENTS: NotificationService/NotificationService.entitlements
       configs:
         Debug:
-          CODE_SIGN_IDENTITY: "Apple Development"
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "DEBUG STABILITY"
         Release:
-          CODE_SIGN_IDENTITY: "Apple Distribution"
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: STABILITY
     dependencies:
       - package: ldk-node
         product: LDKNode
@@ -108,3 +120,26 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.stablechannels.app.tests
+      configs:
+        Debug:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "DEBUG STABILITY"
+        Release:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: STABILITY
+
+schemes:
+  StableChannels AppStore:
+    build:
+      targets:
+        StableChannels: all
+    test:
+      config: Debug
+      targets:
+        - StableChannelsTests
+    run:
+      config: AppStore
+    profile:
+      config: AppStore
+    analyze:
+      config: Debug
+    archive:
+      config: AppStore
