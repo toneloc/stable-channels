@@ -8753,7 +8753,7 @@ pub(crate) mod tests {
             // Model the server's bounded subscriber queue. More than its 1,024-event
             // broadcast capacity must drain locally even while the database is still failing.
             let (sender, source) = tokio::sync::mpsc::channel(64);
-            let (mut reader, receiver) =
+            let (reader, receiver) =
                 crate::event_loop::buffer_events(BufferedTestSource(source));
             tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 use ldk_server_client::ldk_server_grpc::events::{
@@ -8770,21 +8770,25 @@ pub(crate) mod tests {
                         .await
                         .unwrap();
                 }
-                drop(sender);
-                reader.join_next().await.unwrap().unwrap();
+                while receiver.len() != 2048 {
+                    tokio::task::yield_now().await;
+                }
             })
             .await
             .expect("the subscription reader must keep draining while accounting waits");
             assert_eq!(receiver.len(), 2048);
-            buffered_burst = Some(receiver);
+            buffered_burst = Some((reader, sender, receiver));
             conn.execute_batch("DROP TRIGGER reject_book_save").unwrap();
         }
         tokio::time::timeout(std::time::Duration::from_secs(5), &mut next_event)
             .await
             .expect("the retained event should resume after the database recovers");
-        if let Some(mut receiver) = buffered_burst {
+        if let Some((mut reader, sender, mut receiver)) = buffered_burst {
+            assert_eq!(receiver.take().await, Some(crate::event_inbox::Entry::Connected));
             for n in 0..2048 {
-                let event = receiver.recv().await.unwrap().event().unwrap();
+                let Some(crate::event_inbox::Entry::Event(event)) = receiver.take().await else {
+                    panic!("expected a saved event");
+                };
                 let Some(ldk_server_client::ldk_server_grpc::events::event_envelope::Event::ChannelStateChanged(channel)) = event.event else {
                     panic!("unexpected buffered event");
                 };
@@ -8794,7 +8798,9 @@ pub(crate) mod tests {
                     "events must retain their order"
                 );
             }
-            assert!(receiver.recv().await.is_none());
+            drop(sender);
+            reader.join_next().await.unwrap().unwrap();
+            assert!(receiver.take().await.is_none());
         }
         let mut mgr = shared.lock().await;
         mgr.run_tick(&fake, &push, 100_000.0).await;
