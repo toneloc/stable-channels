@@ -39,6 +39,13 @@ import com.stablechannels.app.util.usdFormatted
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
+internal const val RECEIVE_WAITING_FOR_PRICE =
+    "Waiting for a current BTC price. A USD invoice needs one so you receive the full amount."
+internal const val RECEIVE_OFFLINE_NO_PRICE =
+    "You're offline. A USD invoice needs a current BTC price, so reconnect to create one."
+internal const val RECEIVE_PRICE_OUT_OF_DATE =
+    "The BTC price is out of date. Try again in a moment."
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
@@ -52,14 +59,19 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
     val scope = rememberCoroutineScope()
     val clipboardManager = LocalClipboardManager.current
     val btcPrice by appState.priceService.currentPrice.collectAsState()
+    // A USD invoice is priced only with a fresh, trusted price, as Send and Buy do. The display
+    // price above can be an old one kept after failed refreshes.
+    val trustedPrice by appState.priceService.accountingPrice.collectAsState()
+    val priceUpdatedAt by appState.priceService.lastUpdate.collectAsState()
+    val isOnline by appState.isOnline.collectAsState()
 
     val hasChannel = appState.nodeService.channels.any { it.isChannelReady }
 
     val enteredUSD = amountUSD.toDoubleOrNull() ?: 0.0
-    val enteredSats =
-        if (btcPrice > 0 && enteredUSD > 0) {
-            (enteredUSD / btcPrice * Constants.SATS_IN_BTC).toLong()
-        } else 0L
+    val enteredSats = accountingSatsFromUSD(enteredUSD, trustedPrice) ?: 0L
+
+    // A fresh price clears the out-of-date message, so the user can just tap again.
+    LaunchedEffect(priceUpdatedAt) { if (error == RECEIVE_PRICE_OUT_OF_DATE) error = null }
 
     if (showOnChain) {
         FundWalletScreen(appState, onBack = { showOnChain = false })
@@ -248,6 +260,16 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
                 )
             }
 
+            if (trustedPrice <= 0.0) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    if (isOnline) RECEIVE_WAITING_FOR_PRICE else RECEIVE_OFFLINE_NO_PRICE,
+                    color = MaterialTheme.colorScheme.tertiary,
+                    style = MaterialTheme.typography.bodySmall,
+                    textAlign = TextAlign.Center,
+                )
+            }
+
             if (!hasChannel && enteredUSD > Constants.MAX_CHANNEL_USD) {
                 Spacer(Modifier.height(4.dp))
                 Text(
@@ -269,26 +291,34 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
             Spacer(Modifier.height(16.dp))
             InkButton(
                 onClick = {
+                    // Price the invoice with the trusted price as it is now, since the one on
+                    // screen can go stale while the sheet is open.
+                    val sats =
+                        accountingSatsFromUSD(
+                            enteredUSD,
+                            appState.priceService.currentAccountingPrice(),
+                        )
+                    if (sats == null) {
+                        error = RECEIVE_PRICE_OUT_OF_DATE
+                        return@InkButton
+                    }
                     isGenerating = true
                     error = null
                     scope.launch(Dispatchers.IO) {
                         try {
-                            val sats = enteredSats
                             val inv =
-                                if (!hasChannel && sats > 0) {
+                                if (!hasChannel) {
                                     appState.nodeService.receiveViaJitChannel(
                                         sats * 1000,
                                         "Stable Channels",
                                     )
-                                } else if (sats > 0) {
+                                } else {
                                     appState.nodeService.receivePayment(
                                         sats * 1000,
                                         "Stable Channels",
                                     )
-                                } else {
-                                    appState.nodeService.receiveVariablePayment("Stable Channels")
                                 }
-                            invoiceAmountSats = if (sats > 0) sats else null
+                            invoiceAmountSats = sats
                             invoice = inv.toString()
                             appState.isWaitingForPayment = true
                         } catch (e: Exception) {

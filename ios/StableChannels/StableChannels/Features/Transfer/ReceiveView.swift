@@ -23,11 +23,36 @@ struct ReceiveView: View {
         Double(amountUSD) ?? 0
     }
 
+    // Read at each use, so the tap re-checks that the price is still fresh.
     private var enteredSats: UInt64 {
-        let price = appState.btcPrice
-        guard price > 0, enteredUSDValue > 0 else { return 0 }
-        return UInt64(BitcoinUnits.sats(usd: enteredUSDValue, price: price))
+        Self.invoiceSats(usd: enteredUSDValue, accountingPrice: appState.accountingBTCPrice)
     }
+
+    /// A USD invoice is priced only with a fresh, trusted price, as Send and Trade do. The display
+    /// price can be an old one kept after failed refreshes. Returns 0 when there is no such price.
+    static func invoiceSats(usd: Double, accountingPrice: Double) -> UInt64 {
+        guard accountingPrice > 0, usd > 0 else { return 0 }
+        return UInt64(BitcoinUnits.sats(usd: usd, price: accountingPrice))
+    }
+
+    /// Why Generate Invoice is off, or nil when a fresh price is available.
+    static func priceNote(accountingPrice: Double, isOnline: Bool) -> String? {
+        guard accountingPrice <= 0 else { return nil }
+        return isOnline
+            ? String(
+                localized: "info_receive_waiting_for_price",
+                defaultValue: "Waiting for a current BTC price. A USD invoice needs one so you receive the full amount."
+            )
+            : String(
+                localized: "info_receive_offline_no_price",
+                defaultValue: "You’re offline. A USD invoice needs a current BTC price, so reconnect to create one."
+            )
+    }
+
+    static let priceOutOfDateMessage = String(
+        localized: "error_receive_price_out_of_date",
+        defaultValue: "The BTC price is out of date. Try again in a moment."
+    )
 
     var body: some View {
         NavigationStack {
@@ -71,6 +96,10 @@ struct ReceiveView: View {
             }
         }
         .onDisappear { copyResetTask?.cancel() }
+        .onChange(of: appState.priceService.lastUpdate) { _, _ in
+            // A fresh price clears the out-of-date message, so the user can just tap again.
+            if errorMessage == Self.priceOutOfDateMessage { errorMessage = nil }
+        }
         .onChange(of: appState.lastReceivedPaymentHash) { _, newHash in
             if let newHash, let invoicePaymentHash, newHash == invoicePaymentHash {
                 dismiss()
@@ -110,6 +139,14 @@ struct ReceiveView: View {
                 Text("\(enteredSats.btcSpacedFormatted) BTC")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+            }
+
+            if let note = Self.priceNote(accountingPrice: appState.accountingBTCPrice, isOnline: appState.isOnline) {
+                Text(note)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
             }
 
             if !hasChannel {
@@ -318,7 +355,11 @@ struct ReceiveView: View {
 
     private func createInvoice() {
         let sats = enteredSats
-        guard sats > 0 else { return }
+        guard sats > 0 else {
+            // The price went stale after the button was drawn.
+            if enteredUSDValue > 0 { errorMessage = Self.priceOutOfDateMessage }
+            return
+        }
         errorMessage = nil
         do {
             let inv: Bolt11Invoice

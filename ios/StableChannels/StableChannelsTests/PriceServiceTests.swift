@@ -342,3 +342,42 @@ final class PriceOracleTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(disjoint.count, PriceOracle.minimumAgreeingPegFeeds + 2)
     }
 }
+
+/// Receive prices a USD invoice only with a fresh, trusted price, never the display price alone.
+@MainActor
+final class ReceiveInvoicePricingTests: XCTestCase {
+    /// A display price kept from earlier, with no fresh price yet.
+    private func displayOnlyPrices() -> PriceService {
+        let prices = PriceService()
+        prices.currentPrice = 100_000
+        return prices
+    }
+
+    func testDisplayPriceAloneCannotPriceAUSDInvoice() {
+        let prices = displayOnlyPrices()
+        XCTAssertEqual(prices.accountingPrice, 0)
+        XCTAssertEqual(ReceiveView.invoiceSats(usd: 100, accountingPrice: prices.accountingPrice), 0)
+    }
+
+    func testNoteSaysWhyAndAsksToReconnectWhenOffline() {
+        let prices = displayOnlyPrices()
+        let online = ReceiveView.priceNote(accountingPrice: prices.accountingPrice, isOnline: true)
+        let offline = ReceiveView.priceNote(accountingPrice: prices.accountingPrice, isOnline: false)
+        XCTAssertEqual(
+            online,
+            "Waiting for a current BTC price. A USD invoice needs one so you receive the full amount."
+        )
+        XCTAssertEqual(
+            offline,
+            "You’re offline. A USD invoice needs a current BTC price, so reconnect to create one."
+        )
+    }
+
+    func testFreshPricePricesTheInvoiceWithNoNote() {
+        let prices = PriceService()
+        prices.setPriceForTesting(100_000)
+        // $100 at $100,000/BTC is 100,000 sats.
+        XCTAssertEqual(ReceiveView.invoiceSats(usd: 100, accountingPrice: prices.accountingPrice), 100_000)
+        XCTAssertNil(ReceiveView.priceNote(accountingPrice: prices.accountingPrice, isOnline: true))
+    }
+}
