@@ -384,5 +384,7 @@ final class ReceiveInvoicePricingTests: XCTestCase {
     func testHugeAmountGivesNoInvoiceInsteadOfTrapping() {
         XCTAssertEqual(ReceiveView.invoiceSats(usd: 1e17, accountingPrice: 100_000), 0)
         XCTAssertEqual(ReceiveView.invoiceSats(usd: .infinity, accountingPrice: 100_000), 0)
+        // Fits in UInt64 sats, but not once multiplied by 1000 for msat.
+        XCTAssertEqual(ReceiveView.invoiceSats(usd: 1.85e13, accountingPrice: 100_000), 0)
     }
 }

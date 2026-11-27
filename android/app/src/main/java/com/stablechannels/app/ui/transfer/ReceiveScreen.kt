@@ -46,6 +46,13 @@ internal const val RECEIVE_OFFLINE_NO_PRICE =
 internal const val RECEIVE_PRICE_OUT_OF_DATE =
     "The BTC price is out of date. Try again in a moment."
 
+/**
+ * Sats for a USD invoice, or null without a trusted price. An amount too large to send to the node
+ * in msat is also null, since `sats * 1000` would wrap to a different amount.
+ */
+internal fun receiveInvoiceSats(usd: Double, accountingPrice: Double): Long? =
+    accountingSatsFromUSD(usd, accountingPrice)?.takeIf { it <= Long.MAX_VALUE / 1000 }
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
@@ -68,7 +75,7 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
     val hasChannel = appState.nodeService.channels.any { it.isChannelReady }
 
     val enteredUSD = amountUSD.toDoubleOrNull() ?: 0.0
-    val enteredSats = accountingSatsFromUSD(enteredUSD, trustedPrice) ?: 0L
+    val enteredSats = receiveInvoiceSats(enteredUSD, trustedPrice) ?: 0L
 
     // A fresh price clears the out-of-date message, so the user can just tap again.
     LaunchedEffect(priceUpdatedAt) { if (error == RECEIVE_PRICE_OUT_OF_DATE) error = null }
@@ -294,7 +301,7 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
                     // Price the invoice with the trusted price as it is now, since the one on
                     // screen can go stale while the sheet is open.
                     val sats =
-                        accountingSatsFromUSD(
+                        receiveInvoiceSats(
                             enteredUSD,
                             appState.priceService.currentAccountingPrice(),
                         )

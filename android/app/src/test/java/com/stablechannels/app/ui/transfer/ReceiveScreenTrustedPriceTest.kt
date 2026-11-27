@@ -15,6 +15,8 @@ import com.stablechannels.app.services.NodeService
 import com.stablechannels.app.services.PriceService
 import java.util.Date
 import kotlinx.coroutines.flow.MutableStateFlow
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -126,6 +128,20 @@ class ReceiveScreenTrustedPriceTest {
         priceRefreshed()
         compose.onNodeWithText("Generate Invoice").performClick()
         verify(node, timeout(2_000)).receiveViaJitChannel(50_000_000L, "Stable Channels")
+    }
+
+    @Test
+    fun amountTooLargeForMsatKeepsTheButtonOff() {
+        // $18,446,744,073,710 at $100,000/BTC fits in sats, but sats * 1000 wraps to 448,384
+        // msat, so the node would be asked for a 448 sat invoice.
+        priceRefreshed()
+        compose.setContent { MaterialTheme { ReceiveScreen(state) {} } }
+        compose.onNode(hasSetTextAction()).performTextInput("18446744073710")
+
+        compose.onNodeWithText("Generate Invoice").assertIsNotEnabled().performClick()
+        verify(node, after(500).never()).receivePayment(anyLong(), anyString())
+        assertNull(receiveInvoiceSats(18_446_744_073_710.0, 100_000.0))
+        assertEquals(100_000L, receiveInvoiceSats(100.0, 100_000.0))
     }
 
     @Test
