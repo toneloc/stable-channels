@@ -346,7 +346,7 @@ fn payment_failure_reason_name(reason: Option<i32>) -> Option<String> {
 }
 
 /// LDK Server rev this daemon's ldk-server-client is pinned to; a test keeps it equal to Cargo.toml.
-const PINNED_LDK_SERVER_REV: &str = "aa2d60f5";
+const PINNED_LDK_SERVER_REV: &str = "d7e7a2e7";
 
 /// Whether LDK Server's reported build (`<version> (<git commit>)`) is the pinned rev; None when it reports no build.
 fn ldk_server_matches_pin(ldk_server_version: Option<&str>) -> Option<bool> {
@@ -1603,27 +1603,34 @@ mod tests {
 
     #[test]
     fn connected_row_names_the_ldk_server_build_and_whether_it_matches_the_pin() {
-        let d = connected_audit_data(Some("event-stream-gap-1"), Some("0.1.0 (aa2d60f51ebacc7edd5dbdfb90b53a9c73ee0bd3)"));
+        let d = connected_audit_data(Some("event-stream-gap-1"), Some("0.1.0 (d7e7a2e708664af922c53c786ad6a5df622f5dd8)"));
         assert_eq!(d["correlation_id"], "event-stream-gap-1");
-        assert_eq!(d["ldk_server_version"], "0.1.0 (aa2d60f51ebacc7edd5dbdfb90b53a9c73ee0bd3)");
+        assert_eq!(d["ldk_server_version"], "0.1.0 (d7e7a2e708664af922c53c786ad6a5df622f5dd8)");
         assert_eq!(d["expected_ldk_server_rev"], PINNED_LDK_SERVER_REV);
         assert_eq!(d["ldk_server_matches_pin"], true);
-        assert_eq!(connected_audit_data(None, Some("0.1.0 (0e4434d7083ae9926c73f26e7cd52f00bde44d37)"))["ldk_server_matches_pin"], false);
+        assert_eq!(connected_audit_data(None, Some("0.1.0 (aa2d60f51ebacc7edd5dbdfb90b53a9c73ee0bd3)"))["ldk_server_matches_pin"], false);
         let unreported = connected_audit_data(None, Some(""));
         assert!(unreported["ldk_server_version"].is_null());
         assert!(unreported["ldk_server_matches_pin"].is_null());
     }
 
     #[test]
-    fn pinned_ldk_server_rev_matches_the_cargo_dependency() {
-        let manifest = include_str!("../Cargo.toml");
-        let rev = manifest
-            .lines()
-            .find(|line| line.starts_with("ldk-server-client"))
-            .and_then(|line| line.split("rev = \"").nth(1))
-            .and_then(|rest| rest.split('"').next())
-            .unwrap();
-        assert!(rev.starts_with(PINNED_LDK_SERVER_REV), "update PINNED_LDK_SERVER_REV with the ldk-server-client pin");
+    fn every_ldk_server_pin_names_the_same_rev() {
+        // The hex rev that follows `marker` on the first line starting with `line_start`, or "" if there is none.
+        let rev_in = |text: &str, line_start: &str, marker: &str| -> String {
+            text.lines()
+                .map(str::trim_start)
+                .find(|line| line.starts_with(line_start))
+                .and_then(|line| line.split(marker).nth(1))
+                .map(|rest| rest.chars().take_while(|c| c.is_ascii_hexdigit()).collect())
+                .unwrap_or_default()
+        };
+        let client = rev_in(include_str!("../Cargo.toml"), "ldk-server-client", "rev = \"");
+        assert!(client.starts_with(PINNED_LDK_SERVER_REV), "update PINNED_LDK_SERVER_REV with the ldk-server-client pin");
+        let grpc = rev_in(include_str!("../../sc-rest-client/Cargo.toml"), "ldk-server-grpc", "rev = \"");
+        assert_eq!(grpc, client, "sc-rest-client's ldk-server-grpc must be pinned to the ldk-server-client rev");
+        let image = rev_in(include_str!("../../../umbrel/docker/Dockerfile.ldk-server"), "&& git checkout", "git checkout ");
+        assert_eq!(image, client, "Dockerfile.ldk-server must build the ldk-server-client rev");
     }
 
     #[test]

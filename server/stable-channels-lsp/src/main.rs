@@ -560,41 +560,23 @@ mod tests {
 
     #[test]
     fn the_ldk_backed_rows_match_ldk_server() {
-        // Copied from method_authorization in ldk-server/src/macaroons/authorization.rs at aa2d60f5.
-        let ldk_rows: &[(&str, &str)] = &[
-            ("GetNodeInfo", "node:read"),
-            ("GetBalances", "node:read"),
-            ("ExportPathfindingScores", "node:read"),
-            ("OnchainReceive", "onchain:receive"),
-            ("OnchainSend", "onchain:send"),
-            ("Bolt11Receive", "invoices:create"),
-            ("Bolt12Receive", "invoices:create"),
-            ("Bolt11Send", "payments:send"),
-            ("Bolt12Send", "payments:send"),
-            ("SpontaneousSend", "payments:send"),
-            ("SpliceOut", "payments:send"),
-            ("GetPaymentDetails", "payments:read"),
-            ("ListPayments", "payments:read"),
-            ("ListForwardedPayments", "payments:read"),
-            ("ListChannels", "channels:read"),
-            ("OpenChannel", "channels:manage"),
-            ("UpdateChannelConfig", "channels:manage"),
-            ("CloseChannel", "channels:manage"),
-            ("SpliceIn", "channels:manage"),
-            ("ForceCloseChannel", "channels:force_close"),
-            ("ListPeers", "peers:read"),
-            ("ConnectPeer", "peers:manage"),
-            ("DisconnectPeer", "peers:manage"),
-            ("SignMessage", "messages:sign"),
-            ("VerifySignature", "messages:verify"),
-            ("GraphListChannels", "graph:read"),
-            ("GraphGetChannel", "graph:read"),
-            ("GraphListNodes", "graph:read"),
-            ("GraphGetNode", "graph:read"),
+        use ldk_server_client::ldk_server_grpc::permissions::{method_authorization, MethodAuthorization};
+        let proxied = [
+            "GetNodeInfo", "GetBalances", "ExportPathfindingScores", "OnchainReceive", "OnchainSend",
+            "Bolt11Receive", "Bolt12Receive", "Bolt11Send", "Bolt12Send", "SpontaneousSend", "SpliceOut",
+            "GetPaymentDetails", "ListPayments", "ListForwardedPayments", "ListChannels", "OpenChannel",
+            "UpdateChannelConfig", "CloseChannel", "SpliceIn", "ForceCloseChannel", "ListPeers", "ConnectPeer",
+            "DisconnectPeer", "SignMessage", "VerifySignature", "GraphListChannels", "GraphGetChannel",
+            "GraphListNodes", "GraphGetNode",
         ];
-        for (route, permission) in ldk_rows {
-            assert_eq!(required(route), Some(Requirement::Permission(permission)), "{route}");
-            assert!(route_names().any(|r| r == *route), "{route} is proxied but not served");
+        for route in proxied {
+            assert!(route_names().any(|r| r == route), "{route} is proxied but not served");
+            assert!(matches!(method_authorization(route), MethodAuthorization::Permission(_)), "LDK Server has no {route}");
+        }
+        for route in route_names() {
+            if let MethodAuthorization::Permission(permission) = method_authorization(route) {
+                assert_eq!(required(route), Some(Requirement::Permission(permission)), "{route}");
+            }
         }
     }
 

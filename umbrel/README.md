@@ -94,7 +94,7 @@ channels.
 
 ### Detailed forwarded-payment history and version compatibility
 
-LDK Server at `aa2d60f51ebacc7edd5dbdfb90b53a9c73ee0bd3` defaults to
+LDK Server at `d7e7a2e708664af922c53c786ad6a5df622f5dd8` defaults to
 `forwarded_payment_tracking_mode = "stats"`. SC's missed-forward reconstruction
 needs `"detailed"` under `[node]`; stats totals cannot reconstruct individual
 forwards. Detailed history has a limited retention window (about two hours).
@@ -106,7 +106,7 @@ the hook/package, or restarting an old cached image, does **not** enable detaile
 history. Do not manually add this field to an old pinned installation.
 
 The capability gate is **inside the new image**, not a tag, environment flag or
-guess about `latest`: `Dockerfile.ldk-server` builds the fixed `aa2d60f5` revision
+guess about `latest`: `Dockerfile.ldk-server` builds the fixed `d7e7a2e7` revision
 and installs `ldk-server-entrypoint.py`. Before starting LDK, that entrypoint:
 
 - Validates the complete UTF-8 TOML, and inserts the missing key into `[node]`

@@ -97,7 +97,7 @@ The GUI is a Dioxus app with two targets that share one codebase and stylesheet 
 ```bash
 git clone https://github.com/toneloc/stable-channels.git
 git clone https://github.com/lightningdevkit/ldk-server.git
-git -C ldk-server checkout aa2d60f51ebacc7edd5dbdfb90b53a9c73ee0bd3
+git -C ldk-server checkout d7e7a2e708664af922c53c786ad6a5df622f5dd8
 ```
 
 They can live anywhere on disk in any layout. Cargo pulls `ldk-server-client` from upstream at a pinned rev, so no sibling-directory requirement. Run LDK Server at that same rev (the `ldk-server-client` rev in `server/stable-channels-lsp/Cargo.toml`): the daemon and LDK Server must speak the same protobuf format.
@@ -124,7 +124,7 @@ min_payment_size_msat        = 1000000
 proxy_address = "127.0.0.1:9050"
 ```
 
-This field requires the pinned `aa2d60f5` LDK Server above; older Umbrel-pinned
+This field requires the pinned `d7e7a2e7` LDK Server above; older Umbrel-pinned
 images reject it. Upgrade LDK Server and the SC daemon/client in lockstep and
 back up current configs and node data before changing versions. On rebuilt
 Umbrel images, the LDK image's entrypoint adds the key only if absent, preserving
