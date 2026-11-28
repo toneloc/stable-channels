@@ -342,3 +342,54 @@ final class PriceOracleTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(disjoint.count, PriceOracle.minimumAgreeingPegFeeds + 2)
     }
 }
+
+/// Receive prices a USD invoice only with a fresh, trusted price, never the display price alone.
+/// The view hands its PriceService to these helpers, so they test the price the view reads.
+@MainActor
+final class ReceiveInvoicePricingTests: XCTestCase {
+    /// A display price kept from earlier, with no fresh price yet.
+    private func displayOnlyPrices() -> PriceService {
+        let prices = PriceService()
+        prices.currentPrice = 100_000
+        return prices
+    }
+
+    private func freshPrices() -> PriceService {
+        let prices = PriceService()
+        prices.setPriceForTesting(100_000)
+        return prices
+    }
+
+    func testDisplayPriceAloneCannotPriceAUSDInvoice() {
+        let prices = displayOnlyPrices()
+        XCTAssertEqual(prices.currentPrice, 100_000)
+        XCTAssertEqual(ReceiveView.invoiceSats(usd: 100, prices: prices), 0)
+    }
+
+    func testNoteSaysWhyAndAsksToReconnectWhenOffline() {
+        let prices = displayOnlyPrices()
+        XCTAssertEqual(
+            ReceiveView.priceNote(prices: prices, isOnline: true),
+            "Waiting for a current BTC price. A USD invoice needs one so you receive the full amount."
+        )
+        XCTAssertEqual(
+            ReceiveView.priceNote(prices: prices, isOnline: false),
+            "You’re offline. A USD invoice needs a current BTC price, so reconnect to create one."
+        )
+    }
+
+    func testFreshPricePricesTheInvoiceWithNoNote() {
+        let prices = freshPrices()
+        // $100 at $100,000/BTC is 100,000 sats.
+        XCTAssertEqual(ReceiveView.invoiceSats(usd: 100, prices: prices), 100_000)
+        XCTAssertNil(ReceiveView.priceNote(prices: prices, isOnline: true))
+    }
+
+    func testHugeAmountGivesNoInvoiceInsteadOfTrapping() {
+        let prices = freshPrices()
+        XCTAssertEqual(ReceiveView.invoiceSats(usd: 1e17, prices: prices), 0)
+        XCTAssertEqual(ReceiveView.invoiceSats(usd: .infinity, prices: prices), 0)
+        // Fits in UInt64 sats, but not once multiplied by 1000 for msat.
+        XCTAssertEqual(ReceiveView.invoiceSats(usd: 1.85e13, prices: prices), 0)
+    }
+}
