@@ -10,12 +10,9 @@ struct PushConnectivitySettingsView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(String(localized: "label_node_status", defaultValue: "Node Status"))
                             .font(.subheadline)
-                        Text(String(
-                            localized: "info_push_description",
-                            defaultValue: "Background payments and stability updates"
-                        ))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        Text(StabilitySurface.current.pushTitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                     Spacer()
                     if !appState.isOnline {
@@ -58,10 +55,7 @@ struct PushConnectivitySettingsView: View {
                         defaultValue: "Background connection paused until an internet connection is restored."
                     ))
                 } else {
-                    Text(String(
-                        localized: "info_push_connectivity",
-                        defaultValue: "Your device maintains a persistent connection to receive incoming payments and stability updates."
-                    ))
+                    Text(StabilitySurface.current.pushDetail)
                 }
             }
         }

@@ -3,7 +3,7 @@ import SwiftUI
 struct HistoryView: View {
     @Environment(AppState.self) private var appState
     @State private var history = HistoryContent()
-    @State private var selectedSegment = 0
+    @State private var selectedSegment = StabilitySurface.current.initialHistorySegment
     @State private var selectedTrade: TradeRecord?
     @State private var refreshTask: Task<Void, Never>?
     @Environment(PaymentDetailCoordinator.self) private var paymentCoordinator
@@ -11,16 +11,19 @@ struct HistoryView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                // Segment picker
-                Picker(String(localized: "picker_history", defaultValue: "History"), selection: $selectedSegment) {
-                    Text(String(localized: "segment_trades", defaultValue: "Orders")).tag(0)
-                    Text(String(localized: "segment_payments", defaultValue: "Payments")).tag(1)
-                }
-                .pickerStyle(.segmented)
-                .padding()
-                .onChange(of: paymentCoordinator.paymentId) { _, newValue in
-                    if newValue != nil {
-                        selectedSegment = 1
+                if StabilitySurface.current.showsOrders {
+                    // Segment picker
+                    Picker(String(localized: "picker_history", defaultValue: "History"), selection: $selectedSegment) {
+                        Text(String(localized: "segment_trades", defaultValue: "Orders")).tag(HistorySegment.orders)
+                        Text(String(localized: "segment_payments", defaultValue: "Payments"))
+                            .tag(HistorySegment.payments)
+                    }
+                    .pickerStyle(.segmented)
+                    .padding()
+                    .onChange(of: paymentCoordinator.paymentId) { _, newValue in
+                        if newValue != nil {
+                            selectedSegment = .payments
+                        }
                     }
                 }
 
@@ -36,7 +39,7 @@ struct HistoryView: View {
 
                 // List
                 List {
-                    if selectedSegment == 0 {
+                    if selectedSegment == .orders {
                         tradesList
                     } else {
                         paymentsList
@@ -46,7 +49,7 @@ struct HistoryView: View {
                 .scrollBounceBehavior(.always)
                 .overlay {
                     Group {
-                        if selectedSegment == 0 && trades.isEmpty {
+                        if selectedSegment == .orders && trades.isEmpty {
                             ContentUnavailableView(
                                 String(localized: "empty_trades_title", defaultValue: "No Trades"),
                                 systemImage: "arrow.left.arrow.right",
@@ -55,7 +58,7 @@ struct HistoryView: View {
                                     defaultValue: "Convert BTC to see orders here."
                                 ))
                             )
-                        } else if selectedSegment == 1 && payments.isEmpty {
+                        } else if selectedSegment == .payments && payments.isEmpty {
                             ContentUnavailableView(
                                 String(localized: "empty_payments_title", defaultValue: "No Payments"),
                                 systemImage: "bolt.fill",
@@ -284,22 +287,7 @@ struct PaymentRowView: View {
     }
 
     private var paymentTypeLabel: String {
-        switch payment.paymentType {
-        case "stability": return String(localized: "payment_type_stability", defaultValue: "Stability")
-        case "lightning": return String(localized: "payment_type_lightning", defaultValue: "Lightning")
-        case SplicePaymentType.spliceIn.rawValue: return String(
-                localized: "payment_type_splice_in",
-                defaultValue: "Splice In"
-            )
-        case SplicePaymentType.spliceOut.rawValue: return String(
-                localized: "payment_type_splice_out",
-                defaultValue: "Splice Out"
-            )
-        case "onchain": return String(localized: "payment_type_on_chain", defaultValue: "Onchain")
-        case "channel_close": return String(localized: "payment_type_channel_close", defaultValue: "Channel Close")
-        case "bolt12": return String(localized: "payment_type_bolt12", defaultValue: "Bolt12")
-        default: return payment.paymentType
-        }
+        PaymentTypeLabel.text(for: payment.paymentType)
     }
 
     private var statusLabel: String {

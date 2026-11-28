@@ -180,22 +180,7 @@ struct PaymentDetailView: View {
     }
 
     private var paymentTypeLabel: String {
-        switch payment?.paymentType {
-        case "stability": return String(localized: "payment_type_stability", defaultValue: "Stability")
-        case "lightning": return String(localized: "payment_type_lightning", defaultValue: "Lightning")
-        case SplicePaymentType.spliceIn.rawValue: return String(
-                localized: "payment_type_splice_in",
-                defaultValue: "Splice In"
-            )
-        case SplicePaymentType.spliceOut.rawValue: return String(
-                localized: "payment_type_splice_out",
-                defaultValue: "Splice Out"
-            )
-        case "onchain": return String(localized: "payment_type_on_chain", defaultValue: "Onchain")
-        case "channel_close": return String(localized: "payment_type_channel_close", defaultValue: "Channel Close")
-        case "bolt12": return String(localized: "payment_type_bolt12", defaultValue: "Bolt12")
-        default: return payment?.paymentType ?? ""
-        }
+        payment.map { PaymentTypeLabel.text(for: $0.paymentType) } ?? ""
     }
 }
 
