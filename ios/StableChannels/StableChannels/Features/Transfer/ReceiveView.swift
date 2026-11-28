@@ -25,12 +25,13 @@ struct ReceiveView: View {
 
     // Read at each use, so the tap re-checks that the price is still fresh.
     private var enteredSats: UInt64 {
-        Self.invoiceSats(usd: enteredUSDValue, accountingPrice: appState.accountingBTCPrice)
+        Self.invoiceSats(usd: enteredUSDValue, prices: appState.priceService)
     }
 
     /// A USD invoice is priced only with a fresh, trusted price, as Send and Trade do. The display
     /// price can be an old one kept after failed refreshes. Returns 0 when there is no such price.
-    static func invoiceSats(usd: Double, accountingPrice: Double) -> UInt64 {
+    static func invoiceSats(usd: Double, prices: PriceService) -> UInt64 {
+        let accountingPrice = prices.accountingPrice
         guard accountingPrice > 0, usd > 0 else { return 0 }
         let sats = BitcoinUnits.sats(usd: usd, price: accountingPrice)
         // A huge amount would trap in UInt64() or in the msat conversion.
@@ -39,8 +40,8 @@ struct ReceiveView: View {
     }
 
     /// Why Generate Invoice is off, or nil when a fresh price is available.
-    static func priceNote(accountingPrice: Double, isOnline: Bool) -> String? {
-        guard accountingPrice <= 0 else { return nil }
+    static func priceNote(prices: PriceService, isOnline: Bool) -> String? {
+        guard prices.accountingPrice <= 0 else { return nil }
         return isOnline
             ? String(
                 localized: "info_receive_waiting_for_price",
@@ -144,7 +145,7 @@ struct ReceiveView: View {
                     .foregroundStyle(.secondary)
             }
 
-            if let note = Self.priceNote(accountingPrice: appState.accountingBTCPrice, isOnline: appState.isOnline) {
+            if let note = Self.priceNote(prices: appState.priceService, isOnline: appState.isOnline) {
                 Text(note)
                     .font(.caption)
                     .foregroundStyle(.orange)

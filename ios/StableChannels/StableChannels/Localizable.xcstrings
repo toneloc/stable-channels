@@ -9410,6 +9410,77 @@
         }
       }
     },
+    "error_receive_price_out_of_date" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "سعر BTC قديم. حاول مرة أخرى بعد لحظات."
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "BTC মূল্য পুরনো হয়ে গেছে। কিছুক্ষণ পরে আবার চেষ্টা করুন।"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Der BTC-Preis ist veraltet. Versuchen Sie es gleich noch einmal."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The BTC price is out of date. Try again in a moment."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "El precio de BTC está desactualizado. Inténtalo de nuevo en un momento."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Le prix du BTC n'est plus à jour. Réessayez dans un instant."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "BTC मूल्य पुराना हो गया है। थोड़ी देर में फिर से कोशिश करें।"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "BTC価格が古くなっています。しばらくしてからもう一度お試しください。"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "O preço do BTC está desatualizado. Tente novamente em instantes."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Цена BTC устарела. Попробуйте через минуту."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "BTC 价格已过期。请稍后重试。"
+          }
+        }
+      }
+    },
     "error_restore_failed" : {
       "localizations" : {
         "ar" : {
@@ -13094,6 +13165,148 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "后台付款和稳定性更新"
+          }
+        }
+      }
+    },
+    "info_receive_offline_no_price" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "أنت غير متصل بالإنترنت. تحتاج فاتورة الدولار الأمريكي إلى سعر BTC حالي، لذا أعد الاتصال لإنشائها."
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "আপনি অফলাইনে আছেন। USD ইনভয়েসের জন্য বর্তমান BTC মূল্য প্রয়োজন, তাই এটি তৈরি করতে আবার সংযোগ করুন।"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sie sind offline. Eine USD-Rechnung braucht einen aktuellen BTC-Preis. Stellen Sie die Verbindung wieder her, um eine zu erstellen."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "You’re offline. A USD invoice needs a current BTC price, so reconnect to create one."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Estás sin conexión. Una factura en USD necesita un precio de BTC actual, así que vuelve a conectarte para crearla."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vous êtes hors ligne. Une facture en USD nécessite un prix du BTC à jour : reconnectez-vous pour en créer une."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "आप ऑफ़लाइन हैं। USD चालान के लिए मौजूदा BTC मूल्य ज़रूरी है, इसलिए इसे बनाने के लिए फिर से कनेक्ट करें।"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "オフラインです。USDインボイスには最新のBTC価格が必要です。作成するには再接続してください。"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Você está offline. Uma fatura em USD precisa de um preço do BTC atual, então reconecte-se para criá-la."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Нет подключения к сети. Для инвойса в USD нужна актуальная цена BTC, поэтому подключитесь снова, чтобы создать его."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "您处于离线状态。美元发票需要最新的 BTC 价格，请重新连接网络后再创建。"
+          }
+        }
+      }
+    },
+    "info_receive_waiting_for_price" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "في انتظار سعر BTC حالي. تحتاج فاتورة الدولار الأمريكي إلى سعر حالي حتى تستلم المبلغ كاملًا."
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "বর্তমান BTC মূল্যের জন্য অপেক্ষা করা হচ্ছে। পুরো পরিমাণ পেতে USD ইনভয়েসের জন্য এটি প্রয়োজন।"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Warten auf einen aktuellen BTC-Preis. Eine USD-Rechnung braucht ihn, damit Sie den vollen Betrag erhalten."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Waiting for a current BTC price. A USD invoice needs one so you receive the full amount."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Esperando un precio de BTC actual. Una factura en USD lo necesita para que recibas el monto completo."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "En attente d'un prix du BTC à jour. Une facture en USD en a besoin pour que vous receviez le montant complet."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "मौजूदा BTC मूल्य का इंतज़ार है। USD चालान के लिए इसकी ज़रूरत होती है, ताकि आपको पूरी राशि मिले।"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "最新のBTC価格を待っています。USDインボイスで全額を受け取るには、最新の価格が必要です。"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Aguardando um preço do BTC atual. Uma fatura em USD precisa dele para que você receba o valor completo."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ожидание актуальной цены BTC. Она нужна для инвойса в USD, чтобы вы получили полную сумму."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在等待最新的 BTC 价格。美元发票需要最新价格，才能确保您收到全额。"
           }
         }
       }

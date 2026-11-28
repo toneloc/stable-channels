@@ -344,6 +344,7 @@ final class PriceOracleTests: XCTestCase {
 }
 
 /// Receive prices a USD invoice only with a fresh, trusted price, never the display price alone.
+/// The view hands its PriceService to these helpers, so they test the price the view reads.
 @MainActor
 final class ReceiveInvoicePricingTests: XCTestCase {
     /// A display price kept from earlier, with no fresh price yet.
@@ -353,38 +354,42 @@ final class ReceiveInvoicePricingTests: XCTestCase {
         return prices
     }
 
+    private func freshPrices() -> PriceService {
+        let prices = PriceService()
+        prices.setPriceForTesting(100_000)
+        return prices
+    }
+
     func testDisplayPriceAloneCannotPriceAUSDInvoice() {
         let prices = displayOnlyPrices()
-        XCTAssertEqual(prices.accountingPrice, 0)
-        XCTAssertEqual(ReceiveView.invoiceSats(usd: 100, accountingPrice: prices.accountingPrice), 0)
+        XCTAssertEqual(prices.currentPrice, 100_000)
+        XCTAssertEqual(ReceiveView.invoiceSats(usd: 100, prices: prices), 0)
     }
 
     func testNoteSaysWhyAndAsksToReconnectWhenOffline() {
         let prices = displayOnlyPrices()
-        let online = ReceiveView.priceNote(accountingPrice: prices.accountingPrice, isOnline: true)
-        let offline = ReceiveView.priceNote(accountingPrice: prices.accountingPrice, isOnline: false)
         XCTAssertEqual(
-            online,
+            ReceiveView.priceNote(prices: prices, isOnline: true),
             "Waiting for a current BTC price. A USD invoice needs one so you receive the full amount."
         )
         XCTAssertEqual(
-            offline,
+            ReceiveView.priceNote(prices: prices, isOnline: false),
             "You’re offline. A USD invoice needs a current BTC price, so reconnect to create one."
         )
     }
 
     func testFreshPricePricesTheInvoiceWithNoNote() {
-        let prices = PriceService()
-        prices.setPriceForTesting(100_000)
+        let prices = freshPrices()
         // $100 at $100,000/BTC is 100,000 sats.
-        XCTAssertEqual(ReceiveView.invoiceSats(usd: 100, accountingPrice: prices.accountingPrice), 100_000)
-        XCTAssertNil(ReceiveView.priceNote(accountingPrice: prices.accountingPrice, isOnline: true))
+        XCTAssertEqual(ReceiveView.invoiceSats(usd: 100, prices: prices), 100_000)
+        XCTAssertNil(ReceiveView.priceNote(prices: prices, isOnline: true))
     }
 
     func testHugeAmountGivesNoInvoiceInsteadOfTrapping() {
-        XCTAssertEqual(ReceiveView.invoiceSats(usd: 1e17, accountingPrice: 100_000), 0)
-        XCTAssertEqual(ReceiveView.invoiceSats(usd: .infinity, accountingPrice: 100_000), 0)
+        let prices = freshPrices()
+        XCTAssertEqual(ReceiveView.invoiceSats(usd: 1e17, prices: prices), 0)
+        XCTAssertEqual(ReceiveView.invoiceSats(usd: .infinity, prices: prices), 0)
         // Fits in UInt64 sats, but not once multiplied by 1000 for msat.
-        XCTAssertEqual(ReceiveView.invoiceSats(usd: 1.85e13, accountingPrice: 100_000), 0)
+        XCTAssertEqual(ReceiveView.invoiceSats(usd: 1.85e13, prices: prices), 0)
     }
 }
